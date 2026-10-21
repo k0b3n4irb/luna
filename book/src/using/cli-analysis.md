@@ -694,6 +694,20 @@ local (gitignored under `--out`).
 | `--out <DIR>` | `tests/roms/bench` | Output dir for `report.md`, `bugs/*`, `screenshots/*`. |
 | `-f, --frames <N>` | `600` | Frames to run per ROM. |
 | `--input <SCRIPT>` | Start-pulse | Override the default title-clearing input ([input scripts](input-scripts.md)). |
+| `--jobs <N>` | `1` | Bench up to N ROMs at once (`0` = one per CPU). Same progress lines, report and bug files, in the same order, as a serial run. |
+
+Each ROM runs alone in its own emulator, so a corpus spreads over every
+core: the 41-title local corpus takes 85 s serially and 15 s with
+`--jobs 0`.
+
+```bash
+luna bench ~/roms --jobs 0 --out /tmp/bench
+```
+
+Before a release, `tools/commercial-negative-control.sh` runs `bench` and
+the DMA oracle (`[asserts.dma] unsafe_writes = 0`, through `luna test`)
+over the same corpus. A commercial ROM was written by professionals and ran
+on real consoles, so an alarm there is almost surely luna's.
 
 ## `luna spc-dump` — export a `.spc` sound file
 

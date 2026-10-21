@@ -209,6 +209,14 @@ The version tracks luna's **user-facing contract**, not the Rust API:
   silently and only a local run catches it. That is exactly how the
   v1.12.0 prep caught three `tests/golden/smoke/` PNGs left un-anchored
   by the line-origin change.
+- **Before tagging, run the negative control too**:
+  `tools/commercial-negative-control.sh` (after
+  `cargo build --release -p luna-cli`). It runs `luna bench` and the DMA
+  oracle (`[asserts.dma] unsafe_writes = 0`) over `tests/roms/`. Every
+  title must come out ✅ and every manifest must PASS: those ROMs ran on
+  real consoles, so an alarm there is luna's to explain. When the run is
+  clean, refresh the date of `book/src/using/compatibility.md` (and its
+  table, if the titles changed).
 
 ## License
 

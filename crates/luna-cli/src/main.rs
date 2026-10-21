@@ -1280,6 +1280,11 @@ enum Command {
         /// `state --input`) applied to clear title screens.
         #[arg(long)]
         input: Option<String>,
+        /// Bench up to N ROMs at once (0 = one per CPU). Each ROM gets its
+        /// own emulator; the progress lines, the report and the bug files
+        /// are the same, in the same order, as a serial run.
+        #[arg(long, default_value_t = 1)]
+        jobs: usize,
     },
     /// Run a ROM until its music driver is playing, then export the APU
     /// state as a `.spc` sound file (SNES-SPC700 Sound File Data v0.30):
@@ -1915,6 +1920,7 @@ fn main() -> ExitCode {
             out,
             frames,
             input,
+            jobs,
         } => {
             // No `--input` keeps bench's own Start pulses.
             let script = match input.as_deref() {
@@ -1924,7 +1930,7 @@ fn main() -> ExitCode {
                 },
                 None => None,
             };
-            bench::run_bench(&dir, &out, frames, script)
+            bench::run_bench(&dir, &out, frames, script, jobs)
         }
         Command::SpcDump {
             rom,

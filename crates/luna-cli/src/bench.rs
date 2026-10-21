@@ -95,6 +95,12 @@ fn default_input() -> luna_api::InputScript {
     script
 }
 
+/// Whether a file extension names a ROM: `sfc` or `smc`, in any case
+/// (`HDMADEMO.SMC`).
+const fn is_rom_extension(ext: &str) -> bool {
+    ext.eq_ignore_ascii_case("sfc") || ext.eq_ignore_ascii_case("smc")
+}
+
 /// `lowercase-kebab` slug of a ROM filename stem, for output paths.
 fn slug(name: &str) -> String {
     let stem = Path::new(name)
@@ -251,17 +257,19 @@ fn bench_one(
         }
     }
 
-    // 🔑 firmware (informational alongside whatever else was found).
+    // 🔑 firmware outranks every other finding: the coprocessor is inert,
+    // so a hang or a black screen that follows is its consequence, not a
+    // luna defect. First, so it is the report's note for the row.
     if let Some(fw) = &info.missing_firmware {
-        findings.push(format!("missing coprocessor firmware '{fw}' (inert)"));
+        findings.insert(0, format!("missing coprocessor firmware '{fw}' (inert)"));
     }
     // Audio peak is surfaced as its own report column (silence over a 10s
     // window is common for intros), not a status-driving finding.
 
-    let status = if confirmed {
-        Status::Bug
-    } else if info.missing_firmware.is_some() {
+    let status = if info.missing_firmware.is_some() {
         Status::NeedsFirmware
+    } else if confirmed {
+        Status::Bug
     } else if static_fb || blank {
         Status::Suspect
     } else {
@@ -321,6 +329,7 @@ pub(crate) fn run_bench(
     out: &Path,
     frames: u64,
     input: Option<luna_api::InputScript>,
+    jobs: usize,
 ) -> ExitCode {
     let input = input.unwrap_or_else(default_input);
 
@@ -328,7 +337,11 @@ pub(crate) fn run_bench(
         Ok(rd) => rd
             .filter_map(Result::ok)
             .map(|e| e.path())
-            .filter(|p| matches!(p.extension().and_then(|e| e.to_str()), Some("sfc" | "smc")))
+            .filter(|p| {
+                p.extension()
+                    .and_then(|e| e.to_str())
+                    .is_some_and(is_rom_extension)
+            })
             .collect(),
         Err(e) => {
             eprintln!("error: reading {}: {e}", dir.display());
@@ -352,18 +365,12 @@ pub(crate) fn run_bench(
         }
     }
 
-    let mut results = Vec::with_capacity(roms.len());
-    for (i, rom) in roms.iter().enumerate() {
-        let r = bench_one(rom, frames, &input, &screens_dir);
-        println!(
-            "[{}/{}] {:<11} {}",
-            i + 1,
-            roms.len(),
-            r.status.icon(),
-            r.name
-        );
-        results.push(r);
-    }
+    let results = bench_all(
+        &roms,
+        jobs,
+        |rom| bench_one(rom, frames, &input, &screens_dir),
+        |n, r| println!("[{n}/{}] {:<11} {}", roms.len(), r.status.icon(), r.name),
+    );
 
     write_reports(out, &bugs_dir, dir, frames, &results);
     let count = |s: Status| results.iter().filter(|r| r.status == s).count();
@@ -376,6 +383,51 @@ pub(crate) fn run_bench(
         count(Status::NeedsFirmware),
     );
     ExitCode::SUCCESS
+}
+
+/// Bench every ROM, `jobs` at a time (0 = one per CPU), and hand each
+/// result to `progress` (with its 1-based position) in ROM order, as soon as
+/// every ROM before it is done — so the output and the report do not depend
+/// on `jobs`.
+fn bench_all<T: Send>(
+    roms: &[PathBuf],
+    jobs: usize,
+    bench: impl Fn(&Path) -> T + Sync,
+    progress: impl Fn(usize, &T) + Sync,
+) -> Vec<T> {
+    let jobs = match jobs {
+        0 => std::thread::available_parallelism().map_or(1, std::num::NonZero::get),
+        n => n,
+    }
+    .min(roms.len())
+    .max(1);
+    // Finished results, and how many of them have been reported.
+    let done = std::sync::Mutex::new((0usize, Vec::<Option<T>>::new()));
+    if let Ok(mut d) = done.lock() {
+        d.1.resize_with(roms.len(), || None);
+    }
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    std::thread::scope(|scope| {
+        for _ in 0..jobs {
+            scope.spawn(|| {
+                loop {
+                    let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some(rom) = roms.get(i) else { break };
+                    let r = bench(rom);
+                    let Ok(mut d) = done.lock() else { break };
+                    let (reported, slots) = &mut *d;
+                    slots[i] = Some(r);
+                    while let Some(Some(r)) = slots.get(*reported) {
+                        *reported += 1;
+                        progress(*reported, r);
+                    }
+                }
+            });
+        }
+    });
+    done.into_inner()
+        .map(|(_, slots)| slots.into_iter().flatten().collect())
+        .unwrap_or_default()
 }
 
 /// Write `report.md` + per-bug/suspect markdown files.
@@ -489,5 +541,43 @@ fn write_reports(out: &Path, bugs_dir: &Path, rom_dir: &Path, frames: u64, resul
             );
         }
         let _ = std::fs::write(bugs_dir.join(format!("{}.md", r.slug)), b);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rom_extensions_match_in_any_case() {
+        for ext in ["sfc", "smc", "SMC", "Sfc"] {
+            assert!(is_rom_extension(ext), "{ext}");
+        }
+        for ext in ["srm", "rom", "sfcx", ""] {
+            assert!(!is_rom_extension(ext), "{ext}");
+        }
+    }
+
+    /// `--jobs` must not change the output: whichever ROM finishes first,
+    /// progress is reported in ROM order, each position once, and the
+    /// results come back in ROM order.
+    #[test]
+    fn bench_all_reports_in_rom_order_whatever_finishes_first() {
+        let roms: Vec<PathBuf> = (0..8).map(|i| PathBuf::from(format!("{i}"))).collect();
+        // Earlier ROMs take longer, so they finish last.
+        let bench = |p: &Path| {
+            let i: u64 = p.to_str().and_then(|s| s.parse().ok()).unwrap_or(0);
+            std::thread::sleep(std::time::Duration::from_millis((8 - i) * 5));
+            i
+        };
+        for jobs in [1, 3, 0] {
+            let seen = std::sync::Mutex::new(Vec::new());
+            let out = bench_all(&roms, jobs, bench, |n, r| {
+                seen.lock().unwrap().push((n, *r));
+            });
+            assert_eq!(out, (0..8).collect::<Vec<_>>(), "jobs = {jobs}");
+            let expected: Vec<_> = (1..=8).zip(0..8).collect();
+            assert_eq!(seen.into_inner().unwrap(), expected, "jobs = {jobs}");
+        }
     }
 }

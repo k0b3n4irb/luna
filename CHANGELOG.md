@@ -136,6 +136,18 @@ fast-forwarded to (binaries attached by CI). Format inspired by
   `set_write_freeze`, `write_freezes`, `write_frozen`; MCP:
   `freeze_writes`, `frozen_writes`. `freeze_add` still writes its value
   back every frame.
+- **`luna bench --jobs N`: the corpus in parallel.** Up to N ROMs at once
+  (0 = one per CPU), each in its own emulator; the progress lines, the
+  report and the bug files are the same, in the same order, as a serial
+  run. The 41-title local corpus goes from 85 s to 15 s. Asked for by
+  OpenSNES, whose `luna test --jobs 0` already ran the same corpus in 14 s.
+- **`tools/commercial-negative-control.sh`, before every release.** Runs
+  `luna bench` and the DMA oracle (`[asserts.dma] unsafe_writes = 0`) over
+  the local commercial corpus: ROMs written by professionals, so an alarm
+  there is almost surely luna's. `profile --budget` is left out on
+  purpose, since commercial games really do lag. Proposed by OpenSNES, who
+  lean on the same control to tell a luna false positive from an SDK
+  defect.
 
 ### Changed
 
@@ -153,6 +165,15 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 - `absolute_address` of a register address (`$00:2100`, `$80:4300`…) is
   now `{kind: "SnesRegister", offset}` instead of `null`, so an
   expression's `:` and a watch's `memaddress` give the register.
+- **`luna bench`: a missing firmware is the verdict, 🔑, whatever the CPU
+  does next.** A DSP-1 title without `dsp1b.rom` used to come out ❌ bug,
+  since its inert chip leaves the CPU looping on a black screen; that
+  loop is the consequence, not a luna defect, so a gate refusing only ❌
+  could not tell "the CI lacks the chip" apart. The firmware line now
+  heads the findings. Reported by OpenSNES (their nightly bench, run
+  39567752990, `dsp1_ground.sfc`).
+- **`luna bench` takes `.SFC` / `.SMC` too**: the extension match ignores
+  case, as `luna test` already accepted a manifest naming such a file.
 
 ## [1.39.0] — 2026-10-18
 
