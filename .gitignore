@@ -46,3 +46,6 @@ book/book/
 # Python bytecode (tools/*.py)
 __pycache__/
 *.pyc
+
+# One-off benches and oracles: never committed.
+crates/*/tests/scratch_*.rs
