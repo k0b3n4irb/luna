@@ -7,6 +7,20 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ## [Unreleased]
 
+## [1.41.0] — 2026-10-24
+
+The GUI gets Mesen2's Memory Tools and Memory Search windows, which
+close the memory lot of the Mesen2 parity roadmap (D3). The guide had a
+full pass against the code: the pages that described the SA-1, the
+PPU's sprite fetch, the SPC700 clocking or the MCP results as they were
+before earlier fixes now say what luna does.
+
+**Upgrading from 1.40.0:**
+
+- **Save states stay at version 9:** a state saved by 1.40.0 loads.
+- **Nothing changes on the command line or in MCP:** a script or a
+  manifest that ran on 1.40.0 runs unchanged.
+
 ### Added
 
 - **GUI: Memory Tools and Memory Search windows, Mesen2's.** *Debug →
@@ -20,6 +34,19 @@ fast-forwarded to (binaries attached by CI). Format inspired by
   API: `memory_view`, `memory_tooltip`, `memory_find`,
   `memory_navigate`, `memory_edit` / `memory_undo`, `memory_import`,
   `memory_dump_name`, `memory_behind`, `bus_address`, `TextTable`.
+
+### Fixed
+
+- **Documentation, checked against the code.** The MCP page gave the
+  wrong shape for `run_until_break`, `take_wdm_log` and `memory_kinds`;
+  the state JSON page missed `layers`, `labels_loaded`, `cgram` peeks,
+  `until_pc.matches` and the `cpu` keys; the `luna test` JSON report has
+  five counters, not four; `--dma-trace` has no `hclock` column. The
+  subsystem pages (PPU, APU, SA-1, Super FX, S-DD1) and the accuracy and
+  determinism pages were brought to the code.
+- **`luna test --help`** says what `--update` rewrites (the checkpoints'
+  `fbhash` and the memory blocks too), and the `--peek` `space` of
+  `luna state --schema` lists `vram` and `cgram`.
 
 ## [1.40.0] — 2026-10-21
 
