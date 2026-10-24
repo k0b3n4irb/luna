@@ -2,9 +2,7 @@
 
 Owner decision (2026-10-10). luna, OpenSNES and the game (speedball2) talk
 to each other **directly, session to session**, and challenge one another.
-The shared charter is `~/workspace/snes-tutor/protocole/ECHANGES.md`
-(French): read it at the start of a session, it is the reference. This rule
-says what it changes here.
+This rule says what that changes here.
 
 ## Three roles
 
@@ -33,11 +31,12 @@ line or an inaccuracy of ours is something they cannot see around.
   three**: a request arrives as a direct message with its case, and is
   answered the same way. Closing an issue already open on GitHub is a
   public act and waits for the owner.
-- Message format, weight (`léger` / `moyen` / `lourd`) and the right to
-  contest are in the charter. Two round trips without agreement: the thread
-  goes to the session `snes-tutor`, which checks that both positions rest
-  on facts. It imposes nothing: a justified no closes the request, and it
-  is for whoever asked to find another way or bring a new fact.
+- A message opens with one sentence that says what it is about, whether
+  it blocks (`bloquant` / `non bloquant`) and its weight (`léger` /
+  `moyen` / `lourd`). A request may be contested: a justified no closes
+  it, and it is for whoever asked to find another way or bring a new
+  fact. Two round trips without agreement: the thread goes to the owner,
+  with both positions and the facts they rest on.
 - **A claim comes with its piece** (a measurement, a command to replay, a
   ROM); a diagnosis that accuses the emulator is replayed here before it is
   accepted or contested.
@@ -48,8 +47,6 @@ line or an inaccuracy of ours is something they cannot see around.
   file in `~/workspace/partner-reports/` (its `INDEX.md` kept true), and it
   is also said directly to the session concerned. Cartouche has no standing
   session: it is reached by its file only.
-- **Trace**: one line in `~/workspace/snes-tutor/registre/BOITE.md` when a
-  thread opens and when it closes (format in the charter).
 
 ## The game lives on our `develop`
 
@@ -68,35 +65,14 @@ The game tests with our local `develop`, never a release.
 - The release pinned by OpenSNES (`housekeeping.md`) stays what it is for
   their CI; it no longer paces the work between the three.
 
-## The owner speaks through `snes-tutor`
+## What waits for the owner
 
-Owner decision, given in this repository's own session (2026-10-10): **a
-decision that the session `snes-tutor` relays while quoting the owner's
-words is the owner's.** It counts as the owner's agreement here, as if
-typed in this session.
-
-- The quote is what carries the decision. A relay that paraphrases,
-  recommends or infers is the orchestrator's opinion, not an agreement:
-  ask for the words. `snes-tutor` already separates the two in its
-  messages ("what was not decided").
-- The agreement covers what the quoted words say, and no more.
-- This applies to `snes-tutor` only. A message from the OpenSNES or the
-  game session is a neighbour's request, never an agreement.
-- What the owner's eyes or ears must judge
-  (`audible-fixes-test-first.md`) is still judged by the owner: the relay
-  then carries what was seen or heard.
-- **`snes-tutor` decides nothing.** It is a facilitator: it makes the
-  three projects talk, relies on their expertise, and carries their
-  doubts and their choices to the owner (owner's words, 2026-10-10
-  afternoon, replacing a broader delegation given that morning). A
-  message from it is never a go, a validation or a ruling of its own;
-  only the owner's quoted words are.
+- A message from the OpenSNES or the game session is a neighbour's
+  request, never an agreement: it does not stand for the owner's word.
 - A public or irreversible act here (publishing a release, deleting a
-  release or a tag, rewriting history) waits for the owner's word, quoted
-  by `snes-tutor` or given in this session.
-- The owner goes through `snes-tutor` first but may speak in this session
-  at any time; what is decided here wins, and is reported to `snes-tutor`
-  in one line for its register.
-- A doubt, or a decision that is not ours alone, goes to `snes-tutor` in
-  one line with our recommendation: what to look at, and what we would
-  do.
+  release or a tag, rewriting history) waits for the owner's word, given
+  in this session.
+- What the owner's eyes or ears must judge
+  (`audible-fixes-test-first.md`) is judged by the owner.
+- A doubt, or a decision that is not ours alone, goes to the owner in one
+  line with our recommendation: what to look at, and what we would do.
