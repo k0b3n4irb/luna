@@ -277,8 +277,8 @@ UPDATED blk
 1 passed, 1 updated, 0 failed, 0 skipped, 2 total
 ```
 
-With `--report json` the report gains `updated` (the count, and per test
-the same lines). The exit code of an `--update` run is 0, as before.
+With `--report json` the report's `updated` (always present: the count,
+and per test the same lines) is filled in. The exit code of an `--update` run is 0, as before.
 
 To see the bytes without rewriting anything, `--report json` gives each
 mismatched block whole, next to the `failures` sentences:
@@ -441,7 +441,7 @@ routine not reached by `frames` fails its checkpoint (`not reached by
 frame 600 (reached 97 time(s))`) and its asserts are not evaluated.
 `at_symbol` checkpoints need `frames`; they mix with `at_frame` ones, in
 the order the run meets them. `--report json` lists where each fired, as
-`symbol_checkpoints: [{at_symbol, hit, reached, frame, line}]` — the
+`symbol_checkpoints: [{at_symbol, hit, until_if?, arrival, reached, frame, line}]` — the
 answer to "does this routine still start inside VBlank".
 
 ## More asserts and inputs
@@ -655,9 +655,12 @@ jobs:
 ```
 
 `--report json` appends a machine-readable summary to stdout, after the
-`PASS` / `FAIL` lines, for dashboards or PR comments: the four counters,
-then one object per test (pass/fail, failure details, measured `fbhash`,
-the `manifest` path, and `skipped` — the skip reason, or `null`). Each
+`PASS` / `FAIL` lines, for dashboards or PR comments: the five counters
+(`passed`, `failed`, `updated`, `skipped`, `total`), then one object per
+test (pass/fail, failure details, measured `fbhash`, the `manifest` path,
+`skipped` — the skip reason, or `null` — and `updated`,
+`block_mismatches`, `symbol_checkpoints`, `checkpoint_fbhashes`, empty
+when they do not apply). Each
 test also carries the machine it ran on — `"power_on":
 "random", "seed": 12345` (a deterministic run reports `"zero"` / `"ones"`
 with `"seed": null`) — so a red `random` run is reproducible from the
@@ -666,11 +669,12 @@ cartridge header decided):
 
 ```json
 {
-  "passed": 0, "failed": 1, "skipped": 0, "total": 1,
+  "passed": 0, "failed": 1, "updated": 0, "skipped": 0, "total": 1,
   "tests": [
     { "name": "boot", "manifest": "tests/boot.toml", "passed": false,
-      "skipped": null, "failures": ["…"], "fbhash": "…",
-      "power_on": "random", "seed": 12345, "region": "pal" }
+      "skipped": null, "failures": ["…"], "updated": [], "fbhash": "…",
+      "block_mismatches": [], "power_on": "random", "seed": 12345,
+      "region": "pal", "symbol_checkpoints": [], "checkpoint_fbhashes": [] }
   ]
 }
 ```

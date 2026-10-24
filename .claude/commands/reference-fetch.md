@@ -24,8 +24,12 @@ both reference emulators into `/tmp/` so they can be diffed and read.
 ## Workflow
 
 1. Create `/tmp/ares/<subsys>/` and `/tmp/mesen2/<subsys>/`.
-2. Discover the ares file list via the GitHub API:
-   `gh api repos/ares-emulator/ares/contents/ares/sfc/<subsys> --jq '.[].name'`.
+2. Discover the ares file list of each directory the table names
+   (not `ares/sfc/<subsys>`: `superfx`, `dsp1`, `sdd1` and `dma` live
+   elsewhere) via the GitHub API:
+   `gh api repos/ares-emulator/ares/contents/<ares dir> --jq '.[].name'`
+   (unauthenticated `curl -s https://api.github.com/repos/ares-emulator/ares/contents/<ares dir>`
+   works too).
 3. `curl -s` each file into the local directory.
 4. Repeat for Mesen2.
 5. Print a one-line summary per file: name + line count + 1-line purpose

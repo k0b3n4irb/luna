@@ -55,13 +55,13 @@ lands it.
 | D2e | Workspace per ROM (labels, breakpoints, watches, window settings), shared by the GUI and the MCP | ✅ |
 | D2c | Panes' content in `luna-api`: watch formats, Go To, Go To All, Find, Find All Occurrences, function list, label list, call stack rows | ✅ |
 | D2b | Code listing, Mesen2's Disassembly pane: whole address space, blocks, labels, comments, function separators, effective address and value from the live registers; MCP `listing` | ✅ |
-| D2 | Debugger window per CPU (disassembly with labels, comments, effective addresses; editable status; breakpoint, watch, label, function, call-stack lists; go to / find all); labels and comments in `.mlb`, ca65 `.dbg`, bass, SDCC `.cdb`, ELF; default register labels; workspace per ROM | ⬜ |
+| D2 | Debugger window per CPU (disassembly with labels, comments, effective addresses; editable status; breakpoint, watch, label, function, call-stack lists; go to / find all); labels and comments in `.mlb`, ca65 `.dbg`, bass; default register labels; workspace per ROM. Done for the 65C816 and the SPC700 (D2a-D2g); left: the SA-1, Super FX and DSP-1 windows | 🟡 |
 | D3a | Per-byte access counters (reads, writes, code reads, last master clock) on the byte behind each address: 65C816, DMA / HDMA on both buses, PPU ports, SPC700; API and MCP. Measured equal to Mesen2's byte counts on a commercial title at frame 120. The coprocessors' own accesses are not counted yet | ✅ |
 | D3b | Freeze, Mesen2's: a write through a frozen CPU or SPC700 address is dropped (CPU and DMA A-bus writes, register side effects included; ARAM unchanged on the SPC700), a debugger's write still lands; API and MCP | ✅ |
 | D3c | Memory Search in the API and the MCP: any memory, 8 / 16 / 32-bit signed or not, against the previous search, the previous refresh, a value or an address, six operators, undo without limit, a live *Match* preview, counters per row | ✅ |
 | D3 | Per-byte access counters; Memory Tools (every memory, edit, highlight by access / code / data, freeze, find, `.tbl`); Memory Search on every memory | ⬜ |
 | D4 | Trace logger (per CPU, Mesen2's format tags, condition, to file); profiler with calls and inclusive / exclusive time; Event Viewer completed and exposed to MCP and CLI | ⬜ |
-| D5 | Code/Data Logger (`.cdl` compatible with Mesen2), function list; Tile, Tilemap (main / sub screen), Sprite and Palette viewers; Tile Editor; decoded Register Viewer | ⬜ |
+| D5 | Code/Data Logger (`.cdl` compatible with Mesen2) (the function list landed with D2c); Tile, Tilemap (main / sub screen), Sprite and Palette viewers; Tile Editor; decoded Register Viewer | ⬜ |
 | D6 | Rewind in `luna-api`; step back by instruction, scanline, frame | ⬜ |
 | D7 | 65C816 assembler, ROM / IPS save; Lua with Mesen2's `emu.*` API (`mlua`), script window, `luna script` | ⬜ |
 
@@ -70,7 +70,8 @@ lands it.
 | Lot | Feature | State |
 |---|---|---|
 | C1 | Video Size, Aspect Ratio, Video Filter: Prescale, Scale2x-4x, LCD Grid, xBRZ, 2xSaI family, NTSC (blargg), HQx — each Mesen2's picture to the pixel | ✅ |
-| C1 | NTSC options panel and presets; scanlines; picture settings; overscan; integer fullscreen scaling; rotation; hide BG layers / sprites; hi-res blend; native 512-wide picture to the filters; OSD (frame, lag, timer, input display) | ⬜ |
+| C1 | Hi-res frames shown, filtered and captured whole on their 512 columns (`6e37474`, v1.40.0) | ✅ |
+| C1 | NTSC options panel and presets; scanlines; picture settings; overscan; integer fullscreen scaling; rotation; hide BG layers / sprites; hi-res blend; OSD (frame, lag, timer, input display) | ⬜ |
 | C2 | Audio: 32 040 Hz; per-voice volume; interpolation choice; equaliser, reverb, crossfeed; device, latency, rate; WAV recorder; SPC player | ⬜ |
 | C3 | Video recording from the GUI | ⬜ |
 | C4 | Theme, recent files, game selection screen, pause in background, confirmations, folders, full shortcut set, zip / 7z, IPS / BPS / UPS, settings overrides on the command line | ⬜ |

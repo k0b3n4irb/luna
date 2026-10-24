@@ -312,6 +312,12 @@ the overlay. Channel = `evt.DmaChannel & 7`.
 
 ## F) Suggested staged port plan for luna
 
+> **Landed.** The Event Viewer exists: the policy in
+> `crates/luna-api/src/event_viewer.rs`, the window in
+> `crates/luna-gui/src/ui/event_viewer.rs`. Its completion and its MCP / CLI
+> exposure are row D4 of `docs/mesen2_parity.md`. The plan below is the
+> record of how it was staged.
+
 Order chosen so each stage is independently testable and matches luna's
 API-first rule (everything flows through `luna-api`, the GUI consumes it).
 

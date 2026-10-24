@@ -26,7 +26,8 @@ use crate::rom::load_rom_into;
 struct PeekOut {
     /// The `--peek` spec verbatim.
     spec: String,
-    /// `"cpu"` (24-bit bus) or `"aram"` (16-bit SPC700 offset).
+    /// `"cpu"` (24-bit bus), `"aram"` (16-bit SPC700 offset), `"vram"`
+    /// (word address) or `"cgram"` (colour index).
     space: &'static str,
     /// Resolved start address (`bank << 16 | offset` for cpu).
     addr: u32,

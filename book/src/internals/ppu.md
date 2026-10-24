@@ -240,8 +240,9 @@ setFirstSprite();                       // refresh OAM-priority rotation
 luna implements the even-byte latch correctly. luna does not maintain a
 *cached* firstSprite refreshed on every `$2104` write the way the hardware
 reference's `setFirstSprite()` does; instead it derives it on demand each
-scanline from the priority-rotation flag and the `$2103` word address,
-returning `(word_address >> 2) & 0x7F` when priority rotation is on, else
+scanline from the priority-rotation flag and the live internal byte
+address, returning `(byte_address >> 2) & 0x7F` (that is `word >> 1`:
+sprite `n` occupies words `2n..2n+1`) when priority rotation is on, else
 0. Same observable result; the firstSprite index is just recomputed lazily
 rather than stamped per write.
 
@@ -251,13 +252,13 @@ The hardware double-buffers the per-line tile cache: `active ^= 1` at start of e
 
 luna decodes the sprite set **once per scanline** and shares it across the
 whole line: it evaluates sprites once and threads the decode into the
-per-pixel compositor, so per-pixel composition does not re-walk OAM. What
-luna does NOT do is the cross-scanline
-double-buffer (fetch line N's tiles while running line N-1); it evaluates
-the current line's sprites against live OAM at the start of that line. The
-practical effect is the same for static OAM; only a game that rewrites OAM
-mid-scanline expecting the previous line's fetched tiles to already be
-latched would differ — and no commercial title in the corpus relies on it.
+per-pixel compositor, so per-pixel composition does not re-walk OAM. The
+one-line fetch-ahead is modelled too: `render_scanline_partial_into_from`
+and `Ppu::ensure_line_sprites` evaluate the object line as `y - 1` while
+the backgrounds keep line `y`, and PPU line 0 evaluates nothing, as ares
+does (obj gap #7, fixed 2026-09-12). Before that fix every sprite was drawn
+one row too high, and a sprite parked at `Y = 224` leaked its top row onto
+the last visible row.
 
 ---
 
@@ -394,19 +395,18 @@ The hardware enforces:
 - CGRAM write during active display lands at `latch.cgramAddress` (the address-mux updated by the DAC per pixel), not the address the game programmed.
 - OAM read/write during active display routes through `latch.oamAddress` (updated by the OBJ evaluator).
 
-luna implements the VRAM and OAM gates: it tracks an `active_display` flag
-(true when not forced-blank AND on a visible scanline) and routes the data
-ports through gated writers for VRAM and OAM. When `active_display` is true
-the byte is dropped but the address counter (and OAM even/odd latch) still
-advance, matching the hardware reference.
+luna implements all three. It tracks an `active_display` flag (true when
+not forced-blank AND on a visible scanline):
 
-CGRAM is **deliberately ungated**: on real hardware an active-display CGRAM
-write still commits, just at the
-DAC's `latch.cgramAddress` rather than the programmed address. luna commits
-at the programmed address — it does not yet model the per-pixel
-address-mux, so the *value* lands but at the wrong slot only in the rare
-case a game writes CGRAM mid-active-line. This is the one remaining
-sub-quirk; the blanket "implements none of these gates" was stale.
+- **VRAM**: the gated writer drops the byte while `active_display` is
+  true, but the address counter still advances.
+- **OAM**: `$2104` / `$2138` land at the sprite being evaluated,
+  `Ppu::obj_eval_latch` (ares `io.cpp:31-45`; obj gap #8, fixed
+  2026-09-12).
+- **CGRAM**: `Ppu::cgram_access_redirect` sends an access made while the
+  picture is drawn (dots 22..274 of a visible line) to the DAC's latched
+  address instead of the programmed one (ares `io.cpp:47-61`), using the
+  real beam dot.
 
 ---
 

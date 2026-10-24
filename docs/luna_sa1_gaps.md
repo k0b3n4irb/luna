@@ -8,8 +8,9 @@ frozen in [`archive/sa1_status.md`](archive/sa1_status.md); the rationale for
 the deliberate CIWP/SIWP `0xFF` deviation it used to hold now lives **here**
 (row #3 below).
 
-> **Status 2026-10-04:** rows #1 and #5-#19 are done. **Open:** #2, #3, #4
-> and #20 — see "⚠️ Open divergences" below.
+> **Status 2026-10-24:** rows #1 and #5-#20 are done (#20 on 2026-10-08);
+> #21 is a deliberate, documented choice. **Open:** #2, #3, #4 — see
+> "⚠️ Open divergences" below.
 
 Scope: the register I/O + math unit + DMA/MMC in
 `crates/luna-bus/src/sa1.rs` and the chip-side state in
@@ -108,7 +109,7 @@ The IRQ-vs-PPU-scanline *alignment* is as accurate as luna's SA-1
 stepping cadence (master-clock-driven; exact dot precision is bounded by
 the batched scheduler grain, the residual named at the end of this
 document) — and the timer fires and games using HV-mode raster timing are no
-longer dead. **Open:** the V wrap is fixed at the NTSC line count — row #20.
+longer dead. The V wrap follows the region (262 / 312 lines) since 2026-10-08 — row #20.
 
 **No regression risk for SMRPG:** it writes TMC once (`= $00`, timer
 off) and never touches `$2211-$2215`; smoke is byte-identical to the

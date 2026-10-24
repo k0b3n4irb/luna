@@ -178,8 +178,9 @@ enum Command {
         /// Manifest files, or directories scanned recursively for
         /// `*.toml`. Defaults to `./tests`.
         paths: Vec<std::path::PathBuf>,
-        /// Rewrite each manifest's `asserts.fbhash` with the measured
-        /// value (regenerate goldens after an intended render change).
+        /// Rewrite each manifest's `asserts.fbhash`, the checkpoints'
+        /// `fbhash` and the memory blocks that did not match with the
+        /// measured values (regenerate goldens after an intended change).
         /// Formatting and comments are preserved.
         #[arg(long)]
         update: bool,

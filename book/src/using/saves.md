@@ -36,7 +36,7 @@ The GUI writes to two fixed folders, whatever directory it was started from:
 | Save-state slots (`<rom-slug>.slot<N>.luna`) | `~/.local/luna/states/` | `%APPDATA%\luna\states\` |
 | Screenshots (`<rom>_NNN.png`) | `~/.local/luna/screenshots/` | `%APPDATA%\luna\screenshots\` |
 | Input recordings (`<rom>_NNN.input`) | `~/.local/luna/recordings/` | `%APPDATA%\luna\recordings\` |
-| Settings: `input.json` (pad bindings), `hotkeys.json`, `audio.json`, `last_rom_dir` | `~/.config/luna/` | `%APPDATA%\luna\` |
+| Settings: `input.json` (pad bindings), `hotkeys.json`, `audio.json`, `video.json`, `last_rom_dir`, and `debugger/` (one workspace per ROM: labels, breakpoints, watches, window settings) | `~/.config/luna/` | `%APPDATA%\luna\` |
 
 On Linux and macOS the settings folder follows `$XDG_CONFIG_HOME` when it is
 set (`$XDG_CONFIG_HOME/luna/`); the three other folders do not. For example,

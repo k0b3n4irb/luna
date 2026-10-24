@@ -84,13 +84,14 @@ the chip clears r4801.bit(n) and re-arms `dmaReady` when size hits 0.
 ### luna integration note (this is where luna differs from the canonical hardware structure)
 
 In luna, `$4300-437F` writes go to the **DMA controller**, not the mapper, and
-the mapper's read path serves both CPU reads and DMA A-bus reads. So to port
-the reference faithfully, luna must **forward `$43xx` writes to the S-DD1
-mapper** (in addition to the DMA controller) so it can capture each channel's
-DMA address and size. `$4800-480F` already reaches the mapper (CPU
-fall-through). Then the armed-DMA read logic ports verbatim: a mapper read at
-`addr` that matches a channel's DMA address, with `r4800 & r4801` armed,
-triggers decompression.
+the mapper's read path serves both CPU reads and DMA A-bus reads. So luna
+**forwards `$43xx` writes to the mapper** as well as the DMA controller
+(`crates/luna-core/src/snes.rs`), and the S-DD1 captures each channel's DMA
+address and size from them; other mappers ignore those writes. `$4800-480F`
+reaches the mapper by the CPU fall-through. The armed-DMA read logic is then
+the reference's, verbatim: a mapper read at `addr` that matches a channel's
+DMA address, with `r4800 & r4801` armed, triggers decompression (test
+`mapper_dma_decompression_arms_streams_and_disarms`).
 
 Detection: chipset byte `$FFD6` — `(chipset & 0x0F) >= 0x03 && (chipset & 0xF0)
 == 0x40` (S-DD1 = coprocessor high-nibble **4**; cf. SuperFX=1, DSP=0, SA-1=3).
@@ -210,7 +211,11 @@ Mode summary (header bits 7:6): `0x00/0x40/0x80` = 2-plane (2/4 bpp gfx), `0xC0`
 
 ---
 
-## 4. luna porting plan (stages)
+## 4. How the port was staged
+
+All four stages have landed (`Sdd1Decompressor` and `Sdd1Mapper` in
+`crates/luna-bus/src/sdd1.rs`); Star Ocean and Street Fighter Alpha 2 play.
+The plan is kept as the record of how the port was staged.
 
 1. **Pure `Sdd1Decompressor`** (luna-bus, new file): IM/GCD/BG/PEM/CM/OL + the two
    verbatim tables, reading input via a `&[u8] + offset` (or a closure). Unit-test

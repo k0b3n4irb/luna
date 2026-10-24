@@ -13,7 +13,8 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
 `--all-features` is what catches lints in conditional code paths
-(today the workspace has one feature, `luna-bus`'s `test-utils`). Since 2026-07 the CI clippy
+(today the workspace has three: `luna-bus`'s `test-utils`, and
+`atomic-oracle` in `luna-apu` and `luna-cpu-spc700`). Since 2026-07 the CI clippy
 job runs this exact form too (`ci.yml`), so the local and CI gates are
 identical — run it locally before committing and CI will never
 surprise you.

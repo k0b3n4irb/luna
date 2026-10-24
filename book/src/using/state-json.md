@@ -4,8 +4,8 @@
 
 | Field | Contents |
 |---|---|
-| `rom` | `RomInfo`: `title`, `mapper`, `rom_bytes`, `header_rom_size_kb`, `sram_kb`, `region`, `fast_rom`, `version`, `checksum{,_complement,_valid,_computed}` (`checksum_valid` only says the header pair is consistent; `checksum == checksum_computed` says the header matches the ROM bytes: `luna state game.sfc --until-frame 0 --out - \| jq '.rom \| .checksum == .checksum_computed'`), `missing_firmware`, `board_note` (set when the header describes a cartridge no known board carries — a DSP-1 LoROM over 1 MB without save RAM — with what luna does about it; the CLI prints it as a warning at load), and `symbols_loaded` / `symbols_error` (how many labels the `.sym` gave, or why it could not be read). |
-| `cpu` | 65c816 registers `a/x/y/sp/pc/pb/db/dp/p` + flags. |
+| `rom` | `RomInfo`: `title`, `mapper`, `rom_bytes`, `header_rom_size_kb`, `sram_kb`, `region`, `fast_rom`, `version`, `checksum{,_complement,_valid,_computed}` (`checksum_valid` only says the header pair is consistent; `checksum == checksum_computed` says the header matches the ROM bytes: `luna state game.sfc --until-frame 0 --out - \| jq '.rom \| .checksum == .checksum_computed'`), `missing_firmware`, `board_note` (set when the header describes a cartridge no known board carries — a DSP-1 LoROM over 1 MB without save RAM — with what luna does about it; the CLI prints it as a warning at load), `symbols_loaded` / `symbols_error` (how many labels the `.sym` gave, or why it could not be read), and `labels_loaded` / `labels_error` (what the label file next to the ROM — ca65 `.dbg`, bass `.sym`, Mesen2 `.mlb` — brought in, or why it could not be read). |
+| `cpu` | 65c816 registers `a/x/y/sp/pc/pb/db/dp/p`, the emulation flag `e`, `stopped` (`STP`) / `waiting` (`WAI`), and `sp_min` (the lowest stack pointer a native-mode push reached). |
 | `cpu_regs` | Decoded MMIO/CPU register block. |
 | `ppu` | PPU registers + VRAM/CGRAM/OAM occupancy. `rendering` is `false` when the run left the picture uncomputed (`--no-render`). |
 | `scheduler` | Master-clock / line / frame scheduler state: `frame_count`, `ppu_line`, `nmis_serviced`, `last_nmi_frame` (see below), … |
@@ -13,8 +13,9 @@
 | `dma` | `mdmaen` / `hdmaen` (the `$420B` / `$420C` enable masks) and the per-channel DMA/HDMA registers (see below). |
 | `stats` | Cumulative counters since reset: `instructions_executed`, `instructions_active`, `total_mclk`, and `total_mclk` split by consumer — `mclk` (cumulative) and `last_frame` (the last completed PPU frame), each `{cpu_active, cpu_wai, cpu_stp, dma, hdma, refresh, total}`. See below. |
 | `sa1`, `gsu`, `dsp1`, `call_stack` | Coprocessor blocks — SA-1, Super FX, DSP-1 (present when the cart has one; `gsu` is described under *Who owns the cartridge*) — and the `--call-stack` capture. |
-| `peeks` | One entry per `--peek`, in order: `{spec, space: "cpu"\|"aram"\|"vram", addr, bytes_hex, unmapped?, error?}`. Always present (empty without `--peek`); a failed peek keeps its slot with an `error` string instead of vanishing; `unmapped` appears only when part of the range is open bus. |
-| `until_pc` | Only with `--until-pc`: `{spec, addr, hit, hits_seen, reached, frame?, line?}` — where the run stopped, or `reached: false` when the bound came first. |
+| `peeks` | One entry per `--peek`, in order: `{spec, space: "cpu"\|"aram"\|"vram"\|"cgram", addr, bytes_hex, unmapped?, error?}`. Always present (empty without `--peek`); a failed peek keeps its slot with an `error` string instead of vanishing; `unmapped` appears only when part of the range is open bus. |
+| `until_pc` | Only with `--until-pc`: `{spec, addr, hit, until_if?, matches, hits_seen, reached, frame?, line?}` (`matches` counts the arrivals where `--until-if` held, every arrival without it) — where the run stopped, or `reached: false` when the bound came first. |
+| `layers` | Only with `--layer-shots`: `{written, overlaps}` — the layer pictures written (see [`--layer-shots`](cli-run-state.md#each-layer-alone---layer-shots)). |
 | `vram_writers` | Only with `--vram-writers`: `{from_frame, rows, overlaps}` — `rows` are `{first_word, last_word, bytes, source, how, first_frame, last_frame}`, `overlaps` are `{first_word, last_word, words, first, first_frame, then, then_frame}`. |
 | `pokes` | Only with `--poke-at`: one `{spec, addr, hit, hits_seen, applied}` per `--poke-at`, in command-line order — whether its bytes were written. |
 | `poke` | Only with `--poke-at`: the first entry of `pokes`, kept for scripts written when the option could be given once. |

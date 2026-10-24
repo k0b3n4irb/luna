@@ -7,7 +7,7 @@ auto-read latch `$4218/$4219` for JOY1 and `$421A/$421B` for JOY2). The SNES
 under **Settings → Devices** in the GUI (the host mouse cursor and buttons
 drive them), or from the CLI with `--port1`/`--port2` plus scripted
 `--mouse`/`--superscope` input. (The CLI/MCP `set_joypad(port, mask)` API
-injects pad bitmasks for either port for scripted/agent input; the GUI wires
+injects pad bitmasks for any of the five pads (ports 2-4 are a multitap's pads B-D) for scripted/agent input; the GUI wires
 both pad ports from the keyboard.)
 
 A **Super Multitap** (Settings → Devices → Port 2 → Super Multitap) adds
@@ -105,7 +105,7 @@ Hotkey: `F12` saves a screenshot, remappable under
 
 ## Auto-read + manual-mode behaviour
 
-The SNES auto-read latch fires once per VBlank (line 225 NTSC, 240 PAL)
+The SNES auto-read latch fires once per VBlank (line 225, or 240 when the game enables overscan, on either region)
 when `NMITIMEN.0` is set; the same pulse also re-arms the manual-mode
 `$4016`/`$4017` shift register (matching the hardware's controller-port latch).
 

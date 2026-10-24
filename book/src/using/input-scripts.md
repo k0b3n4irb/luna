@@ -2,8 +2,9 @@
 
 Shared by every subcommand that runs a ROM except `run` — `state`,
 `frames`, `diff`, `profile`, `wram-trace`, `bench`, `spc-dump`,
-`assets-dump`. `state` and `profile` also take `--input2` … `--input5`
-for the other pads (a `luna test` manifest has `input` and `input2`),
+`assets-dump`, `record`. `state` and `profile` also take `--input2` …
+`--input5` for the other pads (`record` and a `luna test` manifest take
+`input` and `input2` only),
 same grammar. Format:
 comma-separated `frame:hex` checkpoints — frame number in decimal, mask
 in hex (optional `0x`). The mask is latched at the **start** of the named
@@ -91,8 +92,8 @@ luna state --input-at tick --input "3:0x0080,6:0" \
 ```
 
 It applies to every script of the command (`--input` … `--input5`,
-`--mouse`, `--superscope`). `luna state`, `luna profile` and a `luna
-test` manifest (`input_at = "tick"`, see
+`--mouse`, `--superscope`). `luna state`, `luna profile`, `luna record`
+and a `luna test` manifest (`input_at = "tick"`, see
 [Checkpoints](homebrew-ci.md#checkpoints--beforeafter-assertions)) take
 it.
 

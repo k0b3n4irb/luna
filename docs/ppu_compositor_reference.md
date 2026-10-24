@@ -378,9 +378,9 @@ The regular-BG scroll registers are write-twice into a pair of shared
 - **V-scroll write ($210E/$2110/$2112/$2114):** uses the FULL previous-write
   latch (`bgofs_ppu1`, no PPU2 cross) and updates ONLY `bgofs_ppu1`.
 
-luna implements both: `write_bg_h_scroll` (ppu.rs:678-691, dual-latch
-cross) and `write_bg_v_scroll` (ppu.rs:695-699, PPU1-only). The Mode-7
-M7HOFS/M7VOFS write-twice uses a *separate* `m7_latch` (ppu.rs:707-726),
+luna implements both: `write_bg_h_scroll` (`ppu.rs`, dual-latch
+cross) and `write_bg_v_scroll` (PPU1-only). The Mode-7
+M7HOFS/M7VOFS write-twice uses a *separate* `m7_latch`,
 not these BG-scroll latches.
 
 ---

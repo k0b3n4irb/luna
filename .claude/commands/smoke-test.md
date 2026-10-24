@@ -48,11 +48,14 @@ deadlock.
 ### `smw` — Super Mario World Yoshi's House intro
 
 Useful for PPU compositor / color-math regressions. Scripted Start
-presses get past the title + file select into the intro cutscene.
+presses get past the title + file select into the intro cutscene. The
+title only appears around frame 400, so the first press waits until
+frame 700 (re-measured 2026-10-24: a press at frame 300 lands before the
+title and the run ends on the 1/2 PLAYER menu).
 
 ```bash
 ./target/release/luna state -n 30000000 \
-  --input "300:0x1000,315:0,500:0x1000,515:0,700:0x1000,715:0" \
+  --input "700:0x1000,715:0,900:0x1000,915:0,1100:0x1000,1115:0,1300:0x1000,1315:0" \
   --screenshot /tmp/smw.png \
   --peek 7E:0200:20 \
   "tests/roms/Super Mario World (U) [!].smc"
@@ -60,7 +63,7 @@ presses get past the title + file select into the intro cutscene.
 
 Expected: Yoshi's House intro scene with the welcome dialog. Sub-screen
 sky + clouds visible on the sides of the dialog box. The `--peek` dump
-of `$7E:0200..0220` shows the shadow OAM — a non-park-Y-240 pattern
+of `$7E:0200..0220` shows the shadow OAM (Mario at `$7E:021C`) — a non-park-Y-240 pattern
 means Mario is in OAM and should render.
 
 ### `both`

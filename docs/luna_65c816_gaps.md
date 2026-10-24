@@ -51,8 +51,8 @@ IF = 1; DF = 0;
 PC.l = read(r.vector + 0); PC.h = read(r.vector + 1); PC.b = 0x00;
 ```
 
-luna `service_software_interrupt` (`opcodes.rs:~1054`, via
-`service_nmi`/`service_irq` at `opcodes.rs:107-123`) matches exactly:
+luna `service_software_interrupt` (`opcodes.rs:~1235`, via
+`service_nmi`/`service_irq` at `opcodes.rs:140-164`) matches exactly:
 PB pushed in native only; the pushed P has bit 4 **cleared in emulation,
 left as-is in native**; `I` set, `D` cleared; `PB=0`; jump through the
 16-bit vector. Vectors: NMI `$FFEA`/`$FFFA`, IRQ `$FFEE`/`$FFFE`
@@ -71,7 +71,7 @@ Tom Harte opcodes `$00`/`$02`.)
 
 ares `instructionBlockMove{8,16}` (`instructions-other.cpp:28-52`):
 `B = dest_bank; read(src:X); write(dest:Y); X±=adj; Y±=adj;
-if(A.w--) PC.w -= 3;`. luna `block_move` (`opcodes.rs:~1146`) is the same
+if(A.w--) PC.w -= 3;`. luna `block_move` (`opcodes.rs:~1380`) is the same
 re-entrant one-byte-per-step machine: sets `DB = dest`, moves one byte,
 adjusts X/Y, and rewinds `PC -= 3` while the 16-bit counter is nonzero
 (post-decrement semantics match `A.w--`). The only divergence is
@@ -94,7 +94,7 @@ handler is entered) — luna matches and documents the `SEI; WAI` idiom.
 
 Push/pull (`opcodes.rs:~2608`) keep `S` within page 1 (`$0100-$01FF`) in
 emulation; `step()` re-pins `S.h=$01` at the start (and defensively at
-the end) of every instruction. Reset (`cpu.rs:109`) loads the `$FFFC`
+the end) of every instruction. Reset (`cpu.rs:158`) loads the `$FFFC`
 vector with `E=1`, `P=M|X|I` (`D=0`), `S.h=$01`, `PB=DB=DP=0` — matching
 ares `power()` (`p=0x34`, `s=0x01ff`, `e=1`).
 
@@ -121,7 +121,7 @@ and Mesen2's per-cycle `DetectNmiSignalEdge` do (#1, #2 below).
 | 1 | 🔧 | **Interrupt poll granularity** — **fixed 2026-09-20**. NMI/IRQ were recognised only at the *start of the next* `step()`, so an interrupt arriving during an instruction's final access got in up to a whole instruction early. Both CPUs now sample at the instruction's last cycle, where the references do: `Bus::last_cycle(i_flag)` is ares' `nmiTest()`/`irqTest()`, called from the `last_*` helpers that mark every instruction's final access. Neither reference interrupts mid-instruction — both still *service* at the boundary; only the sampling point moved. `idleIRQ()` came with it: the dead cycle of a two-cycle implied opcode is now a dummy read of `PB:PC` when an interrupt is pending. | `wdc65816/registers.hpp:30` (`#define L lastCycle();`), `sfc/cpu/irq.cpp:83-93`, `wdc65816/memory.cpp:1-16`; Mesen2 `SnesCpu.Shared.h:315-347,387-394` | `cpu.rs` `last_cycle`, `snes.rs` / `coproc/sa1.rs` `last_cycle`; tests `last_cycle_invariant.rs` (exactly one poll per instruction, all 256 opcodes × 5 modes) |
 | 2 | 🔧 | **Interrupt-enable delay quirk** — **fixed 2026-09-20**, with no code of its own. Neither reference has a recognition-delay counter: the quirk falls out of polling before the instruction's final action (`L idleIRQ(); flag = 0;`). So `CLI` cannot unmask an IRQ for its own instruction, `SEI` cannot mask one its own poll already saw, and `PLP` / `REP` / `SEP` behave the same way. | `instructions-other.cpp:97-100,113-120`; Mesen2 reads `I` in `DetectNmiSignalEdge` | `opcodes.rs` (implied ops poll before their register effect; REP/SEP after the operand fetch); tests `cli_does_not_unmask_an_irq_for_its_own_instruction`, `sei_does_not_mask_an_irq_its_own_poll_already_saw` |
 | 3 | 🔧 | **Dummy bus cycles in the interrupt sequence** — **fixed 2026-09-19** (`ad8855f`, shipped in v1.25.0). ares `interrupt()` opens with `read(PC.d); idle();` before the pushes; luna omitted both, so a hardware NMI/IRQ took 6 bus cycles in native mode where hardware takes 8 — every handler started 14 mclk early. `hardware_interrupt_entry` now performs them, called from `service_nmi`/`service_irq` only (BRK/COP correctly keep the short sequence). The trailing `idleJump()` is owed nothing: it is an empty virtual in `wdc65816.hpp:12` that the SNES CPU never overrides. This was the root cause of PPU gap #7b (HiColor128, now pixel-exact). | `instruction.cpp:1-14`, `wdc65816.hpp:12` | `opcodes.rs` `hardware_interrupt_entry`; test `hardware_interrupts_spend_two_cycles_brk_does_not` |
-| 4 | 🟡 | **WAI resume granularity.** luna advances the bus in fixed `WAI_TICK_MCYCLES` (8 mclk) chunks while waiting, so wake latency is quantized rather than single-cycle. Harmless for the `WAI; BRA -3` VBlank idiom. | single `idle()` loop | `opcodes.rs:58` |
+| 4 | 🟡 | **WAI resume granularity.** luna advances the bus in fixed `WAI_TICK_MCYCLES` (8 mclk) chunks while waiting, so wake latency is quantized rather than single-cycle. Harmless for the `WAI; BRA -3` VBlank idiom. | single `idle()` loop | `opcodes.rs:64` |
 | 5 | 🟡 | **Post-DMA interrupt delay — the references disagree.** Mesen2 delays NMI/IRQ recognition by one cycle after a DMA/HDMA burst (`SnesCpu.cpp:124-128`, `SnesCpu.Shared.h:323-346`). ares has the same field, `status.irqLock`, set by `dmaRun` / `hdmaSetup` / `hdmaRun` and on a `$4200` write — but `CPU::step()` clears it at its top and every access and DMA step calls `step()`, so it is **always 0** by the time any `lastCycle()` runs. It is dead code as ares is written. luna follows ares and does not implement it; adopting Mesen2's live rule would be a separate, separately-measured change. | ares `timing.cpp:12`, `dma.cpp:21,32,40`, `irq.cpp:49,89` vs Mesen2 as above | not implemented (deliberate) |
 
 ---

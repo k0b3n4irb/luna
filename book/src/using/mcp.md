@@ -165,7 +165,7 @@ method, so the MCP transport adds reach, not capability.
 | `wram_snapshot` | `wram_snapshot` | Full-WRAM FNV-1a-64 hash (+ the raw 128 KiB base64 with `include_data`). |
 | `loop_probe` | `loop_probe` | Hang diagnostic: run `max_steps` and count distinct PCs (a handful ⇒ tight spin loop). |
 | `enable_nocash_log` / `take_nocash_log` | `enable_nocash_log` / `take_nocash_log` | The `$21FC` Nocash TTY (`SNES_NOCASH` text): drain returns `{text, base64}`. |
-| `enable_wdm_log` / `take_wdm_log` | `enable_wdm_log` / `take_wdm_log` | The `WDM` assert channel (`SNES_ASSERT` → `WDM $00`): drain returns `[{pc, operand, symbol}]`. |
+| `enable_wdm_log` / `take_wdm_log` | `enable_wdm_log` / `take_wdm_log` | The `WDM` assert channel (`SNES_ASSERT` → `WDM $00`): drain returns `{events: [{pc, operand, symbol}]}`. |
 
 The `enable_*_trace` tools that record a stream (CPU, memory, DMA, DSP,
 DSP-1, SA-1, Super FX, SPC700) take `max_events`, the cap on what one
@@ -237,7 +237,7 @@ nothing in the run.
 
 ```text
 load_rom {path: "game.sfc"}
-memory_kinds {}                                   # → [{kind: "SnesMemory", size: 16777216}, {kind: "SnesPrgRom", …}, …]
+memory_kinds {}                                   # → {kinds: [{kind: "SnesMemory", size: 16777216}, {kind: "SnesPrgRom", …}, …]}
 absolute_address {address: 0xC00000}              # HiROM → {kind: "SnesPrgRom", offset: 0}
 read_memory {kind: "SnesWorkRam", offset: 0x100, count: 16}
 write_memory {kind: "SnesPrgRom", offset: 0x1234, data: [0xEA, 0xEA]}   # patch two NOPs into ROM
@@ -555,7 +555,7 @@ bp_add {kind: "exec", symbol: "enemy_spawn", condition: "x == 5"}   # the sixth 
 bp_add {kind: "mem", symbol: "player_hp", condition: "value > [player_hp_max]"}
 bp_add {kind: "mem", addr: 0x002100, condition: "value & $80"}      # forced blank switched on
 bp_add {kind: "exec", symbol: "nmi_handler", mark: true}            # no halt: one dot per NMI on the Event Viewer
-run_until_break {max_steps: 50000000}                              # → {hit: {id, kind, pc, addr, value}}
+run_until_break {max_steps: 50000000}                              # → {hit: true, bp_id, kind, pc, addr, value, …}
 bp_list {}                                                          # condition, mark, hit_count of each
 ```
 

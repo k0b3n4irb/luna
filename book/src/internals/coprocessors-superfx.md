@@ -396,9 +396,10 @@ The GSU's data bus decodes the 24-bit address:
 
 ROM/RAM-access stall: while the relevant access bit (ron/ran) is *not* granted to the
 GSU, the read/write loops `step(6); synchronize(cpu); break if scheduler.synchronizing()`
-— i.e. the GSU burns cycles waiting for the SNES to grant access via SCMR. luna can
-model this as: if access not granted, stall the GSU (yield to SNES) until SCMR flips
-the bit.
+— i.e. the GSU burns cycles waiting for the SNES to grant access via SCMR. luna
+models this as a bus-arbitration stall (`crates/luna-bus/src/superfx.rs`): when the
+running GSU touches ROM or RAM it does not own, it stops executing until the SNES
+writes SCMR and grants the bit. Doom depends on it.
 
 The first-bank ROM remap `((addr&0x3f0000)>>1)|(addr&0x7fff)` packs the upper-half
 $8000–$FFFF of each LoROM bank into a contiguous ROM image; the `$40–$5F` window is the
@@ -615,9 +616,10 @@ The SuperFX runs as a cooperative thread; every `step()` ends by re-synchronisin
 SNES CPU, and the GSU's main loop runs one instruction per dispatch, idling `step(6)` per call when
 `sfr.g==0`. Any SNES MMIO access calls `cpu.synchronize(*this)` first to align clocks
 before touching state. A catch-up driver is equivalent: execute until
-`CycleCount >= masterClock*clockMultiplier`, then a final Step to align. luna's existing
-coproc scheduler should drive the GSU like SA-1 — run N GSU cycles per SNES master-clock
-budget, with a synchronize on every MMIO touch.
+`CycleCount >= masterClock*clockMultiplier`, then a final Step to align. luna drives the
+GSU that way, like the SA-1: it runs GSU cycles against a master-clock budget
+(`clock_deficit`) each time the SNES advances, rather than as a cooperative thread;
+that batch grain is the scheduler residual named on the scorecard.
 
 The GSU thread base clock is fixed; the clsr fast/slow ratio is expressed through the
 per-event step counts, not by changing the base frequency. (Any clock-multiplier knob is

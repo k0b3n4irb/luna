@@ -9,11 +9,10 @@ in real time as the game runs.
 
 | Group | Panels |
 |---|---|
-| **CPU** (65C816) | State (registers/flags), Memory (hex), Disassembly |
+| **CPU** (65C816) | State (registers/flags), Memory (hex), Disassembly; Breakpoints; Mesen2's **Debugger** and **SPC Debugger** windows (below) |
 | **SPC700** (audio CPU) | State, Memory (ARAM hex), Disassembly |
 | **PPU** | Sprites (OAM), Palette (CGRAM), Tilemap, **Event Viewer** |
 | **System** | Registers (full snapshot) |
-| **Debugger** | Mesen2's Debugger window for the 65C816 (below) |
 
 The disassemblers are M/X-aware for the 65C816 (operand widths follow the
 current register sizes); the memory viewers show the live CPU bus and ARAM.

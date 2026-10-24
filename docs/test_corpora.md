@@ -102,11 +102,11 @@ trusting a number written here.
   family (Mode 5 hi-res + interlace) and `Mosaic` (Mode 3 / Mode 5).
   `MosaicMode3` holds **R** so the demo ramps the `$2106` mosaic size.
   `MosaicMode5` holds **R** too since 2026-10-04 (it used to hold nothing
-  and so rendered `ppu_interlace_moogle`'s frame, same hash), but its
-  golden is a candidate and the test is `#[ignore]`d: at the largest
-  mosaic size luna's frame does not match the corpus' `MosaicMode5.png`
-  (see the comment on the test). Mode 5 mosaic therefore still has **no
-  blessed coverage**.
+  and so rendered `ppu_interlace_moogle`'s frame, same hash). Its golden
+  is blessed since 2026-10-05: once the hi-res mosaic latch was ported,
+  luna's native 512×448 frame at size 14 is pixel-identical to a Mesen2
+  capture of the same scene. The corpus' `MosaicMode5.png` matches neither
+  reference and is not used (see the comment on the test).
 - **`ppu_interlace_font_native_512x448`** — the native 512×448 capture
   path, hashed on its own buffer.
 - **`input_controller_latency` — `INPUT/ControllerLatency`**: holds **A**

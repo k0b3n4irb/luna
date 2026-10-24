@@ -3,10 +3,10 @@
 **Status: rows #1-#12 and #14 ✅/🔧 (2026-07-01, refreshed 2026-09-18).** The
 HDMA table walk / transfer rows are a faithful port of ares + Mesen2. Open:
 the 🔬 edge interactions (#13), one dead-read micro-divergence (#10 residual),
-and the ⚠️ rows #15-#17 the 2026-09-11 audit found (segmented-path cost,
-DMA start edge, same-channel HDMA abort — its fourth, #18 APU ports on the
-DMA B-bus, is fixed 2026-09-18) — none with known game impact. The
-2026-10-04 repository audit re-confirmed #15 and added ⚠️ row #19 (the DMA
+and the ⚠️ rows #16-#17 the 2026-09-11 audit found (DMA start edge,
+same-channel HDMA abort — its #15 segmented-path cost is fixed 2026-10-10,
+its #18 APU ports on the DMA B-bus fixed 2026-09-18) — none with known
+game impact. The 2026-10-04 repository audit added ⚠️ row #19 (the DMA
 B-bus decode is a second copy of the CPU's and has drifted from it) — not
 yet checked against ares / Mesen2. (`HDMA_OVERHEAD_MCLK` no longer exists — retired
 2026-07-15 by row #11's per-read `hdma_cost`.)
@@ -41,7 +41,7 @@ pillar subsystem; until every row below is ✅, treat it as an approximation.
 | 11 | **Per-line table read for timing** — `hdmaReload` does `readA` of the header **every** active line (`dma.cpp:153`), even gap lines | `hdma_step_line` performs the read every line (consuming it only at counter==0) and returns the **A-bus read count**; `hdma_cost` charges 8 mclk per read + ares' `step(8)` + the two DMA-clock alignment steps (`timing.cpp:110-119`) | 🔧 **fixed 2026-07-15** — faithful cost model, `HDMA_OVERHEAD_MCLK` retired. luna's cost was ~5 mclk/line short on a 1-channel mode-2 table (~1 000 mclk of CPU phase error per frame). Verified by the Mesen2 per-instruction cycle differential (WaveHDMA drift +2 790 → +1 470 mclk) and the full HDMA corpus sweep. |
 | 12 | **HDMA vs MDMA arbitration / mid-DMA pause** (`hdmaTransfer`/`dmaRun` set `dmaEnable=false`) | a long sync DMA is driven in scanline-bounded segments; HDMA fires at each crossed visible line via `sched_one_line` | 🔧 fixed (Phase 5 inc 1) — HDMA now preempts a mid-frame MDMA at scanline boundaries instead of being deferred to after the whole burst. Test `hdma_preempts_a_long_mid_frame_dma_at_scanline_boundaries`. Sub-line position (ares dot-276 `hdmaPosition=1104`) was line-granular — **inc 2 landed 2026-07-26 (end-of-line application point), see the note below**. |
 | 13 | **`$420C` write mid-DMA, HDMA on the same line as MDMA, DMA during HDMA** edge interactions | 🔬 | unaudited |
-| 14 | **Reset clears `$420B`/`$420C`** (`CPU::power(reset)` `channels[id] = {}`; anomie-regs: HDMAEN "$00 on power on or reset") | `Snes::reset` clears `mdmaen`, `hdmaen`, the MDMA cursor | 🔧 fixed (2026-09-11 audit) — HDMAEN survived a reset, so HDMA kept firing from the previous run's tables during boot. Test `reset_keeps_port_devices_and_clears_memsel_and_hdmaen`. Residual: channel registers keep their values (ares resets them to `$FF`). |
+| 14 | **Reset clears `$420B`/`$420C`** (`CPU::power(reset)` `channels[id] = {}`; anomie-regs: HDMAEN "$00 on power on or reset") | `Snes::reset` clears `mdmaen`, `hdmaen`, the MDMA cursor | 🔧 fixed (2026-09-11 audit) — HDMAEN survived a reset, so HDMA kept firing from the previous run's tables during boot. Test `reset_keeps_port_devices_and_clears_memsel_and_hdmaen`. The `$43xx` channel registers also return to their `$FF` power-on values on reset (`Dma::power_on`, `958ec06`, 2026-09-12). |
 | 15 | **MDMA cost on every path** — `dmaEdge` wraps `dmaRun` in `step(8 - dmaCounter())` … `step(clockCount - counter.dma % clockCount)`; `dmaRun` = `step(8)` + per enabled channel `step(8)` + 8 mclk/byte, and `counter.dma` counts all of it (`Channel::step`, `timing.cpp:124-131`, `dma.cpp:16-22,45-48,108-122`). An HDMA that runs inside the burst skips both alignment steps (`timing.cpp:113,117`) and adds its `step(8)` + reads to the same counter. Mesen2 agrees (`_dmaClockCounter`, `SnesDmaController.cpp:75,99,206-218`), and anomie's timing document works the example | `mdma_cost` on the fast path; on the segmented path (HDMA armed) `Dma::mdma_clock` is that counter — preamble, 8 per channel started, 8 per byte, the clocks of an HDMA inside the burst — and `dma_edge_inner` realigns on its total | 🔧 fixed (2026-10-10). Two defects: the segmented path charged a flat 8 + 8/byte (no alignment, no per-channel 8, no realignment), **and both paths** computed the realignment from the preamble alone, where the references use the whole burst — 2 or 4 mclk off whenever the edge ran on a 6-clock access and `channels + bytes` was not a multiple of three. Tests `a_dma_burst_lasts_a_whole_number_of_cpu_clocks_since_the_pause` (anomie's four totals), `a_dma_costs_the_same_whether_or_not_an_hdma_is_armed`, `an_hdma_inside_a_dma_adds_its_clocks_to_the_burst_without_realigning`. Residual: the per-channel 8 is not counted when sizing a segment, so the line crossing inside a burst can be one byte late (line-granular already, row 12). |
 | 16 | **DMA start edge** — the `$420B` write only sets `dmaPending`; the first following `dmaEdge()` just raises `dmaActive` ("Run one full CPU cycle", `timing.cpp:100-108,135-139`), and the burst runs at the edge **after** that | `$420B` arms `Dma::pending_mdma`; `SnesBus::dma_edge` (`snes.rs`) runs the burst at the **first** bus access after the write — no intermediate `dmaActive` cycle | ⚠️ gap (2026-09-11 audit) — one bus access early vs ares. Instruction-level placement already matches Mesen2's trace (issue #109). |
 | 17 | **HDMA aborts the same channel's DMA** — `hdmaSetup` / `hdmaTransfer` clear the channel's `dmaEnable` ("HDMA will stop active DMA mid-transfer", `dma.cpp:146,175`), so `dmaRun`'s `while(dmaEnable && --transferSize)` exits with the remaining count left in `$43x5/6` | `hdma_start_frame` / `hdma_step_line` (`dma/channel.rs`) never touch `seg_running`; after the HDMA line the segmented MDMA **resumes** the same channel to completion (`Dma::run_mdma_segment`, `dma/controller.rs`) | ⚠️ gap (2026-09-11 audit) — only reachable when one channel is both in `$420B` and `$420C` and the burst crosses a visible line. |
@@ -74,10 +74,10 @@ Rows #1-#12 and #14 are ✅/🔧. What remains — no known game impact:
    on a `0`-header-at-frame-start (empty table) — dead reads, no observable
    effect; unify `hdma_start_frame`/`hdma_step_line` onto one `hdmaReload` port
    if ever closing the last micro-divergence.
-3. ⚠️ rows #15-#17 (2026-09-11 audit; listed as **open** on the DMA row of
-   `accuracy_scorecard.md`): segmented-path cost/realign, DMA start edge,
-   same-channel HDMA abort. (#18, APU ports + MDR on the DMA B-bus view, is
-   🔧 fixed 2026-09-18.) #15 was re-found by the 2026-10-04 audit.
+3. ⚠️ rows #16-#17 (2026-09-11 audit; listed as **open** on the DMA row of
+   `accuracy_scorecard.md`): DMA start edge, same-channel HDMA abort. (#15,
+   segmented-path cost/realign, is 🔧 fixed 2026-10-10 (`efd9996`); #18, APU
+   ports + MDR on the DMA B-bus view, 🔧 fixed 2026-09-18.)
 4. ⚠️ row #19 (2026-10-04 audit): the DMA B-bus decode (`DmaBusView`)
    diverges from the CPU-bus decode in five places. To be read against
    `ares/sfc/cpu/dma.cpp` before any change; per this pillar's rule each

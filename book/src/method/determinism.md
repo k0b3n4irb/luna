@@ -10,9 +10,13 @@ luna's entire **headless** path — every CPU core (65C816, SPC700, uPD96050,
 GSU), the PPU, S-DSP, DMA/HDMA, and the coprocessors — is **integer-only**.
 There is no floating point, no wall-clock time source, no RNG, and no hash-map iteration on
 the emulation path. So for a fixed `(ROM, mapper, input script, start state)`
-the execution is **bit-identical every run**. (The only floating point in the
-project is the *GUI's* audio resampler and frame pacing — neither touches the
-headless trace/state/screenshot outputs.)
+the execution is **bit-identical every run**. (One exception, at start-up only: the S-DSP's 512-entry Gaussian
+interpolation table is built once with `f64` `sin` / `cos`, as ares builds
+it, and rounded to `i16` (`build_gaussian_table`, `crates/luna-apu/src/dsp.rs`).
+Its entries are what the audio goldens pin: the PCM hashes recorded on an
+aarch64 machine pass in the x86_64 CI job. Beyond that table, floating
+point lives only off the emulation path: the GUI's audio resampler and
+frame pacing, the `luna-api` video filters and `luna diff --audio`.)
 
 The framebuffer hash (`--print-fbhash`, **fbhash v2** since v1.21.0: a
 pinned FNV-1a over the raw pixel bytes) is a pure function of that full
@@ -29,7 +33,7 @@ therefore stable by the same mechanism.
 | `--print-fbhash` (`fbhash=<16 hex>`) | **Exact** | **Exact — verified** (the visual gate) | Assert exact equality. |
 | Trace **event counts** — `--superfx-trace` / `--sa1-trace` instruction counts, `--dma-trace` / `--mem-trace` row counts, `instructions_executed`, `frame_count`, `nmis_serviced` | **Exact** | **Exact** — a count is a direct consequence of the execution path the fbhash already pins; a divergence would perturb the fbhash | Assert exact counts (a much stronger gate than `> 0`). |
 | Trace **row content** — per-row `pc`/`addr`/`value`/`vram_word`, the `blank`/`force_blank` flags, mailbox/SA-1 side events | **Exact** | **Exact** — same integer execution; same anchor argument | Assert exact, OR diff the whole CSV against a committed golden. |
-| **WRAM / ARAM byte dumps** (`--assert`, `--assert-aram`, `--assert-vram`, `--assert-cgram`, `peek_*`) | **Exact** | **Exact in practice** (same integer core), but **not yet pinned by a standing cross-arch differential** — no CI job diffs WRAM bytes between the x86_64 and aarch64 runners yet | Assert exact same-arch. Cross-arch, treat fbhash as the guaranteed gate and these as expected-equal-but-unpinned. |
+| **WRAM / ARAM byte dumps** (`--assert`, `--assert-aram`, `--assert-vram`, `--assert-cgram`, `peek_*`) | **Exact** | **Exact in practice** (same integer core), but **not pinned by a standing cross-arch differential** — no test compares a memory dump taken on one architecture with one taken on another (CI runs on x86_64 Linux; the goldens it checks are recorded on aarch64, which is what pins the fbhash and the PCM hashes) | Assert exact same-arch. Cross-arch, treat fbhash as the guaranteed gate and these as expected-equal-but-unpinned. |
 | `--print-fbhash` timing fields, wall-clock, any GUI audio/pacing | n/a (host-dependent) | not stable | Never assert. |
 
 ## Practical guidance
@@ -40,8 +44,8 @@ therefore stable by the same mechanism.
   `> 0 instructions executed` with the exact count.
 - **WRAM/ARAM/CGRAM byte assertions:** rock-solid run-to-run and same-arch.
   Cross-arch they are expected-identical (same integer core) but luna has not
-  yet *run* the cross-arch byte differential (no standing job compares the
-  x86_64 and aarch64 runners byte for byte); until it does,
+  yet *run* the cross-arch byte differential (no test compares memory
+  dumps taken on two architectures); until it does,
   prefer the fbhash for the cross-arch leg and keep byte asserts same-arch.
 
 If you ever observe a cross-arch mismatch in a count or row that the fbhash

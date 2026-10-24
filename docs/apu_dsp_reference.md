@@ -60,8 +60,8 @@ cycles, a taken branch costs its two extra cycles because the core actually
 performs them, and the CPU↔SPC mailbox interleaves at bus-access grain.
 
 The atomic `step()` and its table survive as the equivalence oracle (the
-cycle-stepped core is proven byte- and cycle-exact against it) and, at the
-time of writing, as the path the Tom Harte SPC700 harness drives. See
+cycle-stepped core is proven byte- and cycle-exact against it); the Tom
+Harte SPC700 harness runs both cores (`crates/luna-cpu-spc700/tests/tom_harte.rs`). See
 [`luna_spc700_gaps.md`](luna_spc700_gaps.md).
 
 ## 3. SPC700 ↔ DSP timing

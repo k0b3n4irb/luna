@@ -26,7 +26,7 @@ the per-mapper shims that translate a SNES address into a physical location:
 | **ExHiROM** | a few oversized carts |
 | **SA-1** | the SA-1 coprocessor board |
 | **Super FX** | the GSU boards |
-| **DSP-1** | the uPD7725 boards |
+| **DSP-1** | the uPD7725 boards (the shim lives in `luna-core`, next to the chip) |
 | **S-DD1** | the decompressor board |
 
 Mapper detection scores the ROM header (reset-vector validity, opcode

@@ -15,7 +15,7 @@ cumulative-sum), and bitmap/character-conversion helpers.
 | **In luna** | `crates/luna-bus/src/sa1.rs` (the board: memory map, registers), `crates/luna-core/src/coproc/sa1.rs` (the chip: its CPU, timers, DMA) |
 | **Proven by** | the SNES-SA1 Speed Test v5.1: the rows without bus conflict match photographs of a console to the digit |
 | **Grade** | **A−** (scorecard: *SA-1*) |
-| **Open gaps** | [`docs/luna_sa1_gaps.md`](https://github.com/k0b3n4irb/luna/blob/main/docs/luna_sa1_gaps.md): the scheduler steps the chip in batches; the write-protection registers reset to allow-all where both references block (#3, #4, a deliberate choice explained there) |
+| **Open gaps** | [`docs/luna_sa1_gaps.md`](https://github.com/k0b3n4irb/luna/blob/main/docs/luna_sa1_gaps.md): the scheduler steps the chip in batches; `$2202` models an SIC bit 6 the hardware does not have, and its latch is a placeholder (#2); the write-protection registers reset to allow-all where both references block (#3, #4, a deliberate choice explained there) |
 
 ## What the chip provides
 
@@ -35,9 +35,14 @@ cumulative-sum), and bitmap/character-conversion helpers.
 
 ## How luna implements it
 
-luna models the SA-1 as a chip-side 65C816 instance driven by a
-cooperative scheduler alongside the main CPU: the two cores advance in
-lockstep at bus-access granularity, so neither runs ahead of the other.
+luna models the SA-1 as a chip-side 65C816 instance stepped in batches
+alongside the main CPU: each time the main CPU charges master cycles, they
+are added to the SA-1's budget, and the chip runs whole instructions until
+that budget is spent. Time is never dropped, but the SA-1 can run up to
+one instruction ahead of the main CPU where ares interleaves the two as
+cooperative threads; that scheduler grain is the residual named on the
+scorecard (engine results are exact, only the placement of stalls
+differs).
 The shared IRAM, the per-side BW-RAM banking, the B-bus register window
 (`$2200-$23FF`), the arithmetic units, and the DMA path — including the
 character-conversion mode — are all present. During long main-CPU DMA

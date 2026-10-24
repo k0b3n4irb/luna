@@ -21,7 +21,7 @@
   </tr>
 </table>
 
-*Rendered by Luna's headless CLI (`luna state --screenshot`) from the open-source
+*Rendered by Luna's headless CLI (`luna run --screenshot`) from the open-source
 [PeterLemon SNES test corpus](https://github.com/PeterLemon/SNES) — Mode 7 perspective,
 an HDMA scroll wave, two overlaid layers and an HDMA palette gradient. `tools/doc-captures.py`
 regenerates them.*

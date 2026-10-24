@@ -99,7 +99,7 @@ MCP tool and the section that shows each one running.
 | **Cores** | 65C816 + SPC700 (per-instruction suites 100%), S-DSP audio |
 | **Coprocessors** | SA-1, Super FX (GSU), DSP-1, S-DD1 |
 | **Front-ends** | GUI debugger (winit + wgpu), headless CLI, MCP server |
-| **Platform** | Linux (tested) · Windows x86_64 + macOS arm64 (release binaries provided, unsigned) |
+| **Platform** | Linux (tested) · release binaries for Linux x86_64 + arm64, Windows x86_64, macOS arm64 (unsigned) |
 | **License** | [MPL-2.0](https://github.com/k0b3n4irb/luna/blob/main/LICENSE) |
 
 > Luna runs three ways: the **GUI debugger** (`luna-gui`, a human plays), the

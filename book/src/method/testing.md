@@ -1,7 +1,8 @@
 # Testing & validation
 
 Luna's accuracy is held in place by **two complementary tiers** of automated
-tests, plus the differential harness from the [previous chapter](differential.md).
+tests (a third, `luna test`, puts the same machinery in homebrew developers'
+hands), plus the differential harness from the [previous chapter](differential.md).
 The exact commands and file locations live with the code (see the repository's
 `tests/` directories and contributing notes); this chapter describes *what* is
 validated and *why* it is trustworthy.
@@ -47,14 +48,16 @@ before a baseline is blessed, and re-blessed after any intended render change.
 The ROM corpus is **not vendored** — it is fetched on demand and the tests
 skip cleanly if it is absent, so a plain build never depends on it.
 
-### A nuance worth knowing: PAL timing
+### A nuance worth knowing: the video standard
 
-The display suite is loaded as **PAL**. Several ROMs do a single wait-for-vblank
-and then write their entire result table in one burst that only fits inside
-PAL's longer vblank (~72 lines vs NTSC's 37). Run as NTSC, Luna *correctly*
-drops the writes that overflow into active display — which is hardware-accurate,
-but leaves those particular screens blank. Loading the suite as PAL reproduces
-the output the ROMs were authored for; Luna's NTSC timing is itself correct.
+The video standard is chosen per family. The **PPU demos run as PAL**, the
+convention of the `twvd/siena` suite and of krom's reference captures. The
+**CPU test family runs as NTSC**: each of those ROMs waits for one vblank, then
+writes its whole result table in a single burst. In PAL the burst overruns
+vblank and the table is truncated mid-row; in NTSC the full table lands. Mesen2
+agrees on both: its PAL screen is pixel-identical to Luna's truncated one, and
+in NTSC both render the full all-PASS table. (The family used to run as PAL,
+on the opposite theory, calibrated against an old boot that ran too fast.)
 
 ## Why two tiers
 

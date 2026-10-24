@@ -30,6 +30,7 @@ Commands:
   bench       Run a whole ROM directory headless and write a compatibility report.
   spc-dump    Export the live APU state as a playable .spc sound file.
   assets-dump Dump the loaded graphics (VRAM tiles, tilemaps, palette, sprites) as PNGs.
+  record      Record a run as a video, a text timeline and contact sheets.
   test        Run manifest-driven homebrew tests (see "Developing homebrew with luna").
   mcp         Serve the luna MCP server on stdio.
 

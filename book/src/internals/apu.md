@@ -19,13 +19,15 @@ The rest of this page is the hardware behaviour the port follows.
 ## 1. Clocks
 
 - **SNES master clock**: 21.477 272 MHz NTSC (21.281 370 MHz PAL).
-- **SPC700 clock**: 1.024 MHz = master / ~21. Each SPC cycle = ~21 master cycles.
-- **DSP sample rate**: SPC_clock / 32 = **32 000 Hz** (one output sample emitted every 32 SPC cycles).
+- **SPC700 clock**: 1.024 MHz nominal; ares and Mesen2 (and luna,
+  `SPC_CLOCK_HZ`) use the measured 1 025 280 Hz. Each SPC cycle = ~21 master cycles.
+- **DSP sample rate**: SPC_clock / 32 = **32 040 Hz** (one output sample
+  emitted every 32 SPC cycles; the nominal figure is 32 000 Hz, see gap #9).
 - The DSP runs a **32-cycle macro pipeline** that emits one stereo sample.
 
 ## 2. SPC700 opcode cycle counts — NOT FLAT
 
-The SPC700 has 256 opcodes with cycle costs ranging **2..8 cycles**. They are **NOT** uniform. Music drivers depend on accurate cycle counts because:
+The SPC700 has 256 opcodes with cycle costs ranging **2..12 cycles**. They are **NOT** uniform. Music drivers depend on accurate cycle counts because:
 - T0/T1/T2 timers (= song tempo) increment based on elapsed SPC cycles.
 - The DSP sample tick fires every 32 SPC cycles → pitch sounds wrong if cycle accounting is off.
 
@@ -46,22 +48,20 @@ The hardware uses per-opcode cycle costs, charged per-instruction in the dispatc
 
 The full table must be wired from a canonical source.
 
-**luna status: DONE.** A per-opcode table holds the real 2..12 costs
-(not flat). The SPC700 dispatcher charges the per-opcode cost for each
-instruction, and the APU feeds the returned per-instruction cost straight
-into the timer and voice ticking — so timer tempo and DSP sample rate
-track real cycle counts. The old "flat 4 cycles" approximation is gone.
-
-**Branch-taken `+2` penalty: also DONE.** A branch-taken penalty of 2
-cycles is added when a branch is taken (BRA / Bcc / CBNE / DBNZ / BBS /
-BBC set the branch-taken flag at the branch sites). The base table lists
-the *not-taken* cost; the taken idle is added on top. This was the last
-open SPC700 cycle gap and it is now closed.
+**luna status: DONE, per bus access.** The SPC700 is cycle-stepped:
+`Apu::step` converts master cycles to the SPC clock domain and runs one
+`Spc700::step_cycle` per SPC bus access, so every opcode costs exactly
+the accesses it makes (2..12 cycles, the taken-branch idles included)
+rather than a looked-up total. The older atomic interpreter, which
+charged a per-opcode table plus a `+2` branch-taken penalty, is kept only
+as a test oracle (`cfg(test)` / feature `atomic-oracle`; SPC700 gap #2).
 
 ## 3. SPC700 ↔ DSP timing
 
-After every opcode the DSP is synchronized: it catches up by running its
-32-cycle pipeline however many times the elapsed SPC cycles cover.
+luna clocks the timers and the S-DSP on every SPC bus access
+(`ApuBusView::clock_cycle`, at the cost the `$F0` wait-state fields set),
+so the DSP pipeline advances in position, not in a catch-up after each
+opcode.
 
 DSP pipeline organization:
 - 32 DSP cycles per output sample.
@@ -216,9 +216,9 @@ luna implements this in the live DSP — the 3-tap `>>11` accumulate, the
 DSP registers:
 - `$2D EON` — per-voice echo-input enable
 - `$4D EFB` — echo feedback (signed 8-bit)
-- `$5D` — used by both DIR (sample directory page) AND `EDL` (echo delay length: low nibble × 2048 bytes)
+- `$5D DIR` — sample directory page (not an echo register; listed here because it is often confused with `EDL`)
 - `$6D ESA` — echo start address page
-- `$7D EDL` — echo delay length (low 4 bits)
+- `$7D EDL` — echo delay length (low 4 bits × 2048 bytes)
 - `$0C MVOLL`, `$1C MVOLR`, `$2C EVOLL`, `$3C EVOLR` — main and echo volumes
 - `$0F..$7F FIR coefficients` (8 of them, signed 8-bit)
 

@@ -8,16 +8,20 @@ same-arch-only vs visual-anchor-only. It answers OpenSNES follow-up RFE-4.
 
 luna's entire **headless** path — every CPU core (65C816, SPC700, uPD96050,
 GSU), the PPU, S-DSP, DMA/HDMA, and the coprocessors — is **integer-only**.
-There is no floating point, no `Date::now`, no unseeded RNG, and no hash-map
+Nothing runs in floating point, there is no `Date::now`, no unseeded RNG, and no hash-map
 iteration on the emulation path. So for a fixed `(ROM, mapper, region, input
 script, power-on state, start state)` the execution is **bit-identical every
 run**. The power-on state is part of that tuple: the default (`--power-on
 zero`) and `ones` are constants, and `--power-on random` fills RAM from one
 **seeded** generator (`crates/luna-core/src/power.rs`) — the seed is printed,
 and `--power-on random=<seed>` replays the exact machine. A `random` run
-without an explicit seed is therefore *not* comparable run to run. (The only floating point in the
-project is the *GUI's* audio resampler and frame pacing — neither touches the
-headless trace/state/screenshot outputs.)
+without an explicit seed is therefore *not* comparable run to run. (One exception, at start-up only: the S-DSP's 512-entry Gaussian
+interpolation table is built once with `f64` `sin` / `cos`, as ares builds
+it, and rounded to `i16` (`build_gaussian_table`, `crates/luna-apu/src/dsp.rs`).
+Its entries are what the audio goldens pin: the PCM hashes recorded on an
+aarch64 machine pass in the x86_64 CI job. Beyond that table, floating
+point lives only off the emulation path: the GUI's audio resampler and
+frame pacing, the `luna-api` video filters and `luna diff --audio`.)
 
 The framebuffer hash (`--print-fbhash`) is a pure function of that full
 execution state, and it is **verified identical across architectures** (it is

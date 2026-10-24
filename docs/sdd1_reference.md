@@ -206,6 +206,10 @@ Mode summary (header bits 7:6): `0x00/0x40/0x80` = 2-plane (2/4 bpp gfx), `0xC0`
 
 ## 4. luna porting plan (stages)
 
+> **Landed.** All four stages are done: `Sdd1Decompressor` and `Sdd1Mapper`
+> live in `crates/luna-bus/src/sdd1.rs`, and Star Ocean and Street Fighter
+> Alpha 2 play. The plan is kept as the record of how the port was staged.
+
 1. **Pure `Sdd1Decompressor`** (luna-bus, new file): IM/GCD/BG/PEM/CM/OL + the two
    verbatim tables, reading input via a `&[u8] + offset` (or a closure). Unit-test
    the building blocks + table integrity in isolation — **zero SNES coupling**.

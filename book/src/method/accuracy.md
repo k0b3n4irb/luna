@@ -73,11 +73,20 @@ reason to deprioritise a port, never a reason to skip it.
 ## What "A everywhere" still asks for
 
 "Observably accurate where measured" is not yet a formal *A everywhere*, and
-Luna does not claim it is. What remains is **breadth of validation** — running
-the differential across more titles and more code paths — rather than missing
-features or known defects. A handful of sub-cycle refinements remain below the
-current measurement floor; they are theoretical-accuracy work, not bugs any game
-exposes.
+Luna does not claim it is. What remains is mostly **breadth of validation**,
+running the differential across more titles and more code paths, plus a short
+list of known divergences that the gap documents keep open by name:
+
+- the APU after `STOP`, and the 32 040 Hz output that consumers treat as 32 000
+  ([APU gaps](https://github.com/k0b3n4irb/luna/blob/main/docs/luna_apu_gaps.md) #8, #9);
+- the SA-1 `$2202` placeholder and the write-protection reset defaults
+  ([SA-1 gaps](https://github.com/k0b3n4irb/luna/blob/main/docs/luna_sa1_gaps.md) #2-#4);
+- the open rows of the [HDMA audit](https://github.com/k0b3n4irb/luna/blob/main/docs/hdma_ares_audit.md);
+- the SA-1 / Super FX scheduler grain.
+
+The [scorecard](https://github.com/k0b3n4irb/luna/blob/main/docs/accuracy_scorecard.md)
+is the current list. A handful of sub-cycle refinements also remain below the
+current measurement floor.
 
 That honesty is the point. Luna would rather under-claim a grade it can prove
 than over-claim one it cannot.

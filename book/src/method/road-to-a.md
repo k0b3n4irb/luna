@@ -11,8 +11,12 @@ architectural rewrites: a fully cooperative, cycle-interleaved scheduler, and a
 per-dot renderer. The useful finding is that **both are, in substance, already
 in place.**
 
-- The CPU, audio and coprocessor cores already synchronise at **bus-access
-  granularity** — one access at a time, never running ahead of each other.
+- The main CPU and the audio CPU already synchronise at **bus-access
+  granularity**: the SPC700 runs one bus access at a time and never runs
+  ahead of the 65C816. The SA-1 and the Super FX are still stepped in
+  batches against a master-clock budget; their results are exact, only
+  the placement of stalls differs from ares' cooperative threads. That
+  scheduler grain is the one structural item left on the scorecard.
 - The renderer already commits the visible part of a scanline **lazily**, with
   the register state that was live at each point, so mid-line changes are latched
   where they happen.
