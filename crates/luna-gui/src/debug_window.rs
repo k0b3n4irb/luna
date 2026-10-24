@@ -46,6 +46,8 @@ pub(crate) enum DebugPanel {
     Breakpoints,
     Debugger,
     SpcDebugger,
+    MemoryTools,
+    MemorySearch,
 }
 
 impl DebugPanel {
@@ -65,6 +67,8 @@ impl DebugPanel {
             Self::Breakpoints => "Breakpoints",
             Self::Debugger => "Debugger",
             Self::SpcDebugger => "SPC Debugger",
+            Self::MemoryTools => "Memory Tools",
+            Self::MemorySearch => "Memory Search",
         }
     }
 
@@ -84,6 +88,8 @@ impl DebugPanel {
             Self::Breakpoints => (420, 360),
             Self::Debugger => (1180, 760),
             Self::SpcDebugger => (1080, 700),
+            Self::MemoryTools => (960, 620),
+            Self::MemorySearch => (900, 560),
         }
     }
 }
@@ -460,6 +466,18 @@ impl DebugWindows {
                             if let Some(view) = snap.debugger.as_deref() {
                                 nav = Some(PanelNav::Debugger(ui::debugger_body(&mut body, view)));
                             }
+                        } else if panel == DebugPanel::MemorySearch {
+                            if let Some(view) = snap.memory_search.as_deref() {
+                                nav = Some(PanelNav::MemorySearch(ui::memory_search_body(
+                                    &mut body, view,
+                                )));
+                            }
+                        } else if panel == DebugPanel::MemoryTools {
+                            if let Some(view) = snap.memory_tools.as_deref() {
+                                nav = Some(PanelNav::MemoryTools(ui::memory_tools_body(
+                                    &mut body, view,
+                                )));
+                            }
                         } else {
                             egui::ScrollArea::both().show(&mut body, |ui| match panel {
                                 DebugPanel::Cpu => ui::cpu_state_body(ui, snap),
@@ -470,7 +488,9 @@ impl DebugWindows {
                                 DebugPanel::Tilemap => nav = ui::tilemap_body(ui, snap),
                                 DebugPanel::EventViewer
                                 | DebugPanel::Debugger
-                                | DebugPanel::SpcDebugger => {}
+                                | DebugPanel::SpcDebugger
+                                | DebugPanel::MemoryTools
+                                | DebugPanel::MemorySearch => {}
                                 DebugPanel::Spc700Disasm => nav = ui::spc700_disasm_body(ui, snap),
                                 DebugPanel::CpuDisasm => nav = ui::cpu_disasm_body(ui, snap),
                                 DebugPanel::Breakpoints => {

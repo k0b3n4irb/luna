@@ -401,6 +401,20 @@ pub(super) fn draw_menu_bar<F: FnMut(MenuAction)>(
                         emit(MenuAction::ToggleSpcDebugger);
                         ui.close();
                     }
+                    if ui
+                        .selectable_label(state.show_memory_tools, "Memory Tools")
+                        .clicked()
+                    {
+                        emit(MenuAction::ToggleMemoryTools);
+                        ui.close();
+                    }
+                    if ui
+                        .selectable_label(state.show_memory_search, "Memory Search")
+                        .clicked()
+                    {
+                        emit(MenuAction::ToggleMemorySearch);
+                        ui.close();
+                    }
                     ui.separator();
                     ui.label(egui::RichText::new("SPC700").weak().small());
                     if ui

@@ -23,6 +23,8 @@ mod debugger;
 mod disasm;
 mod event_viewer;
 mod memory;
+mod memory_search;
+mod memory_tools;
 mod menu;
 mod widgets;
 
@@ -34,6 +36,8 @@ pub(crate) use debugger::{
 pub(crate) use disasm::{cpu_disasm_body, spc700_disasm_body};
 pub(crate) use event_viewer::event_viewer_body;
 pub(crate) use memory::{cpu_memory_body, spc700_memory_body};
+pub(crate) use memory_search::memory_search_body;
+pub(crate) use memory_tools::memory_tools_body;
 pub(crate) use palette::palette_body;
 pub(crate) use registers::registers_body;
 pub(crate) use spc700::spc700_body;
@@ -108,6 +112,8 @@ pub(crate) enum MenuAction {
     ToggleDebugger,
     /// Open / close the SPC Debugger window.
     ToggleSpcDebugger,
+    ToggleMemoryTools,
+    ToggleMemorySearch,
     /// Debugger: execute one instruction (pauses first if running).
     StepInstruction,
     /// Debugger: run to the next frame boundary (pauses first if running).
@@ -155,6 +161,10 @@ pub(crate) enum PanelNav {
     EventViewer(EventViewerAction),
     /// What the Debugger window did this frame.
     Debugger(Vec<DebuggerAction>),
+    /// What the Memory Tools window did this frame.
+    MemoryTools(Vec<crate::memory_host::MemoryToolsAction>),
+    /// What the Memory Search window did this frame.
+    MemorySearch(Vec<crate::memory_host::MemorySearchAction>),
 }
 
 /// A change the Event Viewer's filter panel requests this frame, applied by
@@ -218,6 +228,10 @@ pub(crate) struct DebugSnapshot {
     pub breakpoints: Option<Vec<(luna_api::BreakpointInfo, Option<String>)>>,
     /// The Debugger window's content.
     pub debugger: Option<Box<DebuggerView>>,
+    /// The Memory Tools window's view.
+    pub memory_tools: Option<Box<crate::memory_host::MemoryToolsView>>,
+    /// The Memory Search window's view.
+    pub memory_search: Option<Box<crate::memory_host::MemorySearchView>>,
 }
 
 /// State the egui overlay reads to drive its widgets — passed in by
@@ -266,6 +280,8 @@ pub(crate) struct UiState<'a> {
     pub show_event_viewer: bool,
     pub show_debugger: bool,
     pub show_spc_debugger: bool,
+    pub show_memory_tools: bool,
+    pub show_memory_search: bool,
     /// When `Some((player, button))`, the input modal is waiting on the
     /// user to press a key to rebind that player's SNES button.
     pub pending_rebind: Option<(usize, crate::input::SnesButton)>,

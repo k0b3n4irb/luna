@@ -101,7 +101,7 @@ const fn bus_of(cpu: BreakCpu) -> MemoryKind {
 }
 
 /// The memory a registry space stands for.
-const fn memory_of(space: WatchSpace, cpu: BreakCpu) -> MemoryKind {
+pub(crate) const fn memory_of(space: WatchSpace, cpu: BreakCpu) -> MemoryKind {
     match space {
         WatchSpace::Bus => bus_of(cpu),
         WatchSpace::Vram => MemoryKind::SnesVideoRam,
@@ -114,6 +114,13 @@ const fn memory_of(space: WatchSpace, cpu: BreakCpu) -> MemoryKind {
         WatchSpace::WorkRam => MemoryKind::SnesWorkRam,
         WatchSpace::SaveRam => MemoryKind::SnesSaveRam,
     }
+}
+
+/// The memory a breakpoint's range is in: its CPU's bus, or the memory
+/// its watch space names.
+#[must_use]
+pub const fn breakpoint_memory(b: &BreakpointInfo) -> MemoryKind {
+    memory_of(b.space, b.cpu)
 }
 
 impl Emulator {

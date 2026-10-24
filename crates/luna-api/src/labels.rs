@@ -736,10 +736,23 @@ impl crate::Emulator {
         name: &str,
         bus: MemoryKind,
     ) -> Result<Option<u32>, crate::ApiError> {
-        let view = self.view()?;
         let Some((memory, offset)) = self.labels.find(name) else {
             return Ok(None);
         };
+        self.bus_address(bus, memory, offset)
+    }
+
+    /// Where on `bus` (`SnesMemory` or `SpcMemory`) byte `offset` of
+    /// `memory` is seen now: work RAM at `$7E:xxxx`, a register in bank
+    /// `$00`, a cartridge byte at its first mirror from the program bank's
+    /// quarter of the map. `None` if the bus cannot see it.
+    pub fn bus_address(
+        &self,
+        bus: MemoryKind,
+        memory: MemoryKind,
+        offset: u32,
+    ) -> Result<Option<u32>, crate::ApiError> {
+        let view = self.view()?;
         if memory == bus {
             return Ok(Some(offset));
         }

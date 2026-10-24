@@ -7,6 +7,20 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ## [Unreleased]
 
+### Added
+
+- **GUI: Memory Tools and Memory Search windows, Mesen2's.** *Debug →
+  Memory Tools* shows any memory as hex and text, coloured by the
+  accesses (with their fade), code / data, labels, frozen bytes and
+  breakpoints; edits with undo, freeze, Find (hex with `?`, text through
+  a `.tbl`, integers, with code / data / access filters), Navigate to,
+  `.dmp` import / export, Add to Watch, Edit Label, View in Debugger.
+  *Debug → Memory Search* is the cheat finder on any memory, with a
+  sortable table of candidates, their counters and a live Match column.
+  API: `memory_view`, `memory_tooltip`, `memory_find`,
+  `memory_navigate`, `memory_edit` / `memory_undo`, `memory_import`,
+  `memory_dump_name`, `memory_behind`, `bus_address`, `TextTable`.
+
 ## [1.40.0] — 2026-10-21
 
 The GUI gets Mesen2's Debugger window, for the 65C816 and for the

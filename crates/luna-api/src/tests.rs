@@ -4096,3 +4096,122 @@ fn memory_search_narrows_and_undoes() {
     assert!(n > 0x1_0000 && n < 0x2_0000, "{n}");
     assert_eq!(e.mem_search_count().unwrap(), (n, 1));
 }
+
+/// The Memory Viewer's data: colours by access with their fade, frozen
+/// bytes, Find with wildcards and filters, Navigate to, edits and Undo.
+#[test]
+fn the_memory_viewer_colours_finds_and_undoes() {
+    use crate::memory::MemoryKind;
+    use crate::memory_view::{
+        AccessKind, FadeSpeed, FindData, FindFilters, HighlightOptions, NavTarget,
+    };
+    // $8000: STZ $0012 ; then $8003: LDA $0010 ; STA $0011 ; BRA $8003
+    let code = [
+        0x9C, 0x12, 0x00, 0xAD, 0x10, 0x00, 0x8D, 0x11, 0x00, 0x80, 0xF8,
+    ];
+    let mut e = Emulator::new();
+    e.load_rom_bytes(demo_lorom_with(&code, None)).unwrap();
+    e.enable_access_counters(true).unwrap();
+    e.set_write_freeze(MemoryKind::SnesMemory, 0x7E_0013, 1, true)
+        .unwrap();
+    e.step(100).unwrap();
+    let opts = HighlightOptions::default();
+    let v = e
+        .memory_view(MemoryKind::SnesMemory, 0x7E_0010, 4, &opts)
+        .unwrap();
+    assert_eq!(v[0].access, Some((AccessKind::Read, 1.0)));
+    assert_eq!(v[1].access, Some((AccessKind::Write, 1.0)));
+    assert_eq!(v[2].access, Some((AccessKind::Write, 1.0)));
+    assert!(v[3].frozen && !v[2].frozen);
+    let rom = e.memory_view(MemoryKind::SnesPrgRom, 0, 1, &opts).unwrap();
+    assert_eq!(rom[0].access, Some((AccessKind::Exec, 1.0)));
+    // $12 was written once: 250 frames later the Fast window (120) is
+    // over, the Normal one (300) in its last fifth, fading; Slow and Do
+    // not fade still at full strength. $10, read every loop, stays fresh.
+    for _ in 0..250 {
+        e.step_until_frame(1_000_000).unwrap();
+    }
+    let at = |fade, a| {
+        let o = HighlightOptions { fade, ..opts };
+        e.memory_view(MemoryKind::SnesWorkRam, a, 1, &o).unwrap()[0].access
+    };
+    assert_eq!(at(FadeSpeed::Fast, 0x12), None);
+    let (k, s) = at(FadeSpeed::Normal, 0x12).unwrap();
+    assert!(k == AccessKind::Write && s > 0.7 && s < 0.9, "{s}");
+    assert_eq!(at(FadeSpeed::Slow, 0x12), Some((AccessKind::Write, 1.0)));
+    assert_eq!(
+        at(FadeSpeed::DoNotFade, 0x12),
+        Some((AccessKind::Write, 1.0))
+    );
+    assert_eq!(at(FadeSpeed::Fast, 0x10), Some((AccessKind::Read, 1.0)));
+    let tip = e.memory_tooltip(MemoryKind::SnesMemory, 0x7E_0010).unwrap();
+    assert!(
+        tip.contains("SnesWorkRam $10") && tip.contains("R: "),
+        "{tip}"
+    );
+
+    // Find: the program's bytes, a wildcard in the middle.
+    let none = FindFilters::default();
+    let q = FindData::Hex(vec![Some(0x8D), None, Some(0x00)]);
+    assert_eq!(
+        e.memory_find(MemoryKind::SnesPrgRom, 0, &q, &none, None, false)
+            .unwrap(),
+        Some((6, 3))
+    );
+    // Only bytes executed: the operands count as executed too.
+    let executed = FindFilters {
+        executed: true,
+        ..none
+    };
+    assert_eq!(
+        e.memory_find(MemoryKind::SnesPrgRom, 0, &q, &executed, None, false)
+            .unwrap(),
+        Some((6, 3))
+    );
+    let text = FindData::Text {
+        text: "luna api".into(),
+        case_sensitive: false,
+    };
+    assert_eq!(
+        e.memory_find(MemoryKind::SnesPrgRom, 0, &text, &none, None, true)
+            .unwrap(),
+        Some((0x7FC0, 8))
+    );
+    // Navigate: the next written block after $10 is $11-$12 (from $11,
+    // the block it sits in is skipped and the jump wraps around to it).
+    assert_eq!(
+        e.memory_navigate(
+            MemoryKind::SnesWorkRam,
+            0x10,
+            NavTarget::Write,
+            true,
+            FadeSpeed::Normal
+        )
+        .unwrap(),
+        Some(0x11)
+    );
+    // Edits and Undo.
+    let before = e.read_memory(MemoryKind::SnesWorkRam, 0x100, 2).unwrap();
+    e.memory_edit(MemoryKind::SnesWorkRam, 0x100, &[1, 2])
+        .unwrap();
+    e.memory_edit(MemoryKind::SnesWorkRam, 0x101, &[9]).unwrap();
+    assert_eq!(e.memory_undo_depth(), 2);
+    assert!(e.memory_undo().unwrap());
+    assert_eq!(
+        e.read_memory(MemoryKind::SnesWorkRam, 0x100, 2).unwrap(),
+        [1, 2]
+    );
+    assert!(e.memory_undo().unwrap());
+    assert_eq!(
+        e.read_memory(MemoryKind::SnesWorkRam, 0x100, 2).unwrap(),
+        before
+    );
+    assert!(!e.memory_undo().unwrap());
+    assert!(e.memory_import(MemoryKind::SnesMemory, &[0]).is_err());
+    assert!(e.memory_import(MemoryKind::SnesCgRam, &[0; 0x201]).is_err());
+    assert_eq!(e.memory_import(MemoryKind::SnesCgRam, &[7; 4]).unwrap(), 4);
+    assert_eq!(
+        e.memory_dump_name(MemoryKind::SnesWorkRam),
+        "LUNA API TEST DEMO - SnesWorkRam.dmp"
+    );
+}

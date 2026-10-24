@@ -9,7 +9,7 @@ in real time as the game runs.
 
 | Group | Panels |
 |---|---|
-| **CPU** (65C816) | State (registers/flags), Memory (hex), Disassembly; Breakpoints; Mesen2's **Debugger** and **SPC Debugger** windows (below) |
+| **CPU** (65C816) | State (registers/flags), Memory (hex), Disassembly; Breakpoints; Mesen2's **Debugger** and **SPC Debugger** windows; **Memory Tools** and **Memory Search** (below) |
 | **SPC700** (audio CPU) | State, Memory (ARAM hex), Disassembly |
 | **PPU** | Sprites (OAM), Palette (CGRAM), Tilemap, **Event Viewer** |
 | **System** | Registers (full snapshot) |
@@ -122,6 +122,58 @@ of that CPU comes forward; the other one shows where its CPU stands.
 Not there yet: step back (rewind), the CPU-cycle and PPU-cycle steps
 (luna runs instructions whole), the code/data logger's menu, the
 assembler, the memory viewer link, the coprocessors' windows.
+
+## Memory Tools
+
+*Debug → Memory Tools* is Mesen2's Memory Viewer. The *Memory Type* list
+holds every memory the cartridge has: the CPU and SPC700 buses, PRG ROM,
+work RAM, save RAM, VRAM, OAM, CGRAM, ARAM, the IPL ROM, the coprocessors'.
+
+- **Colours.** While the window is open luna counts every access to every
+  byte ([access counters](mcp.md#access-counters)). A byte read lately is
+  blue, written red, run green; the colour fades out over the last fifth
+  of the *Fade speed* window (120, 300 or 600 frames, or never). Frozen
+  bytes are magenta. The options panel also shades code and data (from the
+  code log), labelled bytes, and frames the bytes a breakpoint covers.
+- **Editing.** Click a byte and type two hex digits; with several bytes
+  selected (Shift + arrows, or drag), one value fills them all. In the text
+  column, type characters. `Ctrl+Z` undoes (the last 200 edits), `Ctrl+C`
+  / `Ctrl+V` copy and paste hex. Edits never go through the bus: no
+  register side effect, ROM included.
+- **Right click.** *Freeze* / *Unfreeze* (`Ctrl+Q` / `Ctrl+W`) on a bus:
+  the game's writes to that address are dropped
+  ([write freezes](mcp.md#write-freezes)); *Add to Watch*; *Edit
+  Breakpoint* (a read / write breakpoint on the selection, toggled);
+  *Edit Label*; *View in Debugger*; *View in memory* / *View in CPU
+  memory* switches between a bus address and the byte behind it.
+- **Search.** `Ctrl+G` goes to an address. `Ctrl+F` finds hex bytes (`A9 ?
+  8D`: `?` is any byte), text (through the `.tbl` when asked) or an
+  integer, filtered by code / data and by access (read, written, executed,
+  in the last N frames); `F3` / `Shift+F3` find again. *Search → Navigate
+  to* (and the ◁ ▷ buttons) jumps to the next or previous block read,
+  written, run, code, data or unidentified.
+- **Files.** *Import* / *Export* load and save a memory as a raw `.dmp`
+  (`<ROM> - <Memory>.dmp`); *Load TBL file* reads a text table
+  (`HEX=text` lines) for the text column. The options and the table are
+  kept in the ROM's workspace.
+
+## Memory Search
+
+*Debug → Memory Search* is Mesen2's cheat finder, on any memory (work RAM
+by default). Every address starts as a candidate; *Apply filter* keeps
+those whose value (8, 16 or 32-bit, shown hex, signed or unsigned)
+compares as asked — *Equal*, *Not equal*, *Less*, *Greater*… — with the
+*previous search value*, the *previous refresh value* (about 30 times a
+second), a *specific value* or the value at a *specific address*. *Undo*
+takes filters back, *Reset* starts over. The table shows each candidate's
+value, its value at the previous refresh, its reads, writes and runs with
+the master cycles since the last of each, and a live *Match* column for
+the filter being set up. Click a column header to sort, again to reverse.
+
+To find a lives counter: start, lose a life, filter *Previous search
+value / Less than*; play without losing one, filter *Equal*; repeat until
+a few rows remain. The same search runs from the MCP
+([Memory Search](mcp.md#memory-search)).
 
 ## GUI conveniences
 

@@ -33,6 +33,7 @@ mod debug_window;
 mod debugger_host;
 mod emu_thread;
 mod input;
+mod memory_host;
 mod ui;
 mod video;
 
@@ -281,6 +282,16 @@ struct LunaApp {
     workspace_saved_at: std::time::Instant,
     /// A Debugger file dialog in flight: what it is for, and its answer.
     debugger_file_rx: Option<(DebuggerFile, mpsc::Receiver<Option<PathBuf>>)>,
+    /// The Memory Tools window's state.
+    memory_tools: memory_host::MemoryToolsHost,
+    /// Its last view, shown while the emulator is busy.
+    memory_tools_view: Option<Box<memory_host::MemoryToolsView>>,
+    /// The Memory Search window's state.
+    memory_search: memory_host::MemorySearchHost,
+    /// Its last view.
+    memory_search_view: Option<Box<memory_host::MemorySearchView>>,
+    /// Memory Tools asked to show an address in a Debugger window.
+    pending_debugger_goto: Option<(luna_api::ListingCpu, u32)>,
 }
 
 /// The window of a debugger's CPU.
@@ -298,6 +309,12 @@ enum DebuggerFile {
     ExportLabels(String),
     ImportWatches(luna_api::ListingCpu),
     ExportWatches(String),
+    /// Memory Tools: a dump to load into this memory.
+    ImportDump(luna_api::MemoryKind),
+    /// Memory Tools: these bytes, under this file name.
+    ExportDump(String, Vec<u8>),
+    /// Memory Tools: a text table.
+    LoadTbl,
 }
 
 impl LunaApp {
@@ -389,6 +406,11 @@ impl LunaApp {
             debugger: debugger_host::Debuggers::default(),
             debugger_steps_seen: 0,
             debugger_file_rx: None,
+            memory_tools: memory_host::MemoryToolsHost::default(),
+            memory_tools_view: None,
+            pending_debugger_goto: None,
+            memory_search: memory_host::MemorySearchHost::default(),
+            memory_search_view: None,
             workspace_file: None,
             workspace_saved_at: std::time::Instant::now(),
         };
@@ -493,6 +515,10 @@ impl LunaApp {
             self.workspace_file = Some((file, written));
         }
         self.debugger.rom_loaded(&mut em, loaded_ws.as_ref());
+        self.memory_tools.rom_loaded(&mut em, loaded_ws.as_ref());
+        self.memory_tools_view = None;
+        self.memory_search.rom_loaded(&mut em);
+        self.memory_search_view = None;
         if let Ok(mut guard) = self.emu.lock() {
             *guard = Some(em);
         }
@@ -787,6 +813,7 @@ impl LunaApp {
         let ws = self.emu.lock().ok().and_then(|g| {
             g.as_ref().and_then(|em| em.workspace().ok()).map(|mut ws| {
                 self.debugger.store_workspace(&mut ws);
+                self.memory_tools.store_workspace(&mut ws);
                 ws
             })
         });
@@ -1465,6 +1492,15 @@ impl ApplicationHandler for LunaApp {
         self.poll_gamepads();
         self.poll_break_hit(event_loop);
         self.poll_debugger_file();
+        if let Some((cpu, addr)) = self.pending_debugger_goto.take() {
+            let panel = debugger_panel(cpu);
+            if !self.debug_windows.is_open(panel) {
+                self.debug_windows.toggle(event_loop, panel);
+                self.sync_debugger_open();
+            }
+            self.apply_debugger(cpu, vec![crate::ui::DebuggerAction::Goto(addr)]);
+            self.debug_windows.focus(panel);
+        }
         if self.rom_loaded && self.workspace_saved_at.elapsed() >= std::time::Duration::from_mins(1)
         {
             self.save_workspace();
@@ -1591,6 +1627,8 @@ impl LunaApp {
             show_event_viewer: self.debug_windows.is_open(DebugPanel::EventViewer),
             show_debugger: self.debug_windows.is_open(DebugPanel::Debugger),
             show_spc_debugger: self.debug_windows.is_open(DebugPanel::SpcDebugger),
+            show_memory_tools: self.debug_windows.is_open(DebugPanel::MemoryTools),
+            show_memory_search: self.debug_windows.is_open(DebugPanel::MemorySearch),
             pending_rebind: self.pending_rebind,
             pending_hotkey_rebind: self.pending_hotkey_rebind,
             screenshot_status: self.screenshot_status.clone(),
@@ -1716,7 +1754,10 @@ impl LunaApp {
                                 .map(|b| b.lo)
                                 .collect();
                         }
-                        DebugPanel::Debugger | DebugPanel::SpcDebugger => {}
+                        DebugPanel::Debugger
+                        | DebugPanel::SpcDebugger
+                        | DebugPanel::MemoryTools
+                        | DebugPanel::MemorySearch => {}
                         DebugPanel::Breakpoints => {
                             snap.breakpoints = em.bp_list().ok().map(|list| {
                                 list.into_iter()
@@ -1746,7 +1787,9 @@ impl LunaApp {
             DebugPanel::SpcDebugger => Some(luna_api::ListingCpu::Spc),
             _ => None,
         };
-        let mut snap = if dbg_cpu.is_some() {
+        let mut snap = if dbg_cpu.is_some()
+            || matches!(panel, DebugPanel::MemoryTools | DebugPanel::MemorySearch)
+        {
             DebugSnapshot::default()
         } else {
             self.build_panel_snapshot(panel)
@@ -1770,6 +1813,24 @@ impl LunaApp {
                 v.paused = paused;
             }
             snap.debugger.clone_from(&self.debugger.views[slot]);
+        }
+        if panel == DebugPanel::MemoryTools {
+            self.sync_memory_tools_open();
+            if let Ok(mut g) = self.emu.try_lock()
+                && let Some(em) = g.as_mut()
+            {
+                self.memory_tools_view = Some(Box::new(self.memory_tools.view(em)));
+            }
+            snap.memory_tools.clone_from(&self.memory_tools_view);
+        }
+        if panel == DebugPanel::MemorySearch {
+            self.sync_memory_tools_open();
+            if let Ok(mut g) = self.emu.try_lock()
+                && let Some(em) = g.as_mut()
+            {
+                self.memory_search_view = Some(Box::new(self.memory_search.view(em)));
+            }
+            snap.memory_search.clone_from(&self.memory_search_view);
         }
         let (nav, close) = self.debug_windows.render(id, &snap);
         match nav {
@@ -1889,11 +1950,109 @@ impl LunaApp {
                 let cpu = dbg_cpu.unwrap_or(luna_api::ListingCpu::Snes);
                 self.apply_debugger(cpu, actions);
             }
+            Some(PanelNav::MemoryTools(actions)) => self.apply_memory_tools(actions),
+            Some(PanelNav::MemorySearch(actions)) => {
+                if let Ok(mut g) = self.emu.lock()
+                    && let Some(em) = g.as_mut()
+                {
+                    for a in actions {
+                        self.memory_search.apply(em, a);
+                    }
+                }
+            }
             None => {}
         }
         if close {
             self.debug_windows.close(id);
             self.sync_debugger_open();
+            self.sync_memory_tools_open();
+        }
+    }
+
+    /// See the Memory Tools and Memory Search windows open or close: the
+    /// access counters run while either is open.
+    fn sync_memory_tools_open(&mut self) {
+        let tools = self.debug_windows.is_open(DebugPanel::MemoryTools);
+        let search = self.debug_windows.is_open(DebugPanel::MemorySearch);
+        if tools == self.memory_tools.open && search == self.memory_search.open {
+            return;
+        }
+        let tools_closed = self.memory_tools.open && !tools;
+        if let Ok(mut g) = self.emu.lock()
+            && let Some(em) = g.as_mut()
+        {
+            if tools != self.memory_tools.open {
+                if tools {
+                    self.memory_tools.opened(em);
+                } else {
+                    self.memory_tools.closed(em, search);
+                }
+            }
+            if search != self.memory_search.open {
+                if search {
+                    self.memory_search.opened(em);
+                } else {
+                    self.memory_search.closed(em, tools);
+                }
+            }
+        } else {
+            self.memory_tools.open = tools;
+            self.memory_search.open = search;
+        }
+        if tools_closed {
+            self.save_workspace();
+        }
+    }
+
+    /// Apply what the Memory Tools window did, under the emulator lock.
+    fn apply_memory_tools(&mut self, actions: Vec<memory_host::MemoryToolsAction>) {
+        use memory_host::{MemoryEffect, MemoryToolsAction};
+        if actions.iter().all(|a| {
+            matches!(
+                a,
+                MemoryToolsAction::VisibleRows(_) | MemoryToolsAction::Hover(_)
+            )
+        }) {
+            // Cheap bookkeeping: no need to wait on the emulator for it.
+            if let Ok(mut g) = self.emu.try_lock()
+                && let Some(em) = g.as_mut()
+            {
+                for a in actions {
+                    self.memory_tools.apply(em, a);
+                }
+            }
+            return;
+        }
+        let mut effects = Vec::new();
+        if let Ok(mut g) = self.emu.lock()
+            && let Some(em) = g.as_mut()
+        {
+            for a in actions {
+                effects.extend(self.memory_tools.apply(em, a));
+            }
+            self.memory_tools_view = Some(Box::new(self.memory_tools.view(em)));
+        }
+        for fx in effects {
+            match fx {
+                MemoryEffect::Import(kind) => {
+                    self.debugger_file_dialog(DebuggerFile::ImportDump(kind));
+                }
+                MemoryEffect::Export(name, bytes) => {
+                    self.debugger_file_dialog(DebuggerFile::ExportDump(name, bytes));
+                }
+                MemoryEffect::LoadTbl => self.debugger_file_dialog(DebuggerFile::LoadTbl),
+                MemoryEffect::AddWatch(cpu, entries) => {
+                    let actions = entries
+                        .into_iter()
+                        .map(crate::ui::DebuggerAction::AddWatch)
+                        .collect();
+                    self.apply_debugger(cpu, actions);
+                }
+                MemoryEffect::ViewInDebugger(cpu, addr) => {
+                    self.pending_debugger_goto = Some((cpu, addr));
+                }
+                MemoryEffect::SyncBreakpoints => self.sync_has_breakpoints(),
+            }
         }
     }
 
@@ -2053,6 +2212,18 @@ impl LunaApp {
                         .add_filter("Watch file", &["txt"])
                         .set_file_name(format!("{stem}.txt"))
                         .save_file(),
+                    DebuggerFile::ImportDump(_) => d
+                        .add_filter("Memory dump", &["dmp"])
+                        .add_filter("All files", &["*"])
+                        .pick_file(),
+                    DebuggerFile::ExportDump(name, _) => d
+                        .add_filter("Memory dump", &["dmp"])
+                        .set_file_name(name)
+                        .save_file(),
+                    DebuggerFile::LoadTbl => d
+                        .add_filter("Text table", &["tbl"])
+                        .add_filter("All files", &["*"])
+                        .pick_file(),
                 };
                 let _ = tx.send(path);
             })
@@ -2089,6 +2260,22 @@ impl LunaApp {
                     .map(|t| self.debugger.host(cpu).set_watches(&t))
                     .map_err(|e| e.to_string()),
             ),
+            DebuggerFile::ImportDump(kind) => match std::fs::read(&path) {
+                Ok(data) => self.emu.lock().ok().and_then(|mut g| {
+                    g.as_mut().map(|em| {
+                        em.memory_import(kind, &data)
+                            .map(|_| ())
+                            .map_err(|e| e.to_string())
+                    })
+                }),
+                Err(e) => Some(Err(e.to_string())),
+            },
+            DebuggerFile::ExportDump(_, bytes) => {
+                Some(std::fs::write(&path, bytes).map_err(|e| e.to_string()))
+            }
+            DebuggerFile::LoadTbl => {
+                Some(self.memory_tools.load_tbl(&path).map_err(|e| e.to_string()))
+            }
         };
         if let Some(Err(e)) = result {
             eprintln!("luna-gui: {}: {e}", path.display());
@@ -2123,6 +2310,16 @@ impl LunaApp {
                 self.debug_windows
                     .toggle(event_loop, DebugPanel::SpcDebugger);
                 self.sync_debugger_open();
+            }
+            MenuAction::ToggleMemoryTools => {
+                self.debug_windows
+                    .toggle(event_loop, DebugPanel::MemoryTools);
+                self.sync_memory_tools_open();
+            }
+            MenuAction::ToggleMemorySearch => {
+                self.debug_windows
+                    .toggle(event_loop, DebugPanel::MemorySearch);
+                self.sync_memory_tools_open();
             }
             MenuAction::StepInstruction => self.step_instruction(),
             MenuAction::StepFrame => self.step_frame(),

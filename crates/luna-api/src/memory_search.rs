@@ -296,7 +296,11 @@ impl Emulator {
         let format = format.check()?;
         let s = self.mem_search()?;
         let now = self.search_snapshot(s.kind)?;
-        let counted = self.access_counters_enabled();
+        let counters = if self.access_counters_enabled() {
+            self.access_counters(s.kind, 0, now.len()).ok()
+        } else {
+            None
+        };
         let rows = s.candidates.iter().skip(first).take(count);
         Ok(rows
             .map(|&a| {
@@ -310,10 +314,7 @@ impl Emulator {
                         format.read(&now, at).is_some()
                             && passes(format, f, at, value, &s.searched, &s.refreshed, &now)
                     }),
-                    counters: counted
-                        .then(|| self.access_counters(s.kind, a, 1).ok())
-                        .flatten()
-                        .and_then(|c| c.first().copied()),
+                    counters: counters.as_ref().map(|c| c[at]),
                 }
             })
             .collect())

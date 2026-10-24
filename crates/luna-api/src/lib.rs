@@ -53,6 +53,10 @@ pub const VERSION: &str = env!("LUNA_BUILD_VERSION");
 pub mod access;
 pub use access::AccessCounter;
 pub use memory_search::{SearchFilter, SearchFormat, SearchOperator, SearchRow, SearchTarget};
+pub use memory_view::{
+    AccessKind, ByteShade, ByteView, FadeSpeed, FindData, FindFilters, HighlightOptions, NavTarget,
+    TextTable,
+};
 pub mod code_log;
 pub mod debugger;
 pub mod dsp1_commands;
@@ -64,6 +68,7 @@ pub mod labels;
 pub mod listing;
 pub mod memory;
 pub mod memory_search;
+pub mod memory_view;
 pub mod paths;
 mod power_on;
 pub mod symbols;
@@ -91,7 +96,7 @@ pub use vocab::{
     dsp_register_index, dsp_register_name, dsp_register_table, force_mapper_names, parse_region,
 };
 pub use vram_writers::{VramOverlap, VramWriteKind, VramWriterRow, VramWriters, VramWritersReport};
-pub use workspace::{Workspace, workspace_path};
+pub use workspace::{Workspace, breakpoint_memory, workspace_path};
 
 /// Parse a controller-device name — the CLI `--port1/--port2` and MCP
 /// `set_port_device` vocabulary: `pad` (or `joypad`), `mouse`, `superscope`,
@@ -1391,6 +1396,8 @@ pub struct Emulator {
     search_session: Option<SearchSession>,
     /// Memory Search (Mesen2's), over any memory.
     mem_search: Option<memory_search::MemSearch>,
+    /// The Memory Viewer's edits, for its Undo.
+    edit_history: memory_view::EditHistory,
     /// The profiler's per-frame figures by folded row (`OpenSNES` R-B),
     /// folded from the core's completed frames on every run call so the
     /// pending list never outgrows one call.
@@ -1756,6 +1763,7 @@ impl Emulator {
             rom_file: None,
             search_session: None,
             mem_search: None,
+            edit_history: memory_view::EditHistory::new(),
             profile_frames: std::collections::BTreeMap::new(),
             profile_frames_done: 0,
             watch_stood_at: None,
@@ -2074,6 +2082,7 @@ impl Emulator {
                 self.reset_labels();
                 self.clear_code_log();
                 self.mem_search = None;
+                self.edit_history.clear();
                 self.rom_file = None;
                 let logging = self.code_logging;
                 self.enable_code_log(logging);
