@@ -85,6 +85,7 @@ means that transport has no form of it.
 | stop when an address is reached, read or written | — | `bp_add`, `run_until_break`, `run_until_pc`, `run_until_mem_read` | [Breakpoints & stepping](using/debugging.md#breakpoints--stepping) |
 | see where the CPU is and how it got there | `--call-stack` | `enable_call_stack`, `call_stack` | [`--call-stack`](using/cli-run-state.md#where-is-the-cpu-and-how-did-it-get-there---call-stack) |
 | trace a window of instructions | `--cpu-trace`, `--cpu-trace-from` | `enable_cpu_trace`, `take_cpu_trace` | [Tracing a window](using/cli-run-state.md#tracing-a-window-of-cpu-execution) |
+| read a trace of the instructions as Mesen2's trace logger writes it, or only where a condition holds | `--trace-log`, `--trace-format`, `--trace-condition`, `--trace-no-labels` | `trace_logger_start`, `trace_logger_rows`, `trace_logger_stop` | [Mesen2's trace logger](using/cli-run-state.md#mesen2s-trace-logger---trace-log) |
 | read the code at an address | — | `disasm_cpu`, `disasm_spc` | [MCP catalogue](using/mcp.md#mcp-tool-catalogue) |
 | tell a hang from a wait | `scheduler.last_nmi_frame` in the state JSON | `loop_probe` | [The state JSON](using/state-json.md) |
 | find the address of a variable I can only see on screen | — | `search_begin`, `search_refine`, `search_results` | [MCP catalogue](using/mcp.md#mcp-tool-catalogue) |

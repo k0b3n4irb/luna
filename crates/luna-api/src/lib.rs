@@ -57,6 +57,9 @@ pub use memory_view::{
     AccessKind, ByteShade, ByteView, FadeSpeed, FindData, FindFilters, HighlightOptions, NavTarget,
     TextTable,
 };
+pub use trace_logger::{
+    StatusFormat, TRACE_ROWS, TraceCpu, TraceFormatOptions, TraceOptions, TraceRow, auto_format,
+};
 pub mod code_log;
 pub mod debugger;
 pub mod dsp1_commands;
@@ -72,6 +75,7 @@ pub mod memory_view;
 pub mod paths;
 mod power_on;
 pub mod symbols;
+pub mod trace_logger;
 pub mod video;
 mod vocab;
 mod vram_writers;
@@ -1389,6 +1393,8 @@ pub struct Emulator {
     code_log: code_log::CodeLog,
     /// Whether the run loop adds to [`Self::code_log`].
     code_logging: bool,
+    /// The trace logger (see [`trace_logger`]).
+    trace: trace_logger::TraceLogs,
     /// The file the ROM was loaded from (`None` for a ROM from bytes).
     rom_file: Option<std::path::PathBuf>,
     /// Live narrowing memory-search session (issue #177); `None` until
@@ -1760,6 +1766,7 @@ impl Emulator {
             default_labels: true,
             code_log: code_log::CodeLog::new(),
             code_logging: false,
+            trace: trace_logger::TraceLogs::new(),
             rom_file: None,
             search_session: None,
             mem_search: None,
@@ -2327,7 +2334,12 @@ impl Emulator {
         let mut code_log = self
             .code_logging
             .then(|| std::mem::take(&mut self.code_log));
+        let mut trace = self.trace.active().then(|| std::mem::take(&mut self.trace));
+        let (labels, symbols) = (&self.labels, self.symbols.as_ref());
         let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        if let Some(t) = trace.as_ref() {
+            t.arm(snes);
+        }
         // A CPU left standing on a breakpoint runs again.
         snes.apu_real.resume_break();
         if let Some(debug) = snes.mapper.coproc_debug() {
@@ -2351,8 +2363,12 @@ impl Emulator {
                 // after the step, `pc` is already the next one.
                 let sp_pc = (u32::from(snes.cpu.pb) << 16) | u32::from(snes.cpu.pc);
                 let sp_before = snes.cpu.sp;
+                let trace_pre = trace.as_ref().and_then(|t| t.pre(labels, symbols, snes));
                 snes.step();
                 executed += 1;
+                if let (Some(t), Some(pre)) = (trace.as_mut(), trace_pre) {
+                    t.post(labels, symbols, snes, pre);
+                }
                 // Deepest native-mode stack REACH (`OpenSNES` R3). Two rules,
                 // both needed for the figure to mean anything:
                 //
@@ -2392,6 +2408,9 @@ impl Emulator {
             (None, false)
         }));
         self.call_stack = cstack;
+        if let Some(t) = trace {
+            self.trace = t;
+        }
         if let Some(mut log) = code_log {
             if let Some(snes) = self.snes.as_mut() {
                 log.collect_spc(snes);

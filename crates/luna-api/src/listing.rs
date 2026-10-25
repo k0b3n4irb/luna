@@ -218,6 +218,29 @@ enum Item {
     Block { len: u32, code: RowCode },
 }
 
+/// The label name a bus address shows on `cpu`, for operands and
+/// annotations: a debugger label (`name+N` inside one), else a loaded
+/// symbol on that very address.
+pub(crate) fn bus_name(
+    labels: &crate::labels::LabelStore,
+    symbols: Option<&crate::SymbolTable>,
+    view: View<'_>,
+    cpu: ListingCpu,
+    addr: u32,
+) -> Option<String> {
+    crate::labels::label_hit(labels, view, cpu.bus(), addr)
+        .and_then(|h| h.name())
+        .or_else(|| {
+            let t = symbols?;
+            let near = match cpu {
+                ListingCpu::Snes => t.nearest(addr),
+                ListingCpu::Spc => t.nearest_spc(addr as u16),
+            };
+            // Only a symbol on that very address names it.
+            near.filter(|n| !n.contains('+'))
+        })
+}
+
 impl Emulator {
     /// `count` rows of `cpu`'s listing from `from` (see the module doc).
     pub fn listing(
@@ -425,19 +448,13 @@ impl Emulator {
 
     /// The label name a bus address shows, for operands and annotations.
     fn bus_name(&self, cpu: ListingCpu, addr: u32) -> Option<String> {
-        self.label_at(cpu.bus(), addr)
-            .ok()
-            .flatten()
-            .and_then(|h| h.name())
-            .or_else(|| {
-                let t = self.symbols.as_ref()?;
-                let near = match cpu {
-                    ListingCpu::Snes => t.nearest(addr),
-                    ListingCpu::Spc => t.nearest_spc(addr as u16),
-                };
-                // Only a symbol on that very address names it.
-                near.filter(|n| !n.contains('+'))
-            })
+        bus_name(
+            &self.labels,
+            self.symbols.as_ref(),
+            self.view().ok()?,
+            cpu,
+            addr,
+        )
     }
 
     /// The breakpoint Mesen2 draws on the row of `addr`.

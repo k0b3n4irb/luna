@@ -73,8 +73,13 @@ timing/accuracy-sensitive subsystem:
 
 Reusable luna diagnostics already exist: `--superfx-trace`, `--dma-trace`,
 `--mem-trace`, `--dump-vram`, `--dump-coproc-ram`, `luna frames`, and the
-`gsu_differential` / `gsu_trajectory` test harnesses. Prefer extending these
-over inventing one-off prints. luna's CLI/API-introspectable design exists
+`gsu_differential` / `gsu_trajectory` test harnesses. For the 65C816,
+`luna state --trace-log` writes Mesen2's trace file, `tools/mesen-trace-log.py`
+writes Mesen2's own (headless, through its native core — its Lua `exec`
+callback fires before the opcode fetch, not where the trace logger looks),
+and `tools/trace-diff.py` pairs them row by row: the first row whose beam
+differs with identical registers is the first timing divergence. Prefer
+extending these over inventing one-off prints. luna's CLI/API-introspectable design exists
 precisely to make this differential method tractable — use it.
 
 ## 4. What is forbidden

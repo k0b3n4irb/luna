@@ -1879,6 +1879,71 @@ pub struct EnableCodeLogParams {
     pub on: bool,
 }
 
+/// `trace_logger_start` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct TraceLoggerStartParams {
+    /// `snes` (the 65C816, the default and for now the only one).
+    #[serde(default)]
+    pub cpu: Option<String>,
+    /// The row format, in Mesen2's tags (`[Disassembly]`, `[A,4h]`,
+    /// `[Scanline,3]`, `[Align,38]`…). Default: Mesen2's, built from
+    /// `format_options`.
+    #[serde(default)]
+    pub format: Option<String>,
+    /// What Mesen2's default format shows (its options, their defaults),
+    /// when `format` is not given.
+    #[serde(default)]
+    pub format_options: Option<luna_api::TraceFormatOptions>,
+    /// Only the instructions for which this expression (the debugger's
+    /// language) holds, at the opcode fetch or at one of their accesses.
+    #[serde(default)]
+    pub condition: Option<String>,
+    /// Names from the labels and the symbols (default true).
+    #[serde(default)]
+    pub use_labels: Option<bool>,
+    /// Indent the disassembly by the stack depth (default false).
+    #[serde(default)]
+    pub indent_code: Option<bool>,
+    /// Also write every row to this file, prefixed by the PC, as Mesen2's
+    /// trace file (created or truncated; closed by `trace_logger_stop`).
+    #[serde(default)]
+    pub file: Option<String>,
+}
+
+/// `trace_logger_rows` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct TraceLoggerRowsParams {
+    /// How many of the last rows (default 100, at most 30 000).
+    #[serde(default)]
+    pub count: Option<usize>,
+}
+
+/// `trace_logger_rows` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct TraceLoggerRowsResult {
+    /// The rows, oldest first.
+    pub rows: Vec<luna_api::TraceRow>,
+}
+
+/// `trace_logger_stop` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct TraceLoggerStopParams {
+    /// `snes` (default).
+    #[serde(default)]
+    pub cpu: Option<String>,
+}
+
+/// The trace logger's CPU named `name`.
+fn trace_cpu(name: Option<&str>) -> Result<luna_api::TraceCpu, ErrorData> {
+    match name.unwrap_or("snes") {
+        "snes" => Ok(luna_api::TraceCpu::Snes),
+        other => Err(ErrorData::invalid_params(
+            format!("cpu {other}: the trace logger follows `snes`"),
+            None,
+        )),
+    }
+}
+
 /// The workspace file a workspace tool reads or writes.
 fn workspace_target(em: &Emulator, path: Option<String>) -> Result<PathBuf, ErrorData> {
     path.map(PathBuf::from)
@@ -3213,6 +3278,67 @@ impl LunaServer {
     ) -> rmcp::Json<EmptyOk> {
         self.emulator.lock().await.enable_code_log(params.on);
         rmcp::Json(EmptyOk { ok: true })
+    }
+
+    #[rmcp::tool(
+        description = "Start Mesen2's trace logger: one text row per instruction the \
+                                CPU runs from now on, in Mesen2's format (disassembly, \
+                                effective address, value, registers, flags, scanline and \
+                                dot by default), optionally only where a condition holds \
+                                and also to a file. Read the rows with `trace_logger_rows`."
+    )]
+    async fn trace_logger_start(
+        &self,
+        Parameters(params): Parameters<TraceLoggerStartParams>,
+    ) -> Result<rmcp::Json<EmptyOk>, ErrorData> {
+        let cpu = trace_cpu(params.cpu.as_deref())?;
+        let format = params.format.or_else(|| {
+            params
+                .format_options
+                .map(|o| luna_api::auto_format(cpu, &o))
+        });
+        let options = luna_api::TraceOptions {
+            format,
+            condition: params.condition.unwrap_or_default(),
+            use_labels: params.use_labels.unwrap_or(true),
+            indent_code: params.indent_code.unwrap_or(false),
+        };
+        let mut em = self.emulator.lock().await;
+        em.trace_logger_start(cpu, &options)
+            .map_err(|e| api_err_to_mcp(&e))?;
+        if let Some(path) = params.file {
+            em.trace_file_start(std::path::Path::new(&path))
+                .map_err(|e| ErrorData::invalid_params(format!("{path}: {e}"), None))?;
+        }
+        drop(em);
+        Ok(rmcp::Json(EmptyOk { ok: true }))
+    }
+
+    #[rmcp::tool(
+        description = "The trace logger's last rows (`trace_logger_start`), oldest first: \
+                                each with its PC, its bytes and its text."
+    )]
+    async fn trace_logger_rows(
+        &self,
+        Parameters(params): Parameters<TraceLoggerRowsParams>,
+    ) -> rmcp::Json<TraceLoggerRowsResult> {
+        let count = params.count.unwrap_or(100).min(luna_api::TRACE_ROWS);
+        let rows = self.emulator.lock().await.trace_logger_rows(count);
+        rmcp::Json(TraceLoggerRowsResult { rows })
+    }
+
+    #[rmcp::tool(description = "Stop the trace logger, drop its rows and close its file.")]
+    async fn trace_logger_stop(
+        &self,
+        Parameters(params): Parameters<TraceLoggerStopParams>,
+    ) -> Result<rmcp::Json<EmptyOk>, ErrorData> {
+        let cpu = trace_cpu(params.cpu.as_deref())?;
+        let mut em = self.emulator.lock().await;
+        em.trace_logger_stop(cpu);
+        let closed = em.trace_file_stop();
+        drop(em);
+        closed.map_err(|e| api_err_to_mcp(&e))?;
+        Ok(rmcp::Json(EmptyOk { ok: true }))
     }
 
     #[rmcp::tool(

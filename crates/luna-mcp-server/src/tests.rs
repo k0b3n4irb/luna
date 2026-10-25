@@ -2126,3 +2126,54 @@ async fn server_runs_a_memory_search() {
     assert_eq!(s.mem_search_undo().await.unwrap().0.candidates, 64);
     let _ = std::fs::remove_file(&path);
 }
+
+#[tokio::test]
+async fn server_trace_logger_logs_rows_and_a_file() {
+    let s = LunaServer::new();
+    let path = PathBuf::from("/tmp/luna_mcp_trace_demo.smc");
+    let file = PathBuf::from("/tmp/luna_mcp_trace_demo.txt");
+    std::fs::write(&path, demo_lorom()).unwrap();
+    s.load_rom(Parameters(rom_params(&path.to_string_lossy())))
+        .await
+        .unwrap();
+    s.trace_logger_start(Parameters(TraceLoggerStartParams {
+        cpu: None,
+        format: Some("[Disassembly]".into()),
+        format_options: None,
+        condition: None,
+        use_labels: None,
+        indent_code: None,
+        file: Some(file.to_string_lossy().into_owned()),
+    }))
+    .await
+    .unwrap();
+    s.step(Parameters(StepParams { count: 10 })).await.unwrap();
+    let rows = s
+        .trace_logger_rows(Parameters(TraceLoggerRowsParams { count: Some(4) }))
+        .await
+        .0
+        .rows;
+    assert_eq!(rows.len(), 4);
+    assert!(rows.windows(2).all(|w| w[0].row_id < w[1].row_id));
+    s.trace_logger_stop(Parameters(TraceLoggerStopParams { cpu: None }))
+        .await
+        .unwrap();
+    let text = std::fs::read_to_string(&file).unwrap();
+    assert_eq!(text.lines().count(), 10);
+    assert!(text.starts_with("008000  "), "{text}");
+    assert!(
+        s.trace_logger_start(Parameters(TraceLoggerStartParams {
+            cpu: Some("spc".into()),
+            format: None,
+            format_options: None,
+            condition: None,
+            use_labels: None,
+            indent_code: None,
+            file: None,
+        }))
+        .await
+        .is_err()
+    );
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(&file);
+}

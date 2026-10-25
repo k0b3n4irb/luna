@@ -603,6 +603,39 @@ impl LabelHit {
     }
 }
 
+/// [`crate::Emulator::label_at`] on a machine held as its core: the label
+/// given on `bus` itself at `addr` first, then the one on the memory behind
+/// the address now.
+pub(crate) fn label_hit(
+    labels: &LabelStore,
+    view: crate::memory::View<'_>,
+    bus: MemoryKind,
+    addr: u32,
+) -> Option<LabelHit> {
+    let hit = |memory, a| {
+        labels.at(memory, a).map(|(l, byte)| LabelHit {
+            label: l.clone(),
+            byte,
+        })
+    };
+    if let Some(h) = hit(bus, addr) {
+        return Some(h);
+    }
+    let behind = match bus {
+        MemoryKind::SnesMemory => view.absolute(addr).map(|l| (l.kind, l.offset)),
+        MemoryKind::SpcMemory => {
+            let a = addr & 0xFFFF;
+            Some(if a >= 0xFFC0 && view.0.apu_real.control & 0x80 != 0 {
+                (MemoryKind::SpcRom, a & 0x3F)
+            } else {
+                (MemoryKind::SpcRam, a)
+            })
+        }
+        _ => None,
+    };
+    behind.and_then(|(m, a)| hit(m, a))
+}
+
 impl crate::Emulator {
     /// The label and the comment a disassembly line at `addr` on `bus`
     /// shows: the name (`name+N` inside a label), and the comment of a
@@ -701,29 +734,20 @@ impl crate::Emulator {
         bus: MemoryKind,
         addr: u32,
     ) -> Result<Option<LabelHit>, crate::ApiError> {
-        let hit = |memory, a| {
-            self.labels.at(memory, a).map(|(l, byte)| LabelHit {
-                label: l.clone(),
-                byte,
-            })
-        };
-        if let Some(h) = hit(bus, addr) {
-            return Ok(Some(h));
-        }
-        let snes = self.snes.as_ref().ok_or(crate::ApiError::NoRom)?;
-        let behind = match bus {
-            MemoryKind::SnesMemory => self.view()?.absolute(addr).map(|l| (l.kind, l.offset)),
-            MemoryKind::SpcMemory => {
-                let a = addr & 0xFFFF;
-                Some(if a >= 0xFFC0 && snes.apu_real.control & 0x80 != 0 {
-                    (MemoryKind::SpcRom, a & 0x3F)
-                } else {
-                    (MemoryKind::SpcRam, a)
+        match self.view() {
+            Ok(view) => Ok(label_hit(&self.labels, view, bus, addr)),
+            // Without a machine, only a label given on the bus itself.
+            Err(e) => self
+                .labels
+                .at(bus, addr)
+                .map(|(l, byte)| {
+                    Some(LabelHit {
+                        label: l.clone(),
+                        byte,
+                    })
                 })
-            }
-            _ => None,
-        };
-        Ok(behind.and_then(|(m, a)| hit(m, a)))
+                .ok_or(e),
+        }
     }
 
     /// Where on `bus` (`SnesMemory` or `SpcMemory`) the label `name` (or

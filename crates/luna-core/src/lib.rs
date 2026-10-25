@@ -36,9 +36,10 @@ pub use luna_bus::{
 pub use mclk::{MclkAccounting, MclkBuckets, MclkKind};
 pub use power::{PowerOnRng, PowerOnState};
 pub use snes::{
-    CpuTraceEvent, CpuTraceLog, GsuBusAccess, GsuBusEvent, GsuBusLog, MailboxEvent,
+    CpuTraceEvent, CpuTraceLog, FetchPoint, GsuBusAccess, GsuBusEvent, GsuBusLog, MailboxEvent,
     MailboxEventKind, MemEventKind, MemOrigin, MemTraceEvent, MemTraceFilter, MemTraceLog, Profile,
-    ProfileFrameTime, ProfileSample, Sa1LogEvent, Snes, UnsupportedMapper, VramCpuWrite,
+    ProfileFrameTime, ProfileSample, Sa1LogEvent, Snes, StepAccess, UnsupportedMapper,
+    VramCpuWrite,
 };
 
 /// A placeholder [`Mapper`] trait object that owns no ROM and claims no

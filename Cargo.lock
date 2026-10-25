@@ -1571,6 +1571,7 @@ dependencies = [
  "dirs",
  "image",
  "luna-apu",
+ "luna-bus",
  "luna-cartridge",
  "luna-core",
  "luna-cpu-65c816",

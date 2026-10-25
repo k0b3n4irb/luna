@@ -208,6 +208,16 @@ impl CpuRegs {
             // 0x4211 TIMEUP is handled by the bus (`snes.rs read_inner`):
             // the hold window needs the master clock and the low bits are
             // CPU open bus — see `read_timeup`.
+            _ => return self.peek(offset),
+        };
+        Some(v)
+    }
+
+    /// The registers of [`Self::read`] whose read has no side effect, as
+    /// they read now; `None` for the others.
+    #[must_use]
+    pub const fn peek(&self, offset: u16) -> Option<u8> {
+        Some(match offset {
             0x4212 => self.hvbjoy,
             0x4214 => self.rddiv as u8,
             0x4215 => (self.rddiv >> 8) as u8,
@@ -224,10 +234,8 @@ impl CpuRegs {
             0x421D => (self.joypad3_latched >> 8) as u8,
             0x421E => self.joypad4_latched as u8,
             0x421F => (self.joypad4_latched >> 8) as u8,
-            0x4200..=0x420F | 0x4213 => return None,
             _ => return None,
-        };
-        Some(v)
+        })
     }
 
     /// `$4210` RDNMI read.

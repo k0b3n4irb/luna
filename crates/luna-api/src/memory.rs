@@ -219,11 +219,10 @@ impl View<'_> {
             MemoryKind::SpcRam => snes.apu_real.aram[a],
             MemoryKind::SpcRom => IPL_ROM[a],
             MemoryKind::SpcDspRegisters => snes.apu_real.dsp.registers[a],
-            MemoryKind::SnesRegister if (0x4300..=0x437F).contains(&a) => {
-                // The DMA registers read back without a side effect.
-                snes.dma.channels[(a >> 4) & 7].read((a & 0xF) as u8)
-            }
-            MemoryKind::SnesRegister => 0,
+            // The CPU's own registers read as a read would return them, but
+            // without its side effects; the PPU's and the APU's (`$21xx`)
+            // read 0, as in Mesen2.
+            MemoryKind::SnesRegister => snes.peek_io(a as u16).unwrap_or(0),
             MemoryKind::Sa1Memory | MemoryKind::GsuMemory => {
                 let mut byte = unmapped;
                 snes.mapper

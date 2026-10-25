@@ -654,6 +654,75 @@ luna state --until-frame 610 --cpu-trace /tmp/cpu.csv --cpu-trace-from "$from" g
 # the CPU trace covers frames 600-610
 ```
 
+### Mesen2's trace logger (`--trace-log`)
+
+`--cpu-trace` writes registers as CSV, for a script. `--trace-log` writes
+what Mesen2's Trace Logger writes to its file, for a person and for a diff
+against Mesen2: one row per 65C816 instruction, with its disassembly, the
+address it reaches and the value there, the registers, the flags, and
+where the beam is (`V` the scanline, `H` the dot):
+
+```bash
+luna state -n 20000 --trace-log /tmp/trace.txt "Super Mario World.sfc"
+head -4 /tmp/trace.txt
+# 008000  SEI                            A:0000 X:0000 Y:0000 S:01FF D:0000 DB:00 P:nvMXdIzc V:0   H:48
+# 008001  STZ $4200 [NMITIMEN] = $9C     A:0000 X:0000 Y:0000 S:01FF D:0000 DB:00 P:nvMXdIzc V:0   H:52
+# 008004  STZ $420C [HDMAEN] = $9C       A:0000 X:0000 Y:0000 S:01FF D:0000 DB:00 P:nvMXdIzc V:0   H:59
+# 008007  STZ $420B [MDMAEN] = $9C       A:0000 X:0000 Y:0000 S:01FF D:0000 DB:00 P:nvMXdIzc V:0   H:67
+```
+
+A row is what Mesen2 shows at the same moment: the registers before the
+instruction, the beam once its opcode has been fetched, the value before
+the instruction touches it (`= $9C`: a write-only register reads the data
+bus, which carries the opcode just fetched). Labels and loaded symbols
+name the addresses; `--trace-no-labels` writes them as numbers.
+
+**`--trace-condition`** keeps only the instructions for which an
+expression holds, in the [debugger's language](mcp.md#expressions). It
+is checked at the opcode fetch (`address` is the instruction's), and
+then on each access the instruction makes: the row is logged at the first
+one it holds for, with the beam of that access. Every write to `INIDISP`
+in the first 120 frames:
+
+```bash
+luna state --until-frame 120 -n 999999999 --trace-log /tmp/inidisp.txt \
+  --trace-condition 'iswrite && address == $2100' "Super Mario World.sfc"
+head -2 /tmp/inidisp.txt
+# 008018  STA $2100 [INIDISP] = $00      A:0080 X:0000 Y:0000 S:01FF D:0000 DB:00 P:NvMXdIzc V:0   H:112
+# 009385  STA $2100 [INIDISP] = $00      A:9380 X:00FE Y:007C S:01F9 D:0000 DB:00 P:NvMXdizc V:132 H:171
+```
+
+**`--trace-format`** lays the row out with Mesen2's tags. `[Tag]` writes a
+value, `[Tag,N]` pads it to `N` characters, `[Tag,h]` writes it in
+hexadecimal, `[Tag,Nh]` both:
+
+| Tag | What |
+|---|---|
+| `Disassembly`, `ByteCode` | the instruction, its bytes (`$78` with `h`) |
+| `EffectiveAddress`, `MemoryValue` | ` [$7E0010]` or ` [label]`; `= $12` |
+| `A`, `X`, `Y`, `D`, `SP`, `DB`, `P` | the registers; `P` as `nvMXdIzc` with a width of 8, the set flags alone without, the byte with `h` |
+| `PC` | the program counter |
+| `Scanline`, `Cycle`, `HClock` | the beam: the line, the dot, the master clock in the line |
+| `FrameCount`, `CycleCount` | the frame, the CPU cycles since power-on |
+| `Align` | spaces up to that column of the line |
+
+The default is Mesen2's:
+`[Disassembly][EffectiveAddress] [MemoryValue,h][Align,38] A:[A,4h] X:[X,4h] Y:[Y,4h] S:[SP,4h] D:[D,4h] DB:[DB,2h] P:[P,8] V:[Scanline,3] H:[Cycle,3]`.
+
+```bash
+luna state -n 3 --trace-log /tmp/t.txt \
+  --trace-format '[ByteCode,h] [Disassembly][Align,40]V:[Scanline] HC:[HClock] Cyc:[CycleCount]' game.sfc
+# 008000  $78 SEI                         V:0 HC:194 Cyc:2
+# 008001  $9C $00 $42 STZ $4200           V:0 HC:208 Cyc:4
+```
+
+The same trace logger answers over MCP (`trace_logger_start`,
+`trace_logger_rows`, `trace_logger_stop`, see
+[the MCP page](mcp.md#the-trace-logger)). To compare with Mesen2 itself,
+`tools/mesen-trace-log.py` writes Mesen2's trace file of a ROM, headless,
+and `tools/trace-diff.py` pairs the two files row by row (see
+[the differential harness](../method/differential.md)).
+
 ### Coprocessor liveness and the DSP-1 handshake
 
 `--superfx-trace` and `--sa1-trace` let a harness prove those chips ran;

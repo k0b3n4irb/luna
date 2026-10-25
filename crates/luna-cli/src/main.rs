@@ -334,6 +334,28 @@ enum Command {
         /// (`bg1,bg2,bg3,bg4,obj`; default all five).
         #[arg(long = "layers", requires = "layer_shots")]
         layers: Option<String>,
+        /// Mesen2's trace logger for the 65C816: one text row per
+        /// instruction, written to PATH as Mesen2 writes its trace file —
+        /// the 24-bit PC, two spaces, then the row as the format lays it
+        /// out. The default format is Mesen2's (disassembly, effective
+        /// address, value, registers, flags, scanline and dot).
+        #[arg(long = "trace-log")]
+        trace_log: Option<PathBuf>,
+        /// With `--trace-log`: the row format, in Mesen2's tags
+        /// (`[Disassembly]`, `[A,4h]`, `[Scanline,3]`, `[Align,38]`…; see
+        /// the guide).
+        #[arg(long = "trace-format", requires = "trace_log")]
+        trace_format: Option<String>,
+        /// With `--trace-log`: only the instructions for which this
+        /// expression (the debugger's language) holds, at the opcode fetch
+        /// or at one of the instruction's memory accesses.
+        #[arg(long = "trace-condition", requires = "trace_log")]
+        trace_condition: Option<String>,
+        /// With `--trace-log`: addresses as numbers, without the names
+        /// of the labels and the loaded symbols (Mesen2's "Use labels"
+        /// unticked).
+        #[arg(long = "trace-no-labels", requires = "trace_log")]
+        trace_no_labels: bool,
         /// Dump all 64 KB of PPU VRAM (raw bytes) to this file after the
         /// run. For diagnosing the framebuffer DMA → VRAM → display path.
         #[arg(long = "dump-vram")]
@@ -1542,6 +1564,10 @@ fn main() -> ExitCode {
             no_render,
             layer_shots,
             layers,
+            trace_log,
+            trace_format,
+            trace_condition,
+            trace_no_labels,
         } => {
             if schema {
                 // `--schema` needs no ROM: print the `--out` payload's JSON
@@ -1637,6 +1663,10 @@ fn main() -> ExitCode {
                 vram_writers_from,
                 layer_shots.as_deref(),
                 layers.as_deref(),
+                trace_log.as_deref(),
+                trace_format.as_deref(),
+                trace_condition.as_deref(),
+                trace_no_labels,
             )
         }
         Command::Frames {

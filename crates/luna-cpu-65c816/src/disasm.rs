@@ -65,6 +65,8 @@ enum Mode {
     SrIndY,
     /// `$src, $dst` block move (operand bytes are `[dest][src]`).
     BlockMove,
+    /// `#$hhll`, always 16 bits (`PEA`).
+    Imm16,
 }
 
 impl Mode {
@@ -104,7 +106,8 @@ impl Mode {
             | Self::AbsXInd
             | Self::AbsIndLong
             | Self::RelLong
-            | Self::BlockMove => 2,
+            | Self::BlockMove
+            | Self::Imm16 => 2,
             Self::Long | Self::LongX => 3,
         }
     }
@@ -177,6 +180,7 @@ fn decode(
         Mode::ImmM => imm(!m8),
         Mode::ImmX => imm(!x8),
         Mode::Imm8 => format!("#${b1:02X}"),
+        Mode::Imm16 => format!("#${w16:04X}"),
         Mode::Dp => format!("${b1:02X}"),
         Mode::DpX => format!("${b1:02X},X"),
         Mode::DpY => format!("${b1:02X},Y"),
@@ -203,8 +207,8 @@ fn decode(
         Mode::Sr => format!("${b1:02X},S"),
         Mode::SrIndY => format!("(${b1:02X},S),Y"),
         // Block-move operand bytes are [dest][src]; assembler syntax shows
-        // source, dest.
-        Mode::BlockMove => format!("${b2:02X}, ${b1:02X}"),
+        // source, dest — with no space, as Mesen2 writes it.
+        Mode::BlockMove => format!("${b2:02X},${b1:02X}"),
     };
 
     let text = if operand.is_empty() {
@@ -217,38 +221,39 @@ fn decode(
 
 use Mode::{
     Abs, AbsInd, AbsIndLong, AbsX, AbsXInd, AbsY, BlockMove, Dp, DpInd, DpIndLong, DpIndLongY,
-    DpIndY, DpX, DpXInd, DpY, Imm8, ImmM, ImmX, Imp, Long, LongX, Rel, RelLong, Sr, SrIndY,
+    DpIndY, DpX, DpXInd, DpY, Imm8, Imm16, ImmM, ImmX, Imp, Long, LongX, Rel, RelLong, Sr, SrIndY,
 };
 
 /// Opcode → (mnemonic, mode), all 256 entries — authored from the dispatch
-/// in [`crate::opcodes`] (`execute`). `A`-form / implied ops carry their
-/// full text and use [`Mode::Imp`].
+/// in [`crate::opcodes`] (`execute`). Implied ops use [`Mode::Imp`]; the
+/// accumulator forms (`ASL`, `INC`…) are written bare, as Mesen2 writes
+/// them.
 #[rustfmt::skip]
 const OPCODES: [(&str, Mode); 256] = [
     // 0x00
     ("BRK", Imm8), ("ORA", DpXInd), ("COP", Imm8), ("ORA", Sr),
     ("TSB", Dp), ("ORA", Dp), ("ASL", Dp), ("ORA", DpIndLong),
-    ("PHP", Imp), ("ORA", ImmM), ("ASL A", Imp), ("PHD", Imp),
+    ("PHP", Imp), ("ORA", ImmM), ("ASL", Imp), ("PHD", Imp),
     ("TSB", Abs), ("ORA", Abs), ("ASL", Abs), ("ORA", Long),
     // 0x10
     ("BPL", Rel), ("ORA", DpIndY), ("ORA", DpInd), ("ORA", SrIndY),
     ("TRB", Dp), ("ORA", DpX), ("ASL", DpX), ("ORA", DpIndLongY),
-    ("CLC", Imp), ("ORA", AbsY), ("INC A", Imp), ("TCS", Imp),
+    ("CLC", Imp), ("ORA", AbsY), ("INC", Imp), ("TCS", Imp),
     ("TRB", Abs), ("ORA", AbsX), ("ASL", AbsX), ("ORA", LongX),
     // 0x20
     ("JSR", Abs), ("AND", DpXInd), ("JSL", Long), ("AND", Sr),
     ("BIT", Dp), ("AND", Dp), ("ROL", Dp), ("AND", DpIndLong),
-    ("PLP", Imp), ("AND", ImmM), ("ROL A", Imp), ("PLD", Imp),
+    ("PLP", Imp), ("AND", ImmM), ("ROL", Imp), ("PLD", Imp),
     ("BIT", Abs), ("AND", Abs), ("ROL", Abs), ("AND", Long),
     // 0x30
     ("BMI", Rel), ("AND", DpIndY), ("AND", DpInd), ("AND", SrIndY),
     ("BIT", DpX), ("AND", DpX), ("ROL", DpX), ("AND", DpIndLongY),
-    ("SEC", Imp), ("AND", AbsY), ("DEC A", Imp), ("TSC", Imp),
+    ("SEC", Imp), ("AND", AbsY), ("DEC", Imp), ("TSC", Imp),
     ("BIT", AbsX), ("AND", AbsX), ("ROL", AbsX), ("AND", LongX),
     // 0x40
     ("RTI", Imp), ("EOR", DpXInd), ("WDM", Imm8), ("EOR", Sr),
     ("MVP", BlockMove), ("EOR", Dp), ("LSR", Dp), ("EOR", DpIndLong),
-    ("PHA", Imp), ("EOR", ImmM), ("LSR A", Imp), ("PHK", Imp),
+    ("PHA", Imp), ("EOR", ImmM), ("LSR", Imp), ("PHK", Imp),
     ("JMP", Abs), ("EOR", Abs), ("LSR", Abs), ("EOR", Long),
     // 0x50
     ("BVC", Rel), ("EOR", DpIndY), ("EOR", DpInd), ("EOR", SrIndY),
@@ -258,7 +263,7 @@ const OPCODES: [(&str, Mode); 256] = [
     // 0x60
     ("RTS", Imp), ("ADC", DpXInd), ("PER", RelLong), ("ADC", Sr),
     ("STZ", Dp), ("ADC", Dp), ("ROR", Dp), ("ADC", DpIndLong),
-    ("PLA", Imp), ("ADC", ImmM), ("ROR A", Imp), ("RTL", Imp),
+    ("PLA", Imp), ("ADC", ImmM), ("ROR", Imp), ("RTL", Imp),
     ("JMP", AbsInd), ("ADC", Abs), ("ROR", Abs), ("ADC", Long),
     // 0x70
     ("BVS", Rel), ("ADC", DpIndY), ("ADC", DpInd), ("ADC", SrIndY),
@@ -292,7 +297,7 @@ const OPCODES: [(&str, Mode); 256] = [
     ("CPY", Abs), ("CMP", Abs), ("DEC", Abs), ("CMP", Long),
     // 0xD0
     ("BNE", Rel), ("CMP", DpIndY), ("CMP", DpInd), ("CMP", SrIndY),
-    ("PEI", DpInd), ("CMP", DpX), ("DEC", DpX), ("CMP", DpIndLongY),
+    ("PEI", Dp), ("CMP", DpX), ("DEC", DpX), ("CMP", DpIndLongY),
     ("CLD", Imp), ("CMP", AbsY), ("PHX", Imp), ("STP", Imp),
     ("JML", AbsIndLong), ("CMP", AbsX), ("DEC", AbsX), ("CMP", LongX),
     // 0xE0
@@ -302,7 +307,7 @@ const OPCODES: [(&str, Mode); 256] = [
     ("CPX", Abs), ("SBC", Abs), ("INC", Abs), ("SBC", Long),
     // 0xF0
     ("BEQ", Rel), ("SBC", DpIndY), ("SBC", DpInd), ("SBC", SrIndY),
-    ("PEA", Abs), ("SBC", DpX), ("INC", DpX), ("SBC", DpIndLongY),
+    ("PEA", Imm16), ("SBC", DpX), ("INC", DpX), ("SBC", DpIndLongY),
     ("SED", Imp), ("SBC", AbsY), ("PLX", Imp), ("XCE", Imp),
     ("JSR", AbsXInd), ("SBC", AbsX), ("INC", AbsX), ("SBC", LongX),
 ];
@@ -352,7 +357,7 @@ mod tests {
         let f = (true, true);
         let cases: &[(&[u8], &str, u8)] = &[
             (&[0xEA], "NOP", 1),
-            (&[0x0A], "ASL A", 1),
+            (&[0x0A], "ASL", 1),
             (&[0xA5, 0x10], "LDA $10", 2),
             (&[0xB5, 0x10], "LDA $10,X", 2),
             (&[0xB6, 0x10], "LDX $10,Y", 2),
@@ -372,8 +377,8 @@ mod tests {
             (&[0x5C, 0x56, 0x34, 0x12], "JML $123456", 4),
             (&[0xA3, 0x10], "LDA $10,S", 2),
             (&[0xB3, 0x10], "LDA ($10,S),Y", 2),
-            (&[0xF4, 0x34, 0x12], "PEA $1234", 3),
-            (&[0xD4, 0x10], "PEI ($10)", 2),
+            (&[0xF4, 0x34, 0x12], "PEA #$1234", 3),
+            (&[0xD4, 0x10], "PEI $10", 2),
         ];
         for (bytes, want, len) in cases {
             let i = disasm(bytes, 0, f.0, f.1);
@@ -384,9 +389,9 @@ mod tests {
 
     #[test]
     fn block_move_operand_order_and_branches() {
-        // MVN dest=$7E src=$00 (bytes [dest][src]) → "MVN $00, $7E".
+        // MVN dest=$7E src=$00 (bytes [dest][src]) → "MVN $00,$7E".
         let i = disasm(&[0x54, 0x7E, 0x00], 0, true, true);
-        assert_eq!(i.text, "MVN $00, $7E");
+        assert_eq!(i.text, "MVN $00,$7E");
         assert_eq!(i.length, 3);
         // BNE rel at 0x8000, rel = -2 → target 0x8000.
         let i = disasm(&[0xD0, 0xFE], 0x8000, true, true);

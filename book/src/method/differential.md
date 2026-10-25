@@ -27,6 +27,33 @@ Luna's CLI / API-first design exists precisely to make this tractable: what the
 CLI measures is exactly what the GUI shows, so a difference found headless is a
 difference a player would see.
 
+## Instruction by instruction: the two trace loggers
+
+Mesen2's own trace logger is a reference trace of everything the CPU does,
+one instruction per row. Its scripting interface does not reach it, so
+`tools/mesen-trace-log.py` drives Mesen2's native core instead (the library
+its window calls) and writes the file its Trace Logger window writes; luna
+writes the same file with `luna state --trace-log`. `tools/trace-diff.py`
+pairs the two row by row and sorts what differs:
+
+```bash
+tools/mesen-trace-log.py game.sfc /tmp/mesen.txt          # ~1 s of emulation
+luna state -n "$(wc -l < /tmp/mesen.txt)" --trace-log /tmp/luna.txt \
+  --trace-no-labels game.sfc
+tools/trace-diff.py /tmp/luna.txt /tmp/mesen.txt
+# 798053 rows compared, 0 partings, stopped at luna 798053 / mesen 798053
+# identical: 798045
+# beam: 8
+#   luna  #968: 008134  NOP   … V:152 H:337
+#   mesen     : 008134  NOP   … V:18  H:335
+```
+
+Identical registers with a different beam is a timing difference between the
+two emulations. The eight rows above were the first measurement of a gap the
+DMA audit had only read in the sources: luna starts a DMA one bus access
+before ares and Mesen2, so the opcode fetch after `STA $420B` lands after the
+transfer in luna and before it in Mesen2 (`docs/hdma_ares_audit.md`, row 16).
+
 ## A worked example: interrupt delivery
 
 Luna used to sample interrupts at the instruction boundary rather than one

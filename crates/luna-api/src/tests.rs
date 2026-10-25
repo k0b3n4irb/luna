@@ -4215,3 +4215,169 @@ fn the_memory_viewer_colours_finds_and_undoes() {
         "LUNA API TEST DEMO - SnesWorkRam.dmp"
     );
 }
+
+/// `CLC; XCE; REP #$30; LDA #$1234; STA $0010; LDA $0010; BRA *`.
+fn trace_demo() -> Emulator {
+    let code = [
+        0x18, 0xFB, 0xC2, 0x30, 0xA9, 0x34, 0x12, 0x8D, 0x10, 0x00, 0xAD, 0x10, 0x00, 0x80, 0xFE,
+    ];
+    let mut e = Emulator::new();
+    e.load_rom_bytes(demo_lorom_with(&code, None)).unwrap();
+    e
+}
+
+/// The text of each row, up to the registers.
+fn trace_texts(e: &Emulator) -> Vec<String> {
+    e.trace_logger_rows(100)
+        .iter()
+        .map(|r| {
+            r.text
+                .split(" A:")
+                .next()
+                .unwrap_or("")
+                .trim_end()
+                .to_string()
+        })
+        .collect()
+}
+
+#[test]
+fn the_trace_logger_writes_mesen2s_rows() {
+    let mut e = trace_demo();
+    let options = TraceOptions {
+        use_labels: false,
+        ..TraceOptions::default()
+    };
+    e.trace_logger_start(TraceCpu::Snes, &options).unwrap();
+    e.step(7).unwrap();
+    assert_eq!(
+        trace_texts(&e),
+        [
+            "CLC",
+            "XCE",
+            "REP #$30",
+            "LDA #$1234",
+            // The value is the one before the instruction, both bytes.
+            "STA $0010 [$000010] = $0000",
+            "LDA $0010 [$000010] = $1234",
+            "BRA $00800D",
+        ]
+    );
+    let rows = e.trace_logger_rows(2);
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[1].pc, 0x00_800D);
+    assert_eq!(rows[1].byte_code, [0x80, 0xFE]);
+    assert!(rows[0].row_id < rows[1].row_id);
+    assert!(
+        rows[0]
+            .text
+            .contains("A:1234 X:0000 Y:0000 S:01FF D:0000 DB:00 P:nvmxdIzC"),
+        "{}",
+        rows[0].text
+    );
+    // A label names the effective address.
+    e.trace_logger_clear();
+    e.set_label(Label {
+        memory: MemoryKind::SnesWorkRam,
+        address: 0x10,
+        length: 2,
+        name: "counter".into(),
+        comment: String::new(),
+    })
+    .unwrap();
+    e.trace_logger_start(TraceCpu::Snes, &TraceOptions::default())
+        .unwrap();
+    e.reset().unwrap();
+    e.step(6).unwrap();
+    assert_eq!(trace_texts(&e)[5], "LDA $0010 [counter] = $1234");
+}
+
+#[test]
+fn a_trace_condition_holds_at_the_fetch_or_at_an_access() {
+    let mut e = trace_demo();
+    let start = |e: &mut Emulator, condition: &str| {
+        e.trace_logger_stop(TraceCpu::Snes);
+        e.trace_logger_start(
+            TraceCpu::Snes,
+            &TraceOptions {
+                condition: condition.into(),
+                use_labels: false,
+                ..TraceOptions::default()
+            },
+        )
+        .unwrap();
+    };
+    // At the opcode fetch: `address` is the instruction's.
+    start(&mut e, "address == $800A");
+    e.step(9).unwrap();
+    assert_eq!(trace_texts(&e), ["LDA $0010 [$000010] = $1234"]);
+    // On an access: the write to $0011 logs the STA, once (work RAM kept
+    // the first run's value across the reset).
+    e.trace_logger_clear();
+    e.reset().unwrap();
+    start(&mut e, "iswrite && address == $11");
+    e.step(9).unwrap();
+    assert_eq!(trace_texts(&e), ["STA $0010 [$000010] = $1234"]);
+    // An invalid condition is refused.
+    assert!(
+        e.trace_logger_start(
+            TraceCpu::Snes,
+            &TraceOptions {
+                condition: ")(".into(),
+                ..TraceOptions::default()
+            },
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn the_trace_file_prefixes_the_pc_and_aligns_on_the_whole_line() {
+    let dir = std::env::temp_dir().join(format!("luna-trace-file-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("trace.txt");
+    let mut e = trace_demo();
+    e.trace_logger_start(
+        TraceCpu::Snes,
+        &TraceOptions {
+            format: Some("[Disassembly][Align,20]|".into()),
+            ..TraceOptions::default()
+        },
+    )
+    .unwrap();
+    e.trace_file_start(&path).unwrap();
+    e.step(3).unwrap();
+    e.trace_file_stop().unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(
+        text,
+        "008000  CLC         |\n008001  XCE         |\n008002  REP #$30    |\n"
+    );
+    // The window's rows align from their own start.
+    assert_eq!(e.trace_logger_rows(1)[0].text, "REP #$30            |");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// The JSON example of the guide's MCP page, row for row.
+#[test]
+fn the_trace_logger_window_rows_match_the_guide() {
+    let mut e = Emulator::new();
+    e.load_rom_bytes(demo_lorom_with(
+        &[0x78, 0x9C, 0x00, 0x42, 0x9C, 0x0C, 0x42, 0x9C, 0x0B, 0x42],
+        None,
+    ))
+    .unwrap();
+    e.trace_logger_start(TraceCpu::Snes, &TraceOptions::default())
+        .unwrap();
+    e.step(4).unwrap();
+    let rows = e.trace_logger_rows(2);
+    assert_eq!(rows[0].row_id, 2);
+    assert_eq!(rows[0].pc, 0x8004);
+    assert!(
+        rows[0]
+            .text
+            .starts_with("STZ $420C [HDMAEN] = $9C               A:0000"),
+        "{:?}",
+        rows[0].text
+    );
+}

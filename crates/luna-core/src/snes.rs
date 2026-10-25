@@ -208,6 +208,24 @@ pub struct Snes {
     #[serde(skip)]
     pub cpu_trace_log: Option<CpuTraceLog>,
 
+    /// The trace logger's moment (Mesen2 logs a row once the opcode fetch
+    /// has ended): `Some` while armed, holding where the beam stood when
+    /// the current step's first code fetch ended (`None` before it). Reset
+    /// at the top of every [`Snes::step`]. See [`Snes::arm_opcode_fetch`].
+    #[serde(skip)]
+    pub opcode_fetch: Option<Option<FetchPoint>>,
+
+    /// CPU cycles since power-on: one per bus read, write or internal
+    /// cycle, Mesen2's `CycleCount` (its trace logger's `[CycleCount]`).
+    #[serde(skip)]
+    pub cpu_cycles: u64,
+
+    /// The CPU's bus accesses since the trace logger last drained them,
+    /// for its conditions on an access (Mesen2's `LogNonExec`). `None` =
+    /// off. See [`Snes::arm_step_accesses`].
+    #[serde(skip)]
+    pub step_accesses: Option<Vec<StepAccess>>,
+
     /// Optional per-PC profiler (issue #227): instructions + master
     /// cycles paid by each instruction address, including the stalls
     /// (DMA, HDMA, refresh) charged during it. `None` = off.
@@ -332,6 +350,44 @@ pub struct CpuTraceEvent {
     pub dp: u16,
     /// Emulation mode flag.
     pub e: bool,
+}
+
+/// Where the beam stood at the end of an opcode fetch (see
+/// [`Snes::opcode_fetch`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FetchPoint {
+    /// Scanline.
+    pub line: u16,
+    /// Master clock within the line (0..1363), Mesen2's `HClock`.
+    pub hclock: u16,
+    /// Completed frames.
+    pub frame: u64,
+    /// Master cycles since reset.
+    pub mclk: u64,
+    /// [`Snes::cpu_cycles`] once the fetch ended.
+    pub cpu_cycles: u64,
+    /// The NMI flag (`$4210` bit 7) then.
+    pub nmi_flag: bool,
+    /// The H/V-timer IRQ flag (`$4211` bit 7) then.
+    pub irq_flag: bool,
+    /// The latched bits of `$4212` then.
+    pub hvbjoy: u8,
+}
+
+/// One CPU bus access, as the trace logger's conditions see it (see
+/// [`Snes::step_accesses`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StepAccess {
+    /// 24-bit bus address.
+    pub addr: u32,
+    /// The byte read or written.
+    pub value: u8,
+    /// A write (else a read).
+    pub write: bool,
+    /// A code read (an opcode or an operand).
+    pub code: bool,
+    /// Where the beam stood.
+    pub at: FetchPoint,
 }
 
 /// Bounded buffer for the CPU instruction tracer. Stops accepting new
@@ -1131,6 +1187,9 @@ impl Snes {
             mailbox_log: None,
             sa1_log: None,
             cpu_trace_log: None,
+            opcode_fetch: None,
+            cpu_cycles: 0,
+            step_accesses: None,
             profile: None,
             mem_trace_log: None,
             access_counters: None,
@@ -1300,6 +1359,73 @@ impl Snes {
             events: Vec::new(),
             max_events,
         });
+    }
+
+    /// What a CPU read of the register at `offset` (`$4000-$43FF` of a
+    /// system bank) would return now, without the read's side effects: no
+    /// acknowledge of `$4210` / `$4211`, no joypad shift. The manual
+    /// joypad ports `$4016` / `$4017` read 0 (Mesen2's peek does the
+    /// same: their value is the shift in progress). `None` outside that
+    /// range. A debugger's view of the registers, as Mesen2 peeks them.
+    #[must_use]
+    pub fn peek_io(&self, offset: u16) -> Option<u8> {
+        self.peek_io_at(offset, self.mdr, &self.point_now())
+    }
+
+    /// Where the beam stands between two steps, and the register flags
+    /// that move with it.
+    #[must_use]
+    pub const fn point_now(&self) -> FetchPoint {
+        FetchPoint {
+            line: self.ppu_line,
+            hclock: self.mcycles_in_line as u16,
+            frame: self.frame_count,
+            mclk: self.total_mclk,
+            cpu_cycles: self.cpu_cycles,
+            nmi_flag: self.cpu_regs.nmi_flag,
+            irq_flag: self.cpu_regs.irq_flag,
+            hvbjoy: self.cpu_regs.hvbjoy,
+        }
+    }
+
+    /// [`Snes::peek_io`] as the read would have returned it at `at`, with
+    /// `open` on the data bus: the flags that move with the beam (`$4210`
+    /// to `$4212`) are taken from `at`, the rest from now.
+    #[must_use]
+    pub fn peek_io_at(&self, offset: u16, open: u8, at: &FetchPoint) -> Option<u8> {
+        Some(match offset {
+            0x4016 | 0x4017 => 0,
+            0x4300..=0x437F => self.dma.read_register(offset).unwrap_or(open),
+            0x4210 => {
+                // Not raised yet in the first H-clocks of the NMI line (see
+                // `RDNMI_RAISE_HCLOCK`).
+                let nmi_line = vblank_start_line(self.ppu.setini & 0x04 != 0);
+                let raised = !(at.line == nmi_line && at.hclock < RDNMI_RAISE_HCLOCK);
+                (if at.nmi_flag && raised { 0x80 } else { 0 }) | 0x02 | (open & 0x70)
+            }
+            0x4211 => (if at.irq_flag { 0x80 } else { 0 }) | (open & 0x7F),
+            0x4212 => {
+                let h = at.hclock / 4;
+                let hblank = if h == 0 || h >= 274 { 0x40 } else { 0 };
+                (at.hvbjoy & 0x81) | hblank | (open & 0x3E)
+            }
+            0x4200..=0x421F => self.cpu_regs.peek(offset).unwrap_or(open),
+            0x4000..=0x43FF => open,
+            _ => return None,
+        })
+    }
+
+    /// Arm (or disarm) the trace logger's mark: while armed, every
+    /// [`Snes::step`] records in [`Snes::opcode_fetch`] where the beam
+    /// stood when its first code fetch ended.
+    pub fn arm_opcode_fetch(&mut self, on: bool) {
+        self.opcode_fetch = on.then_some(None);
+    }
+
+    /// Start (or stop) listing the CPU's bus accesses in
+    /// [`Snes::step_accesses`]; the caller drains the list.
+    pub fn arm_step_accesses(&mut self, on: bool) {
+        self.step_accesses = on.then(Vec::new);
     }
 
     /// Drain the CPU trace buffer. Returns an empty `Vec` if tracing
@@ -1538,6 +1664,9 @@ impl Snes {
     /// that instruction (accumulated through [`Bus::io_cycle`]).
     pub fn step(&mut self) -> MCycles {
         let before = self.total_mclk;
+        if let Some(mark) = self.opcode_fetch.as_mut() {
+            *mark = None;
+        }
         // Capture the pre-instruction snapshot for the CPU tracer
         // before the destructure below moves `cpu` out of `self`.
         if let Some(log) = self.cpu_trace_log.as_mut()
@@ -1989,6 +2118,12 @@ struct SnesBus<'a> {
     breakpoints: &'a mut Option<Box<crate::breakpoints::BreakpointSet>>,
     /// `$21FC` Nocash-TTY capture (the SDK's `SNES_NOCASH`/`SNES_ASSERT`).
     nocash_log: &'a mut Option<Vec<u8>>,
+    /// The trace logger's mark, when armed (see [`Snes::opcode_fetch`]).
+    opcode_fetch: Option<&'a mut Option<FetchPoint>>,
+    /// [`Snes::cpu_cycles`].
+    cpu_cycles: &'a mut u64,
+    /// [`Snes::step_accesses`].
+    step_accesses: &'a mut Option<Vec<StepAccess>>,
 }
 
 impl SnesBus<'_> {
@@ -2167,6 +2302,9 @@ impl Snes {
             gsu_bus_log,
             breakpoints,
             nocash_log,
+            opcode_fetch,
+            cpu_cycles,
+            step_accesses,
             ..
         } = self;
         let bus = SnesBus {
@@ -2203,6 +2341,9 @@ impl Snes {
             gsu_bus_log,
             breakpoints,
             nocash_log,
+            opcode_fetch: opcode_fetch.as_mut(),
+            cpu_cycles,
+            step_accesses,
             wm_addr,
             joypad_strobe,
             joypad1_shift,
@@ -2566,6 +2707,16 @@ impl SnesBus<'_> {
             });
         }
         let hclock = self.hclock();
+        let at = self.step_accesses.is_some().then(|| self.fetch_point());
+        if let (Some(at), Some(list)) = (at, self.step_accesses.as_mut()) {
+            list.push(StepAccess {
+                addr,
+                value,
+                write: matches!(kind, MemEventKind::Write),
+                code: self.fetching,
+                at,
+            });
+        }
         let blank_now = self.ppu_line >= self.vblank_start_line();
         if let Some(log) = self.mem_trace_log.as_mut()
             && log.accepts(addr, kind)
@@ -2966,6 +3117,9 @@ impl SnesBus<'_> {
 
 impl Bus for SnesBus<'_> {
     fn read(&mut self, addr: Addr24) -> u8 {
+        if self.sched_enabled {
+            *self.cpu_cycles += 1;
+        }
         let value = self.read_inner(addr);
         // Latch the byte on the CPU data bus (ares' `r.mdr`): open-bus
         // reads below return this. An open-bus read returns the prior
@@ -2978,6 +3132,9 @@ impl Bus for SnesBus<'_> {
         value
     }
     fn write(&mut self, addr: Addr24, value: u8) {
+        if self.sched_enabled {
+            *self.cpu_cycles += 1;
+        }
         // A write drives the data bus too, so it updates the MDR.
         *self.mdr = value;
         self.trace_mem_access(addr, MemEventKind::Write, value);
@@ -2988,9 +3145,18 @@ impl Bus for SnesBus<'_> {
         self.fetching = true;
         let value = self.read(addr);
         self.fetching = false;
+        if self.opcode_fetch.as_deref().is_some_and(Option::is_none) {
+            let point = self.fetch_point();
+            if let Some(mark) = self.opcode_fetch.as_deref_mut() {
+                *mark = Some(point);
+            }
+        }
         value
     }
     fn io_cycle(&mut self, mcycles: MCycles) {
+        if self.sched_enabled {
+            *self.cpu_cycles += 1;
+        }
         // ares `CPU::idle` (`cpu/memory.cpp:1-6`): the clocks, then the
         // multiplier / divider's cycle.
         self.advance_time(mcycles, true);
@@ -3050,6 +3216,20 @@ impl SnesBus<'_> {
     #[inline]
     const fn hclock(&self) -> u16 {
         self.mcycles_in_line as u16
+    }
+
+    /// Where the beam stands now, and the register flags that move with it.
+    const fn fetch_point(&self) -> FetchPoint {
+        FetchPoint {
+            line: self.ppu_line,
+            hclock: self.hclock(),
+            frame: self.frame_count,
+            mclk: *self.mclk_total,
+            cpu_cycles: *self.cpu_cycles,
+            nmi_flag: self.cpu_regs.nmi_flag,
+            irq_flag: self.cpu_regs.irq_flag,
+            hvbjoy: self.cpu_regs.hvbjoy,
+        }
     }
 
     /// Advance the master clock and the time-driven subsystems by

@@ -7,6 +7,46 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ## [Unreleased]
 
+### Added
+
+- **Mesen2's trace logger, for the 65C816** (Mesen2 parity roadmap D4a).
+  One text row per instruction, in Mesen2's format and with Mesen2's
+  default: the disassembly, the effective address and the value there,
+  the registers, the flags, the scanline and the dot. A format of
+  Mesen2's tags (`[Disassembly]`, `[A,4h]`, `[Scanline,3]`,
+  `[Align,38]`…) lays the row out otherwise; a condition in the
+  debugger's language keeps only the instructions it holds for, at their
+  opcode fetch or at one of their accesses. Rows are taken where Mesen2
+  takes them (once the opcode fetch has ended), and the effective
+  address comes from running the instruction on a copy of the CPU, as
+  Mesen2 does. Compared with Mesen2's own trace file on 4.5 million rows
+  of the PeterLemon CPU tests: the text is the same on every row, and so
+  is the beam wherever the two emulators agree.
+  - `luna state --trace-log <file>`, with `--trace-format`,
+    `--trace-condition` and `--trace-no-labels`, writes Mesen2's trace
+    file (the 24-bit PC, two spaces, the row).
+  - MCP: `trace_logger_start` (format or Mesen2's format options,
+    condition, labels, indentation, file), `trace_logger_rows` (the last
+    rows of the 30 000 kept) and `trace_logger_stop`.
+  - `tools/mesen-trace-log.py` writes Mesen2's trace file of a ROM
+    headless, through Mesen2's native core; `tools/trace-diff.py` pairs
+    two trace files row by row and says what differs.
+
+### Changed
+
+- **The 65C816 disassembly is written as Mesen2 writes it**, in the
+  Debugger window, the MCP `listing` and `disasm_cpu` and the trace: the
+  accumulator forms are bare (`ASL`, `INC`, not `ASL A`, `INC A`), `PEA`
+  is an immediate (`PEA #$1234`), `PEI` a direct-page operand
+  (`PEI $10`), and a block move has no space (`MVN $00,$7E`). The other
+  252 opcodes were already written the same.
+- **The CPU's registers read their value in Memory Tools and the memory
+  tools of the MCP**: `$4210`-`$421F` and the DMA registers as a read
+  returns them, without its side effects, and a write-only register the
+  data bus, as Mesen2 peeks them (they read 0 before, except the DMA
+  registers). The PPU's and the APU's (`$21xx`) still read 0, as in
+  Mesen2.
+
 ## [1.41.0] — 2026-10-24
 
 The GUI gets Mesen2's Memory Tools and Memory Search windows, which

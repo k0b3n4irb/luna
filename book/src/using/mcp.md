@@ -101,7 +101,7 @@ method, so the MCP transport adds reach, not capability.
 | `poke_memory` | `poke_memory` | Write bytes into WRAM (state injection). |
 | `memory_kinds` | `memory_kinds` | The memories this cartridge has, by Mesen2's name, with their size: `SnesMemory` (the CPU bus), `SpcMemory`, `SnesPrgRom`, `SnesWorkRam`, `SnesSaveRam`, `SnesVideoRam`, `SnesSpriteRam`, `SnesCgRam`, `SnesRegister` (the I/O registers by their 16-bit address, read without side effects), `SpcRam`, `SpcRom`, `SpcDspRegisters`, `DspProgramRom` / `DspDataRom` / `DspDataRam`, `Sa1InternalRam`, `GsuWorkRam`, `Sa1Memory` / `GsuMemory` (the SA-1's, the Super FX GSU's bus, read only). |
 | `enable_access_counters` / `access_counters` / `reset_access_counters` | `enable_access_counters` / `access_counters` / `reset_access_counters` | Mesen2's access counters: per byte, the reads, writes and code reads, and the master clock of the last of each, counted on the byte behind the address (mirrors agree). See *Access counters* below. |
-| `read_memory` / `write_memory` | `read_memory` / `write_memory` | `count` bytes of any of them from `offset` (or `symbol`), and back, without side effects: a `SnesMemory` address goes to the memory behind it, never through the bus, so a read starts no S-DD1 decompression and drains no DSP-1 port (a register reads 0, open bus `$FF`). Writes reach ROM too. See the example below. |
+| `read_memory` / `write_memory` | `read_memory` / `write_memory` | `count` bytes of any of them from `offset` (or `symbol`), and back, without side effects: a `SnesMemory` address goes to the memory behind it, never through the bus, so a read starts no S-DD1 decompression and drains no DSP-1 port (a CPU register, `$4000-$43FF`, reads what a read would return, without acknowledging `$4210` / `$4211`; a PPU or APU register, `$21xx`, reads 0; open bus `$FF`). Writes reach ROM too. See the example below. |
 | `eval` | `evaluate` | A debugger expression in Mesen2's language, evaluated as a watch: `{"value": 1, "kind": "boolean"}`. See [Expressions](#expressions) below. |
 | `absolute_address` | `absolute_address` | The memory and offset behind a CPU-bus address or label — `{"kind": "SnesPrgRom", "offset": 16}` for `$80:8010` on a 32 KB `LoROM` — as the mapper's banking selects it now; `{"kind": "SnesRegister", "offset": 8448}` for `$00:2100` and its mirrors; `null` for open bus or a coprocessor's register window. |
 | `poke_vram` / `poke_cgram` / `poke_oam` / `poke_aram` | same names | Direct writes into the other memory spaces (bus-bypassing state injection; each wraps at its size). |
@@ -140,6 +140,9 @@ method, so the MCP transport adds reach, not capability.
 | `label_set` / `label_remove` | `set_label` / `remove_label` | Add, replace or remove a debugger label: a name and/or comment on bytes of a memory. See [Labels and comments](#labels-and-comments). |
 | `label_list` | `labels` | The labels, by memory then address; `user_only` leaves out the register defaults. |
 | `labels_import` / `labels_export` | `import_labels_mlb` / `export_labels_mlb` | Read or write a Mesen2 `.mlb` label file. |
+| `trace_logger_start` | `trace_logger_start`, `trace_file_start` | Mesen2's trace logger for the 65C816: one text row per instruction from now on, in Mesen2's format (or `format`, or Mesen2's `format_options`), only where `condition` holds, also to `file`. See [The trace logger](#the-trace-logger). |
+| `trace_logger_rows` | `trace_logger_rows` | The last `count` rows (default 100, up to the 30 000 kept), oldest first: `row_id`, `cpu`, `pc`, `byte_code`, `text`. |
+| `trace_logger_stop` | `trace_logger_stop`, `trace_file_stop` | Stop it, drop its rows, close its file. |
 | `enable_code_log` | `enable_code_log` | Log which bytes the 65C816 and the SPC700 run as code (what `listing` knows code by). |
 | `listing` | `listing` / `listing_back` / `listing_pos_of` | The debugger's code listing, as Mesen2's Disassembly pane draws it. See [The code listing](#the-code-listing). |
 | `watch` | `watch_value` | Watch entries in Mesen2's formats (`, H2`, `, S`, `[addr, n]`). See [The debugger's panes](#the-debuggers-panes). |
@@ -504,6 +507,49 @@ Rows from Super Mario World after 600 frames with the log on from power-on:
 - **Where it stops**: the SA-1, the Super FX and the DSP-1 have no
   listing yet, and bytes read as data are not logged yet (no `data` block
   until the code/data log reads them).
+
+### The trace logger
+
+Mesen2's Trace Logger, over MCP: `trace_logger_start`, run, then read the
+rows. Each is the text Mesen2 writes for the instruction, taken at the
+moment Mesen2 takes it (registers before the instruction, beam once its
+opcode is fetched), the same text `luna state --trace-log` writes (see
+[the CLI section](cli-run-state.md#mesen2s-trace-logger---trace-log) for
+the tags and the condition).
+
+```text
+trace_logger_start {}                               # Mesen2's default format
+step {count: 4}
+trace_logger_rows {count: 2}
+trace_logger_start {condition: "iswrite && address == $2100",
+                    file: "/tmp/inidisp.txt"}        # restart: new options, a file
+step_until_frame {}
+trace_logger_stop {}                                # drops the rows, closes the file
+```
+
+The two rows Super Mario World gives from power-on:
+
+```json
+{"rows": [
+  {"row_id": 2, "cpu": "snes", "pc": 32772, "byte_code": [156, 12, 66],
+   "text": "STZ $420C [HDMAEN] = $9C               A:0000 X:0000 Y:0000 S:01FF D:0000 DB:00 P:nvMXdIzc V:0   H:59 "},
+  {"row_id": 3, "cpu": "snes", "pc": 32775, "byte_code": [156, 11, 66],
+   "text": "STZ $420B [MDMAEN] = $9C               A:0000 X:0000 Y:0000 S:01FF D:0000 DB:00 P:nvMXdIzc V:0   H:67 "}
+]}
+```
+
+- **`format_options`** builds Mesen2's format from its check boxes
+  (`show_registers`, `show_status_flags` with `status_format` `text` /
+  `compact_text` / `hexadecimal`, `show_effective_addresses`,
+  `show_memory_values`, `show_byte_code`, `show_clock_counter`,
+  `show_frame_counter`, `show_frame_position`), with Mesen2's defaults.
+- **`use_labels`** (default on) names addresses from the labels and the
+  symbols; **`indent_code`** indents the disassembly by the stack depth.
+- **A restart** with new options keeps the rows already logged; a file
+  given at a restart replaces the one open.
+- **Where it stops**: the 65C816 only for now (the SPC700, SA-1, Super FX
+  and DSP-1 loggers come next), and the condition is not offered the
+  accesses a DMA makes.
 
 ### Expressions
 

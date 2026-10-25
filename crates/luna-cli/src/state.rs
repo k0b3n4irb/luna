@@ -727,6 +727,10 @@ pub(crate) fn run_state(
     vram_writers_from: u64,
     layer_shots: Option<&std::path::Path>,
     layers: Option<&str>,
+    trace_log: Option<&std::path::Path>,
+    trace_format: Option<&str>,
+    trace_condition: Option<&str>,
+    trace_no_labels: bool,
 ) -> ExitCode {
     let layer_list = match layers {
         None => luna_api::Layer::ALL.to_vec(),
@@ -906,6 +910,21 @@ pub(crate) fn run_state(
     {
         eprintln!("error: enable_spc_trace: {e}");
         return ExitCode::from(1);
+    }
+    if let Some(path) = trace_log {
+        let options = luna_api::TraceOptions {
+            format: trace_format.map(str::to_string),
+            condition: trace_condition.unwrap_or_default().to_string(),
+            use_labels: !trace_no_labels,
+            ..luna_api::TraceOptions::default()
+        };
+        if let Err(e) = em
+            .trace_logger_start(luna_api::TraceCpu::Snes, &options)
+            .and_then(|()| em.trace_file_start(path))
+        {
+            eprintln!("error: --trace-log: {e}");
+            return ExitCode::from(2);
+        }
     }
     // Arm the WDM ($42) capture before stepping so the ROM's SNES_ASSERT /
     // breakpoint channel is recorded (issue #85 — parity with `luna run`).
@@ -1604,6 +1623,12 @@ pub(crate) fn run_state(
                 Err(e) => eprintln!("error: writing ARAM dump: {e}"),
             },
             Err(e) => eprintln!("error: aram_bytes: {e}"),
+        }
+    }
+    if let Some(path) = trace_log {
+        match em.trace_file_stop() {
+            Ok(()) => eprintln!("trace log written to {}", path.display()),
+            Err(e) => eprintln!("error: writing the trace log: {e}"),
         }
     }
     if let Some(path) = cpu_trace_path {
