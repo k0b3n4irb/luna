@@ -44,8 +44,11 @@ line or an inaccuracy of ours is something they cannot see around.
   the game enters a commit, a test or a document here** (rights: Rebellion).
 - **What is decided is written here** (`CHANGELOG.md`, the book): a message
   disappears with its session. A release note to a partner is still a dated
-  file in `~/workspace/partner-reports/` (its `INDEX.md` kept true), and it
-  is also said directly to the session concerned. Cartouche has no standing
+  file in luna's own archive, `.claude/notes/partners/<partner>/` (ignored
+  by git: the game's exchanges stay out of the history; its `INDEX.md` kept
+  true, direct messages included), and it is also said directly to the
+  session concerned. Every partner hears of what lands on `develop`, not
+  only the one it seems to touch (owner, 2026-10-25). Cartouche has no standing
   session: it is reached by its file only.
 
 ## The game lives on our `develop`
