@@ -16,7 +16,12 @@ re-verified green 2026-05-30). That covers, per-opcode, the full
 register + flag + RAM state transition for all 256 opcodes — including
 the BCD `ADC`/`SBC` pipeline, `REP`/`SEP`/`XCE`, every addressing mode
 (including the direct-page / stack bank-0 wrap and the `(dp,X)` base-wrap
-fixed in `091b8da`), stack push/pull, and the `BRK`/`COP`/`RTI`
+fixed in `091b8da`; since the suite corrected its `(dp,X)` cases in
+October 2026, each pointer byte is a direct-page read, ares `readDirect` —
+ares and Mesen2 add a page wrap with `E` and `D.l != 0` that the suite
+contradicts), stack push/pull (`JSR (a,x)`
+pushes without the page-1 wrap in emulation mode, as ares, Mesen2 and the
+corrected suite do), and the `BRK`/`COP`/`RTI`
 single-step transitions. The only opcodes the suite skips are `MVN`
 (`$54`) / `MVP` (`$44`), because their re-entrant model isn't gateable
 on a 100-cycle atomic budget.

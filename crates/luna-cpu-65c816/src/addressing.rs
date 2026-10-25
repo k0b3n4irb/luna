@@ -169,32 +169,24 @@ pub fn direct_page_indexed_indirect<B: Bus>(cpu: &mut Cpu, bus: &mut B) -> Addr2
 /// Fetch one byte of a `(dp,X)` pointer. `address` is `dp_operand + X`;
 /// `offset` is 0 (low byte) or 1 (high byte).
 ///
-/// Resolve one byte of a `(direct,X)` pointer.
+/// Each byte is read as a direct-page byte (ares `readDirect`): in emulation
+/// mode with `D.l == 0` it wraps within the direct page, otherwise it is a
+/// 16-bit add in bank 0. The `SingleStepTests/65816` suite, whose (dp,X)
+/// cases were verified and corrected upstream on 2026-10-15, wants exactly
+/// that: `e1.e 8669` (`D=$F400`, `dp+X=$FF`) reads `$F4FF` then `$F400`.
 ///
-/// In **emulation mode with `D.l == 0`** the index addition wraps within
-/// the 256-byte direct page to form the pointer *base* (`D.w | n8(dp+X)`);
-/// the two pointer bytes are then read **linearly** from `base` and
-/// `base+1` (bank-0 wrap). Every other case (E with `D.l != 0`, or native)
-/// is a plain 16-bit add within bank 0.
-///
-/// This diverges subtly from ares `readDirectX` (`memory.cpp:62-67`), which
-/// re-applies the page-wrap to the *high* byte (`D.w | n8(dp+X+1)`). The
-/// `SingleStepTests/65816` suite — hardware-derived, so the empirical gate —
-/// disagrees only when `n8(dp+X) == 0xFF`:
-/// - case `e1.e 125` (`D=0x7700`, `dp+X=0x197`) needs the base wrap: bytes
-///   at `0x7797`/`0x7798`;
-/// - case `e1.e 8669` (`D=0xF400`, `dp+X=0xFF`) needs the linear high byte:
-///   `0xF4FF`/`0xF500`, not the page-wrapped `0xF400`.
-///
-/// Wrapping the base once and adding `offset` linearly satisfies both.
+/// ares (`readDirectX`) and Mesen2 (`GetDirectAddressIndirectWordWithPageWrap`)
+/// both add a "CPU bug" for emulation mode with `D.l != 0`: the high byte
+/// wraps to the start of the low byte's page. The suite contradicts it
+/// (`61.e 354`: `$6FFF` then `$7000`), before and after its correction, and
+/// luna follows the suite here, as it did before.
 fn read_direct_x<B: Bus>(cpu: &Cpu, bus: &mut B, address: u32, offset: u32) -> u8 {
     let dp = u32::from(cpu.dp);
-    let addr = if cpu.e && (cpu.dp & 0x00FF) == 0 {
-        (dp | (address & 0x00FF)).wrapping_add(offset) & 0xFFFF
-    } else {
-        dp.wrapping_add(address).wrapping_add(offset) & 0xFFFF
-    };
-    bus.read(addr)
+    let address = address.wrapping_add(offset);
+    if cpu.e && (cpu.dp & 0x00FF) == 0 {
+        return bus.read(dp | (address & 0xFF));
+    }
+    bus.read(dp.wrapping_add(address) & 0xFFFF)
 }
 
 /// Absolute Indexed by X: `LDA $abs,X`.

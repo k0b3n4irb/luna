@@ -34,7 +34,9 @@ the final register state.
 A few deliberate notes:
 
 - For the `(dp,X)` emulation-mode pointer wrap, Luna follows the per-instruction
-  test suite's verified hardware behaviour.
+  test suite's verified hardware behaviour: with a direct page not aligned on a
+  page, ares and Mesen2 wrap the pointer's high byte within its page, and the
+  suite does not.
 - Interrupts are **sampled one cycle before an instruction's last bus access**
   and taken at the boundary that follows — which is what both reference
   emulators do. Neither interrupts mid-instruction; the sampling point is what

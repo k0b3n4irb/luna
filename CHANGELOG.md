@@ -32,6 +32,17 @@ fast-forwarded to (binaries attached by CI). Format inspired by
     headless, through Mesen2's native core; `tools/trace-diff.py` pairs
     two trace files row by row and says what differs.
 
+### Fixed
+
+- **Two 65C816 edge cases in emulation mode**, found when the
+  `SingleStepTests/65816` suite corrected them (2026-10-15/16): `JSR
+  (a,x)` pushes its return address without wrapping in page 1 (from
+  `S=$0100` the second byte goes to `$00FF`), and a `(d,x)` pointer whose
+  low byte sits at `$FF` of a page-aligned direct page reads its high
+  byte at the start of that page (both as ares and Mesen2 do).
+  The test datasets are pinned to an upstream commit
+  (`tools/fetch-tom-harte.sh`, `tools/fetch-tom-harte-spc700.sh`).
+
 ### Changed
 
 - **The 65C816 disassembly is written as Mesen2 writes it**, in the

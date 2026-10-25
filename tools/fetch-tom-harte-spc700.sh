@@ -11,6 +11,11 @@
 
 set -euo pipefail
 
+# The dataset is pinned: upstream corrects its cases now and then, and a
+# floating HEAD changed the gate under CI without a commit here (2026-10-16
+# for the 65C816). Moving the pin is a commit, and it changes the CI cache
+# key, which hashes this file. Delete the local copy to fetch a new pin.
+COMMIT="67d15f492b2740964abd4efd1229e0ec9c342228" # 2024-05-10
 REPO="https://github.com/SingleStepTests/spc700.git"
 DEST_PARENT="$(cd "$(dirname "$0")/.." && pwd)/tests"
 DEST="$DEST_PARENT/tom-harte-spc700"
@@ -27,8 +32,10 @@ if [ -d "$DEST" ] && [ -z "$(ls -A "$DEST" | grep -v '^\.gitkeep$')" ]; then
 fi
 
 mkdir -p "$DEST_PARENT"
-echo "Cloning $REPO into $DEST (shallow)…"
-git clone --depth 1 "$REPO" "$DEST"
+echo "Cloning $REPO into $DEST (shallow, at ${COMMIT:0:7})…"
+git init -q "$DEST"
+git -C "$DEST" fetch -q --depth 1 "$REPO" "$COMMIT"
+git -C "$DEST" checkout -q FETCH_HEAD
 
 if [ ! -d "$DEST/v1" ]; then
     echo "ERROR: expected $DEST/v1 after clone — repo layout may have changed." >&2

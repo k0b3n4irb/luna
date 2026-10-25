@@ -33,7 +33,11 @@ mismatch, on a core that panics, and on a dataset that is missing, empty or
 shorter than the counts below — a run that compared nothing is not a pass.
 CI runs both in the `tom-harte` workflow
 (`.github/workflows/tom-harte.yml`), not in the main `ci.yml`. The datasets
-are gitignored.
+are gitignored, and pinned to an upstream commit in the fetch scripts
+(`COMMIT=`): the 65C816 suite corrected its `JSR (a,x)` and `(dp,X)`
+cases on 2026-10-15/16, and with a floating HEAD that reached CI as a
+failure with no commit here. Moving a pin is a commit, and it changes the
+CI cache key.
 
 Measured 2026-10-04 on the full datasets:
 

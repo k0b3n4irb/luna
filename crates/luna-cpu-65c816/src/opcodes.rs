@@ -1133,9 +1133,13 @@ impl Cpu {
         // read-vs-write swap at cycle 2 if both operand bytes are fetched up
         // front). State-identical — PC after the lo fetch already points at the
         // operand-high byte, which is the return address.
+        // `pushN`, like ares and Mesen2 (`PushWord(PC, false)`): a 65C816
+        // instruction, so in emulation mode the push leaves page 1 and the
+        // end-of-step re-pin restores S.h (SingleStepTests/65816 #6).
         let lo = self.fetch_u8(bus);
-        let return_addr = self.pc;
-        self.push_u16(bus, return_addr);
+        let [ret_lo, ret_hi] = self.pc.to_le_bytes();
+        self.push_u8_native(bus, ret_hi);
+        self.push_u8_native(bus, ret_lo);
         let hi = self.fetch_u8(bus);
         self.io(bus); // ares CallIndexedIndirect internal cycle
         let base = u16::from(lo) | (u16::from(hi) << 8);
@@ -2883,7 +2887,8 @@ impl Cpu {
     }
 
     // --- "native" stack ops (ares `pushN`/`pullN`) -----------------------
-    // The new 65C816 stack instructions (PEA/PEI/PER/PHD/PLD/PLB/JSL/RTL)
+    // The new 65C816 stack instructions (PEA/PEI/PER/PHD/PLD/PLB/JSL/RTL,
+    // JSR (abs,X))
     // index the stack with the **full 16-bit S**, with no emulation-mode
     // page-1 confinement: a push that starts at $0100 in E-mode crosses
     // down into $00FF. The end-of-step re-pin (`Cpu::step`) then restores

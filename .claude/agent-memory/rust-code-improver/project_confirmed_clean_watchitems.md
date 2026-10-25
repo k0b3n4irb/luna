@@ -11,7 +11,7 @@ Verified-correct-and-deliberate spots (2026-06-13 full-workspace review). Do NOT
 - SuperFX is the ONLY mapper using `& (size-1)`; it pads ROM/RAM to a power of two first (`round_up_pow2`), so the mask is valid and matches ares' padded-image model. LoROM/HiROM/ExHiROM use `if off < rom.len()` open-bus and SRAM uses `% len()` — non-power-of-two safe.
 - DSP firmware detect `rom.len() & 0x7FFF == 0x2000` (luna-cartridge) is a valid power-of-two mask (0x8000-1), = `% 0x8000`. Not a non-power-of-two hazard.
 - WRAM-port `& 0x1FFFF` is valid: WRAM is 0x20000 (power of two), mask == modulo.
-- `read_direct_x` (65c816 (dp,X) emulation wrap) deliberately follows SingleStepTests over ares: the Tom Harte suite passes at 100% and overrides ares on this wrap, so do not "correct" it towards ares.
+- `read_direct_x` (65c816 (dp,X) emulation wrap) reads each pointer byte as a direct-page byte (ares `readDirect`) since 2026-10-25, the corrected SingleStepTests (2026-10-15). ares `readDirectX` and Mesen2 both add a high-byte page wrap with E && D.l != 0 that the suite contradicts: deliberately not ported, do not "correct" it towards ares.
 - `state()` in luna-api is heavy by design but gated to the open Registers debug window, never per-frame — the GUI uses cheap cpu_state/spc700_state accessors. Not a perf bug.
 
 Genuine WATCH-ITEMS (not bugs, but where to aim a differential harness if symptoms appear):
