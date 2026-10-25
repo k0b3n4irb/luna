@@ -16,7 +16,7 @@ Usage:
     tools/doc-captures.py --check    # exit 1 when a committed file differs
     tools/doc-captures.py --list     # the table: name, kind, ROM
 
-The corpus is `LUNA_SNES_TEST_DIR`, else `../luna_tests` (the golden suite's
+The corpus is `LUNA_SNES_TEST_DIR`, else `.luna_tests`, else `../luna_tests` (the golden suite's
 convention). The binary is `LUNA_BIN`, else `target/release/luna`, else
 `target/debug/luna`. A missing corpus or binary is exit 2, never a pass.
 """
@@ -61,7 +61,9 @@ def luna_binary() -> Path:
 
 
 def corpus_dir() -> Path:
-    d = Path(os.environ.get("LUNA_SNES_TEST_DIR") or ROOT.parent / "luna_tests")
+    env = os.environ.get("LUNA_SNES_TEST_DIR")
+    candidates = [ROOT / ".luna_tests", ROOT.parent / "luna_tests"]
+    d = Path(env) if env else next((c for c in candidates if c.is_dir()), candidates[0])
     if not d.is_dir():
         fail(f"no corpus at {d} (run tools/fetch-snes-test-roms.sh, or set LUNA_SNES_TEST_DIR)")
     return d

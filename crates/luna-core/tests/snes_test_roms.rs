@@ -1,15 +1,15 @@
 //! SNES test-ROM golden suite (Peter Lemon hardware tests + homebrew).
 //!
-//! Mirrors the `twvd/siena` approach: the ROM corpus is **not vendored**
-//! (it's large), but checked out at the same directory level as this
-//! repo — e.g. `../luna_tests` — and referenced from there. Each test
+//! The ROM corpus is **not vendored** (it's large): it is checked out into
+//! `.luna_tests` at the root of the repository (git-ignored), or found in
+//! the sibling `../luna_tests` where it used to live. Each test
 //! boots a ROM, runs it until the 256×224 framebuffer settles, and
 //! asserts a SHA-256 of that framebuffer against a committed golden hash.
 //!
 //! ## Setup
 //!
 //! ```bash
-//! tools/fetch-snes-test-roms.sh        # sparse-clone into ../luna_tests
+//! tools/fetch-snes-test-roms.sh        # sparse-clone into .luna_tests
 //! cargo test -p luna-core --test snes_test_roms
 //! ```
 //!
@@ -143,18 +143,19 @@ fn record_mode() -> bool {
     true
 }
 
-/// Corpus root: `$LUNA_SNES_TEST_DIR`, else the sibling `../luna_tests`.
+/// Corpus root: `$LUNA_SNES_TEST_DIR`, else `.luna_tests` in the repository,
+/// else the sibling `../luna_tests` (where it used to live).
 fn corpus_root() -> Option<PathBuf> {
     if let Ok(s) = std::env::var("LUNA_SNES_TEST_DIR") {
         let p = PathBuf::from(s);
         return p.is_dir().then_some(p);
     }
-    let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR")); // crates/luna-core
-    p.pop(); // crates
-    p.pop(); // <repo root>
-    p.pop(); // parent of repo
-    p.push("luna_tests");
-    p.is_dir().then_some(p)
+    let mut repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")); // crates/luna-core
+    repo.pop(); // crates
+    repo.pop(); // <repo root>
+    [repo.join(".luna_tests"), repo.join("../luna_tests")]
+        .into_iter()
+        .find(|p| p.is_dir())
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -343,8 +344,8 @@ fn test_display(rel: &str, expected: &str, hold: u16, region: luna_cartridge::Re
     let Some(root) = corpus_root() else {
         skip(
             CORPUS_REQUIRE,
-            "SNES test corpus not found — checkout ../luna_tests \
-             (tools/fetch-snes-test-roms.sh) or set LUNA_SNES_TEST_DIR",
+            "SNES test corpus not found — run tools/fetch-snes-test-roms.sh \
+             (into .luna_tests) or set LUNA_SNES_TEST_DIR",
         );
         return;
     };

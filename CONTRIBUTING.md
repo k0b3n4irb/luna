@@ -27,7 +27,7 @@ external data skip cleanly when it is absent. To run the full suites:
 
 - **Golden ROM suite** (homebrew hardware tests, CI-gated):
   `tools/fetch-snes-test-roms.sh` sparse-clones the open-source corpus into
-  the sibling directory `../luna_tests`. Then
+  `.luna_tests` at the root of the repository (ignored by git). Then
   `cargo test -p luna-core --test snes_test_roms --release`.
 - **Tom Harte CPU suites** (exhaustive per-instruction, `#[ignore]` by
   default): `tools/fetch-tom-harte.sh` and `tools/fetch-tom-harte-spc700.sh`
@@ -196,7 +196,7 @@ The version tracks luna's **user-facing contract**, not the Rust API:
   ```
 
   `<corpus>` is the directory `tools/fetch-snes-test-roms.sh` filled
-  (`../luna_tests` by default), given as an **absolute** path: each test
+  (`.luna_tests` by default, found without it), given as an **absolute** path: each test
   runs from its own crate's directory, so a relative one points nowhere
   and every corpus test fails. `LUNA_SNES_TEST_REQUIRE=1` turns a missing
   corpus, or a missing ROM of the homebrew golden suite, into a failure

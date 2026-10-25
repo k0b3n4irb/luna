@@ -22,9 +22,6 @@ Thumbs.db
 # clones, fetched on demand (tools/fetch-tom-harte*.sh). Never committed.
 /tests/tom-harte/
 /tests/tom-harte-spc700/
-# Peter Lemon SNES test ROMs (crates/luna-core/tests/snes_test_roms.rs)
-# live in a SIBLING checkout `../luna_tests` (tools/fetch-snes-test-roms.sh),
-# outside this repo — nothing to ignore here.
 # Proprietary game ROMs — never commit.
 /tests/roms/*
 !/tests/roms/.gitkeep
@@ -41,7 +38,8 @@ Thumbs.db
 .claude/notes/
 book/book/
 
-# CI checks the SNES test corpus out here (absolute path for actions/cache).
+# Peter Lemon SNES test ROMs (crates/luna-core/tests/snes_test_roms.rs),
+# fetched by tools/fetch-snes-test-roms.sh — locally and in CI.
 /.luna_tests/
 
 # Python bytecode (tools/*.py)

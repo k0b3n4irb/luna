@@ -2,10 +2,11 @@
 # Fetch the SNES hardware-test ROM corpus (Peter Lemon's suite) used by
 # the golden display tests in crates/luna-core/tests/snes_test_roms.rs.
 #
-# Following the twvd/siena convention, the corpus lives OUTSIDE this repo
-# (it's large) and is checked out *at the same directory level* — i.e.
-# alongside the luna checkout as ../luna_tests. We sparse-checkout only
-# the test-relevant subdirectories, not the whole multi-GB repo.
+# The corpus is not vendored (it's large): it is checked out into
+# .luna_tests at the root of this repository, ignored by git — the same
+# path CI uses. (It used to be the sibling ../luna_tests; the harness still
+# finds it there.) We sparse-checkout only the test-relevant
+# subdirectories, not the whole multi-GB repo.
 #
 # Usage: tools/fetch-snes-test-roms.sh
 #
@@ -22,7 +23,7 @@ REV="350b394e86ec5d62f600b5cbf64cdce3721bb6ef"
 # Subdirs the harness pulls ROMs from.
 SPARSE_PATHS=(CPUTest PPU SPC700 INPUT)
 
-DEST="${LUNA_SNES_TEST_DIR:-$(cd "$(dirname "$0")/.." && pwd)/../luna_tests}"
+DEST="${LUNA_SNES_TEST_DIR:-$(cd "$(dirname "$0")/.." && pwd)/.luna_tests}"
 
 if [ -d "$DEST" ] && [ ! -d "$DEST/.git" ] && [ -n "$(ls -A "$DEST")" ]; then
     # A corpus copied in by hand (no .git) can't be updated or repaired —

@@ -54,15 +54,15 @@ oracle.
 ## 2. Peter Lemon SNES — full-system golden display tests
 
 End-to-end hardware-test ROMs that exercise the whole emulator (CPU +
-PPU + bus). Following the [`twvd/siena`](https://github.com/twvd/siena)
-convention, the ROM corpus is **not vendored** and is checked out **at
-the same directory level** as this repo (a sibling), then referenced
-from there:
+PPU + bus). The ROM corpus is **not vendored**: it is checked out into
+`.luna_tests/` at the root of the repository, ignored by git, the path CI
+uses too. (It used to be a sibling, `../luna_tests`, after the
+[`twvd/siena`](https://github.com/twvd/siena) convention; the harness
+still finds it there.)
 
 ```
-<parent>/
-├── luna/          ← this repo
-└── luna_tests/    ← the sibling corpus  (../luna_tests)
+luna/
+└── .luna_tests/   ← the corpus (git-ignored)
 ```
 
 Source: [PeterLemon/SNES](https://github.com/PeterLemon/SNES) — a sparse
@@ -134,7 +134,7 @@ trusting a number written here.
   (the `$FFEE` byte) — see `luna_spc700_gaps.md`.
 
 ```bash
-tools/fetch-snes-test-roms.sh                  # sparse checkout → ../luna_tests
+tools/fetch-snes-test-roms.sh                  # sparse checkout → .luna_tests
 cargo test -p luna-core --test snes_test_roms
 ```
 
@@ -217,7 +217,7 @@ Each row was checked in the file named.
 
 | Variable | Read in | Effect |
 |---|---|---|
-| `LUNA_SNES_TEST_DIR` | `crates/luna-core/tests/snes_test_roms.rs` (`corpus_root`), `tools/fetch-snes-test-roms.sh` | Corpus root. Default: the sibling `../luna_tests`. |
+| `LUNA_SNES_TEST_DIR` | `crates/luna-core/tests/snes_test_roms.rs` (`corpus_root`), `tools/fetch-snes-test-roms.sh` | Corpus root. Default: `.luna_tests` in the repository, else the sibling `../luna_tests`. |
 | `LUNA_SNES_TEST_REQUIRE` | same file (`CORPUS_REQUIRE`, `skip`) | Set: a missing corpus or corpus ROM **fails** instead of skipping. Set by CI's `snes-test-roms` job. |
 | `LUNA_GAME_TEST_REQUIRE` | same file (`GAMES_REQUIRE`, `skip`); `crates/luna-api/tests/{smoke,reset_repro,mouse,superscope}.rs` and `crates/luna-core/tests/dsp1_port_differential.rs` (`skip`) | Same, for everything the repository cannot ship: the commercial ROMs under `tests/roms/`, the OpenSNES example ROMs, the DSP-1 firmware and Mesen2 trace. Set by no workflow — local pre-release check. |
 | `LUNA_SNES_TEST_RECORD` | same file (`record_mode`) | `=1` (only that value): print the freshly computed hash and **return without asserting**. Panics if a `*_REQUIRE` variable above is set. |

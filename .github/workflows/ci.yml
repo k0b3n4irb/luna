@@ -212,9 +212,8 @@ jobs:
   # ---------------------------------------------------------------------
 
   # ---------------------------------------------------------------------
-  # SNES test-ROM golden suite (Peter Lemon hardware tests). Following the
-  # twvd/siena convention the ROM corpus lives in a sibling checkout
-  # (../luna_tests), sparse-cloned on demand. The harness boots each ROM
+  # SNES test-ROM golden suite (Peter Lemon hardware tests). The ROM corpus
+  # is sparse-cloned on demand into .luna_tests, as locally. The harness boots each ROM
   # and compares a SHA-256 of the framebuffer to a committed golden hash.
   # ---------------------------------------------------------------------
   snes-test-roms:
