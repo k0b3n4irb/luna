@@ -1,12 +1,12 @@
 ---
-description: Fetch ares + Mesen2 reference sources for a SNES subsystem into /tmp/
+description: Fetch ares + Mesen2 reference sources for a SNES subsystem into /tmp/luna-ref/
 argument-hint: "<subsystem> (e.g. ppu, dma, cpu, sa1, dsp, superfx, dsp1, sdd1)"
 allowed-tools: Bash(curl *), Bash(gh *), Bash(mkdir *), Bash(ls *), Read
 ---
 
 Implements the first step of the reference-first workflow in
 `.claude/rules/reference-first.md`: fetch the canonical files from
-both reference emulators into `/tmp/` so they can be diffed and read.
+both reference emulators into `/tmp/luna-ref/` so they can be diffed and read.
 
 ## Subsystem mapping
 
@@ -23,7 +23,7 @@ both reference emulators into `/tmp/` so they can be diffed and read.
 
 ## Workflow
 
-1. Create `/tmp/ares/<subsys>/` and `/tmp/mesen2/<subsys>/`.
+1. Create `/tmp/luna-ref/ares/<subsys>/` and `/tmp/luna-ref/mesen2/<subsys>/`.
 2. Discover the ares file list of each directory the table names
    (not `ares/sfc/<subsys>`: `superfx`, `dsp1`, `sdd1` and `dma` live
    elsewhere) via the GitHub API:
@@ -37,7 +37,7 @@ both reference emulators into `/tmp/` so they can be diffed and read.
 
 When the fetch is complete, the next step (per the reference-first
 rule) is to read the files thoroughly and produce a spec at
-`/tmp/<subsys>_reference.md`. Use the `general-purpose` agent for
+`/tmp/luna-ref/<subsys>_reference.md`. Use the `general-purpose` agent for
 that if the surface is large.
 
 If `$ARGUMENTS` is empty, ask the user which subsystem to fetch.

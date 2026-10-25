@@ -16,18 +16,18 @@ fully** before touching luna code.
 ## Workflow per feature
 
 1. **Fetch** the relevant files from both repos (`curl -s`) into
-   `/tmp/`. For a directory listing use the GH API:
+   `/tmp/luna-ref/`. For a directory listing use the GH API:
    `gh api repos/ares-emulator/ares/contents/ares/sfc/<subsys> --jq '.[].name'`.
 2. **Read** the actual source — register decoders, state machines,
    bit layouts. Quote line numbers when summarising.
 3. **Both references must agree** on the semantic before luna
    adopts it. When they diverge, document the discrepancy and pick
    the one with more clarity (usually ares' verified behaviour).
-4. **Write up a short spec** to `/tmp/<feature>_reference.md`:
+4. **Write up a short spec** to `/tmp/luna-ref/<feature>_reference.md`:
    register table, state-transition diagram, edge cases. This is
    the diff target. Promote it to `docs/` if it has lasting value.
 5. **Inventory** what luna currently does (the `Explore` agent works
-   well for this) into `/tmp/luna_<feature>_inventory.md`.
+   well for this) into `/tmp/luna-ref/luna_<feature>_inventory.md`.
 6. **Then** implement against the spec — never from memory or from
    `fullsnes.htm` paraphrases alone. The bit layouts and timing
    quirks differ between secondary docs and what real hardware

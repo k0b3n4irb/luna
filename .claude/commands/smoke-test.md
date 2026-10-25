@@ -24,13 +24,14 @@ first if it isn't built.
 ```bash
 # 1. Intro cinematic (no input): Peach-in-the-garden scene
 #    (`frame_count` ≈ 909, `nmis_serviced` ≈ 417).
-./target/release/luna state -n 12000000 --screenshot /tmp/smrpg_intro.png \
+mkdir -p /tmp/luna-smoke
+./target/release/luna state -n 12000000 --screenshot /tmp/luna-smoke/smrpg_intro.png \
   "tests/roms/Super Mario RPG - Legend of the Seven Stars (USA).sfc"
 
 # 2. Past the title: pulse Start ($1000) to reach New Game → name entry.
 ./target/release/luna state -n 55000000 \
   --input "1600:0x1000,1610:0,1700:0x1000,1710:0,2000:0x1000,2010:0,2500:0x1000,2510:0" \
-  --screenshot /tmp/smrpg_name.png \
+  --screenshot /tmp/luna-smoke/smrpg_name.png \
   "tests/roms/Super Mario RPG - Legend of the Seven Stars (USA).sfc"
 ```
 
@@ -54,9 +55,10 @@ frame 700 (re-measured 2026-10-24: a press at frame 300 lands before the
 title and the run ends on the 1/2 PLAYER menu).
 
 ```bash
+mkdir -p /tmp/luna-smoke
 ./target/release/luna state -n 30000000 \
   --input "700:0x1000,715:0,900:0x1000,915:0,1100:0x1000,1115:0,1300:0x1000,1315:0" \
-  --screenshot /tmp/smw.png \
+  --screenshot /tmp/luna-smoke/smw.png \
   --peek 7E:0200:20 \
   "tests/roms/Super Mario World (U) [!].smc"
 ```
@@ -68,7 +70,8 @@ means Mario is in OAM and should render.
 
 ### `both`
 
-Run both targets sequentially. Each leaves its PNG in `/tmp/`.
+Run both targets sequentially. Each leaves its PNG in `/tmp/luna-smoke/`
+(`mkdir -p` it first; `tools/clean-tmp.sh --apply` removes it).
 
 ## Reporting
 

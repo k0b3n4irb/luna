@@ -45,7 +45,7 @@ A cycle-accurate-ish SNES emulator written in Rust. 12-crate workspace:
 | **Faithful port + step-by-step dichotomy (THE method)** | `.claude/rules/faithful-port-and-dichotomy.md` | Any accuracy/timing bug; any subsystem that misbehaves vs hardware. Supersedes ad-hoc debugging. |
 | **HDMA / DMA faithful audit (PILLAR)** | `.claude/rules/hdma-dma-faithful-audit.md` | Edits to `luna-core/src/dma/`; any split/gradient/raster/status-bar layer bug. Drives `docs/hdma_ares_audit.md` (living audit vs ares). |
 | Reference-first implementation | `.claude/rules/reference-first.md` | Any SNES subsystem feature change |
-| Rebuild + lint discipline | `.claude/rules/rebuild-discipline.md` | Every code change before commit |
+| Rebuild + lint discipline (+ `/tmp` cleanup after the tests) | `.claude/rules/rebuild-discipline.md` | Every code change before commit; end of a test session |
 | Rust lint discipline (clippy `--all-features`) | `.claude/rules/rust-lint-discipline.md` | Every code change before commit (extends rebuild) |
 | Coprocessor / DMA / PPU test sweep | `.claude/rules/coproc-testing.md` | Edits to `crates/luna-ppu/`, `crates/luna-core/src/dma/`, `crates/luna-core/src/coproc/`, `crates/luna-bus/src/sa1.rs` |
 | Test audible / visible fixes before commit | `.claude/rules/audible-fixes-test-first.md` | Any change to APU / PPU rendering / GUI audio or framebuffer |
@@ -64,8 +64,9 @@ Read the matching rule before touching the relevant code, not after.
 |---|---|
 | `/rebuild` | Canonical workspace rebuild (debug + release, all targets) |
 | `/smoke-test [smrpg\|smw\|both]` | Visual regression screenshot via luna-cli |
-| `/reference-fetch <subsys>` | Fetch ares + Mesen2 sources for a subsystem into `/tmp/` |
+| `/reference-fetch <subsys>` | Fetch ares + Mesen2 sources for a subsystem into `/tmp/luna-ref/` |
 | `/housekeeping` | Delete releases beyond the five highest and the one OpenSNES pins, and Actions runs older than a month |
+| `/clean-tmp` | Delete what luna's tests, smoke runs and diagnostics left in `/tmp` (after the tests of a session) |
 
 ## Code style
 

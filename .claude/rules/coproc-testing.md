@@ -40,14 +40,15 @@ because SA-1 graphics are exercised by both:
 ```
 # 1. Intro cinematic (no input): the Peach-in-the-garden scene
 #    (`frame_count` ≈ 909, `nmis_serviced` ≈ 417).
-./target/release/luna state -n 12000000 --screenshot /tmp/smrpg_intro.png \
+mkdir -p /tmp/luna-smoke
+./target/release/luna state -n 12000000 --screenshot /tmp/luna-smoke/smrpg_intro.png \
   "tests/roms/Super Mario RPG - Legend of the Seven Stars (USA).sfc"
 
 # 2. Past the title: pulse Start to reach New Game → the "Your name?"
 #    name-entry screen (Mario + alphabet grid). Start = $1000.
 ./target/release/luna state -n 55000000 \
   --input "1600:0x1000,1610:0,1700:0x1000,1710:0,2000:0x1000,2010:0,2500:0x1000,2510:0" \
-  --screenshot /tmp/smrpg_name.png \
+  --screenshot /tmp/luna-smoke/smrpg_name.png \
   "tests/roms/Super Mario RPG - Legend of the Seven Stars (USA).sfc"
 ```
 
@@ -83,7 +84,8 @@ screenshot **RPM Racing** — the canonical commercial interlace title
 (runs Mode 5 hi-res + BG interlace, `SETINI=$01`, the whole time):
 
 ```
-./target/release/luna state -n 12000000 --screenshot /tmp/rpm.png \
+mkdir -p /tmp/luna-smoke
+./target/release/luna state -n 12000000 --screenshot /tmp/luna-smoke/rpm.png \
   "tests/roms/RPM Racing (U).smc"
 ```
 

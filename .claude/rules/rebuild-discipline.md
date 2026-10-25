@@ -59,3 +59,25 @@ cargo build --workspace --all-targets \
   && cargo fmt --all --check \
   && cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
+
+## After the tests: clean `/tmp`
+
+The integration tests, the smoke runs, `luna wram-trace`, the reference
+fetches and the agent's own scratch files all write to `/tmp`, and none of
+them clean up after themselves: a session of work leaves hundreds of
+entries there. Once the tests of a work session are over (and before
+handing the work back), run:
+
+```
+tools/clean-tmp.sh            # dry run: what would go
+tools/clean-tmp.sh --apply    # delete
+```
+
+Available as the `/clean-tmp` slash command. It deletes only luna's
+entries owned by the current user (`luna-*`, `luna_*`, `mesen_*`, and the
+scratchpads of the Claude Code sessions opened in this repository); other
+projects share `/tmp` and their files stay. So that the script finds
+everything, anything written to `/tmp` by hand goes under a `luna-` prefix
+(`/tmp/luna-smoke/`, `/tmp/luna-ref/`, `/tmp/luna-<topic>/`) or in the
+session's scratchpad, never at the top of `/tmp` under another name. Not
+while a test suite is still running: it would lose its fixtures.
