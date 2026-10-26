@@ -1,6 +1,6 @@
 # Direct exchanges with OpenSNES and the game
 
-Owner decision (2026-10-10). luna, OpenSNES and the game (speedball2) talk
+Owner decision (2026-10-10). luna, OpenSNES and the game port talk
 to each other **directly, session to session**, and challenge one another.
 This rule says what that changes here.
 
@@ -25,8 +25,8 @@ line or an inaccuracy of ours is something they cannot see around.
 
 ## How
 
-- **`ListAgents`, then `SendMessage`**, to the sessions `opensnes` and
-  `speedball2` (recognised by their working directory when they do not
+- **`ListAgents`, then `SendMessage`**, to the OpenSNES session and the
+  game port's (recognised by their working directory when they do not
   carry the name yet). **GitHub issues are no longer the intake between the
   three**: a request arrives as a direct message with its case, and is
   answered the same way. Closing an issue already open on GitHub is a
