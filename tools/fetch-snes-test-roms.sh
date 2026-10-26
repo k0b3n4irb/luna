@@ -4,8 +4,7 @@
 #
 # The corpus is not vendored (it's large): it is checked out into
 # .luna_tests at the root of this repository, ignored by git — the same
-# path CI uses. (It used to be the sibling ../luna_tests; the harness still
-# finds it there.) We sparse-checkout only the test-relevant
+# path CI uses. We sparse-checkout only the test-relevant
 # subdirectories, not the whole multi-GB repo.
 #
 # Usage: tools/fetch-snes-test-roms.sh

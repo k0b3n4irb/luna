@@ -1,8 +1,7 @@
 //! SNES test-ROM golden suite (Peter Lemon hardware tests + homebrew).
 //!
 //! The ROM corpus is **not vendored** (it's large): it is checked out into
-//! `.luna_tests` at the root of the repository (git-ignored), or found in
-//! the sibling `../luna_tests` where it used to live. Each test
+//! `.luna_tests` at the root of the repository (git-ignored). Each test
 //! boots a ROM, runs it until the 256×224 framebuffer settles, and
 //! asserts a SHA-256 of that framebuffer against a committed golden hash.
 //!
@@ -143,8 +142,7 @@ fn record_mode() -> bool {
     true
 }
 
-/// Corpus root: `$LUNA_SNES_TEST_DIR`, else `.luna_tests` in the repository,
-/// else the sibling `../luna_tests` (where it used to live).
+/// Corpus root: `$LUNA_SNES_TEST_DIR`, else `.luna_tests` in the repository.
 fn corpus_root() -> Option<PathBuf> {
     if let Ok(s) = std::env::var("LUNA_SNES_TEST_DIR") {
         let p = PathBuf::from(s);
@@ -153,9 +151,8 @@ fn corpus_root() -> Option<PathBuf> {
     let mut repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")); // crates/luna-core
     repo.pop(); // crates
     repo.pop(); // <repo root>
-    [repo.join(".luna_tests"), repo.join("../luna_tests")]
-        .into_iter()
-        .find(|p| p.is_dir())
+    let p = repo.join(".luna_tests");
+    p.is_dir().then_some(p)
 }
 
 fn hex(bytes: &[u8]) -> String {
