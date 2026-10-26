@@ -534,34 +534,14 @@ impl Watch {
     }
 }
 
-/// Whether `condition` holds at an arrival on `addr`, evaluated as an
-/// exec breakpoint's (`value` is the opcode, `address` the PC).
+/// Whether `condition` holds at an arrival on `addr`
+/// ([`luna_api::Emulator::arrival_holds`]).
 pub(crate) fn arrival_holds(
     em: &luna_api::Emulator,
     condition: &luna_api::Expression,
     addr: u32,
 ) -> bool {
-    let at = em
-        .cpu_state()
-        .map_or(addr, |c| (u32::from(c.pb) << 16) | u32::from(c.pc));
-    let opcode = em
-        .read_memory(luna_api::MemoryKind::SnesMemory, at, 1)
-        .map_or(0, |b| b[0]);
-    let access = luna_api::ExprAccess {
-        value: i64::from(opcode),
-        address: i64::from(at),
-        memaddress: em
-            .absolute_address(at)
-            .ok()
-            .flatten()
-            .map_or(-1, |l| i64::from(l.offset)),
-        write: false,
-        dma: false,
-        dummy: false,
-        oppc: i64::from(at),
-    };
-    em.evaluate_expression(condition, &access)
-        .is_ok_and(luna_api::ExprResult::holds)
+    em.arrival_holds(condition, addr)
 }
 
 /// The `--vram-writers` text: one line per range and source, then one

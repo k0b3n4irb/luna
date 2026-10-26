@@ -2177,3 +2177,80 @@ async fn server_trace_logger_logs_rows_and_a_file() {
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(&file);
 }
+
+/// The slow-tick game of the CLI's `ticks` tests: `half_a` ($10) goes up
+/// at the start of each tick (`$00:8007`), `half_b` ($11) 2.3 frames later.
+fn slow_tick_lorom() -> Vec<u8> {
+    let mut rom = demo_lorom();
+    let prog = [
+        0x78, 0xA9, 0x80, 0x8D, 0x00, 0x42, 0xCB, 0xE6, 0x10, 0xA0, 0x50, 0xA2, 0x00, 0xCA, 0xD0,
+        0xFD, 0x88, 0xD0, 0xF8, 0xE6, 0x11, 0x80, 0xEF, 0x40,
+    ];
+    rom[..prog.len()].copy_from_slice(&prog);
+    for off in [0x7FEA, 0x7FFA] {
+        rom[off] = 0x17;
+        rom[off + 1] = 0x80;
+    }
+    rom
+}
+
+/// `record_ticks` returns the same JSONL as `luna ticks`, and refuses a
+/// doubtful spec before anything runs.
+#[tokio::test]
+async fn server_record_ticks_returns_the_record() {
+    let s = LunaServer::new();
+    let path = PathBuf::from("/tmp/luna_mcp_ticks_demo.smc");
+    std::fs::write(&path, slow_tick_lorom()).unwrap();
+    s.load_rom(Parameters(LoadRomParams {
+        force_mapper: Some("lorom".into()),
+        ..rom_params(&path.to_string_lossy())
+    }))
+    .await
+    .unwrap();
+    let spec: luna_api::TickSpec = serde_json::from_value(serde_json::json!({
+        "format": 1,
+        "tick": { "symbol": "00:8007" },
+        "ticks": 3,
+        "poke": [{ "on": { "symbol": "00:8000" }, "at": "7E:0011", "bytes": "20" }],
+        "zone": [{ "name": "halves", "at": "7E:0010", "length": 2 }]
+    }))
+    .unwrap();
+    let r = s
+        .record_ticks(Parameters(RecordTicksParams {
+            spec: spec.clone(),
+            out: None,
+            shots_dir: None,
+        }))
+        .await
+        .unwrap()
+        .0;
+    assert!(r.complete, "{r:?}");
+    let lines: Vec<serde_json::Value> = r
+        .record
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(lines[0]["format"], "tick-record");
+    let z: Vec<&str> = lines[1..4]
+        .iter()
+        .map(|l| l["z"]["halves"].as_str().unwrap())
+        .collect();
+    assert_eq!(z, ["0020", "0121", "0222"]);
+    assert_eq!(lines[4]["end"]["reason"], "limit");
+
+    let mut bad = spec;
+    bad.zone[0].at = "00:2100".into();
+    let Err(err) = s
+        .record_ticks(Parameters(RecordTicksParams {
+            spec: bad,
+            out: None,
+            shots_dir: None,
+        }))
+        .await
+    else {
+        panic!("a zone on the I/O registers was accepted");
+    };
+    assert!(err.message.contains("I/O registers"), "{err:?}");
+    let _ = std::fs::remove_file(&path);
+}

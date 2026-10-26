@@ -143,7 +143,7 @@ means that transport has no form of it.
 |---|---|---|---|
 | the first frame where luna and a reference disagree | `luna wram-trace` | `wram_page_hashes`, `wram_snapshot` | [`luna wram-trace`](using/cli-analysis.md#luna-wram-trace--cross-emulator-state-differential) |
 | the method behind that comparison | — | — | [The differential harness](method/differential.md) |
-| the game's state at every tick, to compare with another run | `luna ticks --spec record.toml` | — | [`luna ticks`](using/cli-analysis.md#luna-ticks--a-record-per-game-tick) |
+| the game's state at every tick, to compare with another run | `luna ticks --spec record.toml` | `record_ticks` | [`luna ticks`](using/cli-analysis.md#luna-ticks--a-record-per-game-tick) |
 | a report over a folder of ROMs | `luna bench` | — | [`luna bench`](using/cli-analysis.md#luna-bench--whole-corpus-compatibility-report) |
 | know which outputs are stable across runs | — | — | [Determinism guarantees](method/determinism.md#the-table) |
 

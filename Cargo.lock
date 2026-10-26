@@ -1580,6 +1580,7 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 2.0.18",
 ]
 
@@ -1621,7 +1622,6 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
- "sha2",
  "tokio",
  "toml",
  "toml_edit 0.22.27",
