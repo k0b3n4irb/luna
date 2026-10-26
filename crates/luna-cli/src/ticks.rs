@@ -102,10 +102,22 @@ const fn port_one() -> u8 {
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PokeSpec {
-    tick: u64,
+    /// Written at this tick, before its zones are read.
+    tick: Option<u64>,
+    /// Or at an arrival on a routine, counted from power-on.
+    on: Option<PokeOn>,
     at: String,
     /// Hex bytes in memory order.
     bytes: String,
+}
+
+/// The `hit`-th arrival on `symbol` since power-on.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PokeOn {
+    symbol: String,
+    #[serde(default = "one")]
+    hit: u64,
 }
 
 /// A named memory zone, read at every tick.
@@ -586,19 +598,56 @@ fn read_zone(em: &mut luna_api::Emulator, space: Space, len: u32) -> Result<Vec<
 
 /// A poke, resolved: written at tick `tick`.
 struct Poke {
-    tick: u64,
+    when: PokeWhen,
     at: String,
     addr: u32,
     bytes: Vec<u8>,
+    done: bool,
+}
+
+/// When a poke is written.
+enum PokeWhen {
+    /// At this tick, before its zones are read.
+    Tick(u64),
+    /// At the `hit`-th arrival on `pc` since power-on (`seen` so far).
+    Arrival { pc: u32, hit: u64, seen: u64 },
+}
+
+impl Poke {
+    fn write(&mut self, em: &mut luna_api::Emulator) -> Result<(), String> {
+        let written = em
+            .poke_memory((self.addr >> 16) as u8, self.addr as u16, &self.bytes)
+            .map_err(|e| format!("poke at `{}`: {e}", self.at))?;
+        if written != self.bytes.len() {
+            return Err(format!(
+                "poke at `{}`: {written} of {} bytes written",
+                self.at,
+                self.bytes.len()
+            ));
+        }
+        self.done = true;
+        Ok(())
+    }
 }
 
 /// Resolve a poke and check it lands in WRAM, the only memory a debug
 /// write reaches.
 fn resolve_poke(em: &luna_api::Emulator, p: &PokeSpec) -> Result<Poke, String> {
     let what = || format!("poke at `{}`", p.at);
-    if p.tick == 0 {
-        return Err(format!("{}: ticks count from 1", what()));
-    }
+    let when = match (&p.tick, &p.on) {
+        (Some(0), None) => return Err(format!("{}: ticks count from 1", what())),
+        (Some(t), None) => PokeWhen::Tick(*t),
+        (None, Some(on)) if on.hit == 0 => {
+            return Err(format!("{}: on.hit counts from 1", what()));
+        }
+        (None, Some(on)) => PokeWhen::Arrival {
+            pc: crate::test_cmd::resolve_key(em, &on.symbol)
+                .map_err(|e| format!("{}: on.symbol `{}`: {e}", what(), on.symbol))?,
+            hit: on.hit,
+            seen: 0,
+        },
+        _ => return Err(format!("{}: give either `tick` or `on`", what())),
+    };
     let addr = crate::test_cmd::resolve_key(em, &p.at).map_err(|e| format!("{}: {e}", what()))?;
     let bytes =
         crate::parsers::parse_hex_bytes(&p.bytes).map_err(|e| format!("{}: {e}", what()))?;
@@ -617,10 +666,11 @@ fn resolve_poke(em: &luna_api::Emulator, p: &PokeSpec) -> Result<Poke, String> {
         ));
     }
     Ok(Poke {
-        tick: p.tick,
+        when,
         at: p.at.clone(),
         addr,
         bytes,
+        done: false,
     })
 }
 
@@ -661,6 +711,20 @@ struct Recorder {
 impl Recorder {
     /// Execution reached `pc`. Returns `true` to end the run.
     fn on_pc(&mut self, em: &mut luna_api::Emulator, pc: u32) -> bool {
+        // Writes first: a tick on the same routine reads them.
+        for p in &mut self.pokes {
+            if let PokeWhen::Arrival { pc: at, hit, seen } = &mut p.when
+                && *at == pc
+            {
+                *seen += 1;
+                if *seen == *hit
+                    && let Err(e) = p.write(em)
+                {
+                    self.error = Some(e);
+                    return true;
+                }
+            }
+        }
         if !self.started
             && let Some((start_pc, hit, cond)) = &self.start
             && *start_pc == pc
@@ -691,16 +755,9 @@ impl Recorder {
 
     fn write_tick(&mut self, em: &mut luna_api::Emulator) -> Result<(), String> {
         let t = self.t;
-        for p in self.pokes.iter().filter(|p| p.tick == t) {
-            let written = em
-                .poke_memory((p.addr >> 16) as u8, p.addr as u16, &p.bytes)
-                .map_err(|e| format!("poke at `{}`: {e}", p.at))?;
-            if written != p.bytes.len() {
-                return Err(format!(
-                    "poke at `{}`: {written} of {} bytes written",
-                    p.at,
-                    p.bytes.len()
-                ));
+        for p in &mut self.pokes {
+            if matches!(p.when, PokeWhen::Tick(n) if n == t) {
+                p.write(em)?;
             }
         }
         let mut z = Vec::with_capacity(self.zones.len());
@@ -972,8 +1029,13 @@ fn record(rom: &Path, o: &TicksOptions<'_>) -> Result<ExitCode, String> {
     if let Some((pc, _, _)) = start {
         pcs.push(pc);
     }
-    if !pcs.contains(&tick_pc) {
-        pcs.push(tick_pc);
+    for pc in std::iter::once(tick_pc).chain(pokes.iter().filter_map(|p| match p.when {
+        PokeWhen::Arrival { pc, .. } => Some(pc),
+        PokeWhen::Tick(_) => None,
+    })) {
+        if !pcs.contains(&pc) {
+            pcs.push(pc);
+        }
     }
     let mut rec = Recorder {
         tick_pc,
@@ -1065,8 +1127,14 @@ fn finish(
         eprintln!("error: {t} of the {limit} ticks asked for ({reason})");
         failed = true;
     }
-    for p in rec.pokes.iter().filter(|p| p.tick > t) {
-        eprintln!("error: poke at `{}`: tick {} not reached", p.at, p.tick);
+    for p in rec.pokes.iter().filter(|p| !p.done) {
+        let when = match p.when {
+            PokeWhen::Tick(n) => format!("tick {n}"),
+            PokeWhen::Arrival { hit, seen, .. } => {
+                format!("arrival {hit} on its routine (reached {seen} time(s))")
+            }
+        };
+        eprintln!("error: poke at `{}`: {when} not reached", p.at);
         failed = true;
     }
     eprintln!("{t} tick(s) recorded ({reason})");
