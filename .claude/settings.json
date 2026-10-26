@@ -48,10 +48,10 @@
         "hooks": [
           {
             "type": "command",
-            "command": "f=$(jq -r '.tool_input.file_path // empty' 2>/dev/null); case \"$f\" in *.rs) cd \"${CLAUDE_PROJECT_DIR:-.}\" || exit 0; out=$(cargo build --workspace --all-targets 2>&1 && cargo build --release --workspace --all-targets 2>&1 && cargo clippy --workspace --all-targets --all-features -- -D warnings 2>&1) || { printf '%s\\n' \"$out\" >&2; exit 2; } ;; esac; exit 0",
+            "command": "f=$(jq -r '.tool_input.file_path // empty' 2>/dev/null); case \"$f\" in *.rs) cd \"${CLAUDE_PROJECT_DIR:-.}\" || exit 0; if command -v flock >/dev/null 2>&1; then L=${XDG_RUNTIME_DIR:-/tmp}; exec 8>\"$L/luna-rebuild.pending\"; flock -n 8 || exit 0; exec 9>\"$L/heavy-jobs.lock\"; flock 9; flock -u 8; fi; out=$(cargo build --workspace --all-targets 2>&1 && cargo build --release --workspace --all-targets 2>&1 && cargo clippy --workspace --all-targets --all-features -- -D warnings 2>&1) || { printf '%s\\n' \"$out\" >&2; exit 2; } ;; esac; exit 0",
             "asyncRewake": true,
-            "timeout": 600,
-            "statusMessage": "rebuild (debug+release, all targets) + clippy --all-features",
+            "timeout": 3600,
+            "statusMessage": "rebuild (debug+release, all targets) + clippy --all-features (queued: one heavy job at a time on this machine)",
             "rewakeSummary": "rebuild or clippy failed",
             "rewakeMessage": "rebuild-discipline hook: the full rebuild (`cargo build --workspace --all-targets` then `--release`) and/or `cargo clippy --workspace --all-targets --all-features -- -D warnings` FAILED after your .rs edit. Fix before continuing:"
           }
