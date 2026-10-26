@@ -47,6 +47,11 @@ fast-forwarded to (binaries attached by CI). Format inspired by
   registers or on unmapped memory, a condition outside the portable
   part — refuses it before the run (exit 2). `--schema` prints the
   format's JSON Schema.
+  - MCP: `record_ticks` takes the same spec as JSON and returns the
+    record, from the current state.
+  - Rust API: `Emulator::record_ticks`, `Emulator::resolve_address` (the
+    `symbol+N` / `BANK:OFFSET` keys every front-end takes) and
+    `Emulator::arrival_holds`.
 
 ### Fixed
 

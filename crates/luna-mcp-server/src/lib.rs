@@ -1933,6 +1933,34 @@ pub struct TraceLoggerStopParams {
     pub cpu: Option<String>,
 }
 
+/// `record_ticks` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct RecordTicksParams {
+    /// What to record, with the keys of `luna ticks --spec` (`format`,
+    /// `tick`, `start`, `ticks`, `until_frame`, `input`, `poke`, `zone`,
+    /// `shots`) as JSON. `input` may carry the script inline (`script`).
+    pub spec: luna_api::TickSpec,
+    /// Write the record to this file; without it, the record comes back in
+    /// `record`.
+    #[serde(default)]
+    pub out: Option<String>,
+    /// Folder of the `shots` pictures (required with `shots`).
+    #[serde(default)]
+    pub shots_dir: Option<String>,
+}
+
+/// `record_ticks` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct RecordTicksResult {
+    /// How the record ended: `ticks`, `reason`, `failures`.
+    pub outcome: luna_api::TickOutcome,
+    /// Every tick asked for, every poke written, nothing failed.
+    pub complete: bool,
+    /// The record (JSONL), when no `out` was given.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub record: Option<String>,
+}
+
 /// The trace logger's CPU named `name`.
 fn trace_cpu(name: Option<&str>) -> Result<luna_api::TraceCpu, ErrorData> {
     match name.unwrap_or("snes") {
@@ -3339,6 +3367,47 @@ impl LunaServer {
         drop(em);
         closed.map_err(|e| api_err_to_mcp(&e))?;
         Ok(rmcp::Json(EmptyOk { ok: true }))
+    }
+
+    #[rmcp::tool(
+        description = "Record named memory zones at every tick of a game, as `tick-record` JSONL \
+                                (a header, one line per tick, an end line): the spec of `luna ticks`, \
+                                as JSON. Records from the current state: arrivals count from the call, \
+                                so load or reset the ROM first for a record from power-on. A doubtful \
+                                spec is refused before anything runs."
+    )]
+    async fn record_ticks(
+        &self,
+        Parameters(params): Parameters<RecordTicksParams>,
+    ) -> Result<rmcp::Json<RecordTicksResult>, ErrorData> {
+        let shots_dir = params.shots_dir.as_deref().map(std::path::Path::new);
+        let options = luna_api::TickRecordOptions {
+            base_dir: std::path::Path::new("."),
+            shots_dir,
+        };
+        let mut em = self.emulator.lock().await;
+        let (outcome, record) = if let Some(path) = &params.out {
+            let mut file = std::io::BufWriter::new(
+                std::fs::File::create(path)
+                    .map_err(|e| ErrorData::invalid_params(format!("{path}: {e}"), None))?,
+            );
+            let outcome = em
+                .record_ticks(&params.spec, &options, &mut file)
+                .map_err(|e| ErrorData::invalid_params(e, None))?;
+            (outcome, None)
+        } else {
+            let mut buf = Vec::new();
+            let outcome = em
+                .record_ticks(&params.spec, &options, &mut buf)
+                .map_err(|e| ErrorData::invalid_params(e, None))?;
+            (outcome, Some(String::from_utf8_lossy(&buf).into_owned()))
+        };
+        drop(em);
+        Ok(rmcp::Json(RecordTicksResult {
+            complete: outcome.complete(),
+            outcome,
+            record,
+        }))
     }
 
     #[rmcp::tool(

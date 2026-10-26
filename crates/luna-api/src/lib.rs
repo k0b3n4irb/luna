@@ -75,6 +75,7 @@ pub mod memory_view;
 pub mod paths;
 mod power_on;
 pub mod symbols;
+pub mod ticks;
 pub mod trace_logger;
 pub mod video;
 mod vocab;
@@ -96,6 +97,11 @@ pub use listing::{
 };
 pub use memory::{MemoryKind, MemoryLocation};
 pub use power_on::parse_power_on;
+pub use ticks::{
+    TICK_RECORD_VERSION, TickInput, TickInputTable, TickOutcome, TickPoint, TickPoke, TickPokeOn,
+    TickRecordOptions, TickShots, TickSpec, TickStart, TickZone, check_tick_condition,
+    tick_record_schema,
+};
 pub use vocab::{
     dsp_register_index, dsp_register_name, dsp_register_table, force_mapper_names, parse_region,
 };
