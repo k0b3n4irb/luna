@@ -40,7 +40,8 @@ fast-forwarded to (binaries attached by CI). Format inspired by
   order with the byte order in the header, so a record from luna and one
   from another emulator in the same format pair tick by tick, whatever
   the speed of each. A start point, conditions in a portable part of the
-  debugger's language, pokes at a tick (a random seed), an input script
+  debugger's language, pokes at a tick (a random seed) or at an arrival
+  on a routine since power-on (past the menus), an input script
   counted in arrivals and pictures at chosen ticks are optional. Anything
   doubtful in the spec — an unknown key or symbol, a zone on the I/O
   registers or on unmapped memory, a condition outside the portable

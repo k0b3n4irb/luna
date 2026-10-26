@@ -186,6 +186,40 @@ fn a_poke_lands_before_its_tick_is_read() {
 }
 
 #[test]
+fn a_poke_on_an_arrival_lands_before_any_tick() {
+    let dir = fresh_dir("poke_on");
+    // `main` runs once, at power-on, long before the first tick; the
+    // second arrival on `tick` is the tick-2 read.
+    let spec = format!(
+        "{BASE}ticks = 3\n\
+         [[poke]]\non = {{ symbol = \"main\" }}\nat = \"half_a\"\nbytes = \"40\"\n\
+         [[poke]]\non = {{ symbol = \"tick\", hit = 2 }}\nat = \"half_b\"\nbytes = \"20\"\n\
+         [[zone]]\nname = \"halves\"\nat = \"half_a\"\nlength = 2\n"
+    );
+    let (out, lines) = ticks(&dir, &spec, &[]);
+    assert!(out.status.success(), "{}", text(&out));
+    let h: Vec<&str> = lines[1..4]
+        .iter()
+        .map(|l| l["z"]["halves"].as_str().unwrap())
+        .collect();
+    assert_eq!(h, ["4000", "4120", "4221"]);
+
+    // An arrival the run never makes is an error, after the record ends.
+    let spec = format!(
+        "{BASE}ticks = 2\n\
+         [[poke]]\non = {{ symbol = \"tick\", hit = 9 }}\nat = \"half_a\"\nbytes = \"00\"\n"
+    );
+    let (out, lines) = ticks(&dir, &spec, &[]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("arrival 9"),
+        "{}",
+        text(&out)
+    );
+    assert_eq!(lines.last().unwrap()["end"]["ticks"], 2);
+}
+
+#[test]
 fn the_input_script_counts_arrivals_and_the_line_says_what_changed() {
     let dir = fresh_dir("input");
     std::fs::create_dir_all(&dir).unwrap();
@@ -267,6 +301,16 @@ fn a_bad_spec_is_refused_before_anything_runs() {
         (
             format!("{BASE}[[poke]]\ntick = 1\nat = \"00:8000\"\nbytes = \"00\"\n"),
             "not all WRAM",
+        ),
+        (
+            format!("{BASE}[[poke]]\nat = \"half_a\"\nbytes = \"00\"\n"),
+            "either `tick` or `on`",
+        ),
+        (
+            format!(
+                "{BASE}[[poke]]\ntick = 1\non = {{ symbol = \"main\" }}\nat = \"half_a\"\nbytes = \"00\"\n"
+            ),
+            "either `tick` or `on`",
         ),
     ];
     for (spec, why) in cases {

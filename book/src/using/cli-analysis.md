@@ -724,6 +724,11 @@ tick  = 1
 at    = "rngSeed"
 bytes = "78563412"                # hex, in memory order
 
+[[poke]]                          # or at an arrival on a routine
+on    = { symbol = "main", hit = 1 }
+at    = "skipIntro"
+bytes = "01"
+
 [[zone]]
 name   = "ball"                   # the key a comparison pairs
 at     = "ball_x"                 # symbol, symbol+N, BANK:OFFSET, or APU:, VRAM:, CGRAM:, OAM:
@@ -745,9 +750,14 @@ native = false                    # true: the 512-wide native capture
   registers (`$2000-$5FFF` of the system banks), that nothing maps, or
   that runs past the end of its memory, refuses the spec. Lengths are
   always decimal.
-- **The pokes** go into WRAM at the tick's arrival, before its zones are
-  read: the seed of a random generator, so the run does not depend on how
-  long a menu waited.
+- **The pokes** go into WRAM, each with either `tick = N` (at that tick's
+  arrival, before its zones are read) or `on = { symbol, hit }` (at the
+  `hit`-th arrival on a routine, counted from power-on, before the
+  routine runs and before any tick read there). The first gives the seed
+  of a random generator, so the run does not depend on how long a menu
+  waited; the second puts the game in a state it reaches only through
+  menus, long before the first tick. A poke whose moment never comes
+  fails the run.
 - **The input** is a [joypad script](input-scripts.md) whose entries count
   arrivals on a routine, as `luna state --input-at`: by default the tick's,
   from power-on (so the script can also drive the menus before the
