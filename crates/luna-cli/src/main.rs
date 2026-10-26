@@ -26,6 +26,7 @@ mod rom;
 mod run;
 mod state;
 mod test_cmd;
+mod ticks;
 mod wram_trace;
 
 use diff::{DiffOptions, run_diff};
@@ -1242,6 +1243,47 @@ enum Command {
         #[arg(long = "power-on")]
         power_on: Option<String>,
     },
+    /// Record named memory zones at every tick of a game, as JSONL in the
+    /// `tick-record` format (version 1): a header line, one line per tick,
+    /// and an end line a complete record always has. A tick is an arrival
+    /// on a routine the spec names, read just before its first
+    /// instruction, so two runs line up tick by tick whatever their speed
+    /// — two builds of a game, or a port and the program it reproduces,
+    /// recorded by another emulator in the same format. The zones are raw
+    /// bytes in memory order; the header gives the byte order. Exit 0 =
+    /// the record is complete, 1 = the run fell short of it (the end line
+    /// says why), 2 = the spec was refused and nothing ran.
+    Ticks {
+        /// Path to the .sfc / .smc ROM file.
+        #[arg(required_unless_present = "schema")]
+        rom: Option<PathBuf>,
+        /// The spec (TOML): the tick routine, the zones, and optionally a
+        /// start point, a limit, an input script, pokes and pictures. See
+        /// the guide for every key.
+        #[arg(long, required_unless_present = "schema")]
+        spec: Option<PathBuf>,
+        /// Where the record goes; `-` is stdout.
+        #[arg(long, default_value = "-")]
+        out: PathBuf,
+        /// Folder of the `[shots]` pictures (default: `<OUT>.shots`).
+        #[arg(long = "shots-dir")]
+        shots_dir: Option<PathBuf>,
+        /// Print the JSON Schema of the three kinds of line and exit — no
+        /// ROM needed.
+        #[arg(long)]
+        schema: bool,
+        /// WLA-DX `.sym` file (default: `<ROM>.sym` when it exists).
+        #[arg(long)]
+        sym: Option<PathBuf>,
+        #[arg(long = "force-mapper", help = mapper_help("Force a cartridge mapper."))]
+        force_mapper: Option<String>,
+        /// Force the video standard (ntsc, pal).
+        #[arg(long = "force-region")]
+        force_region: Option<String>,
+        /// Power-on RAM state (`zero`, `ones`, `random[=<seed>]`).
+        #[arg(long = "power-on")]
+        power_on: Option<String>,
+    },
     /// Emit per-frame (vblank-aligned) WRAM page hashes for a
     /// confound-free cross-emulator differential. Each line is
     /// `<ppu_frame> <h0> <h1> ... <hN>` where each `h` is the FNV-1a
@@ -1923,6 +1965,38 @@ fn main() -> ExitCode {
                 power_on: power_on.as_deref(),
             },
         ),
+        Command::Ticks {
+            rom,
+            spec,
+            out,
+            shots_dir,
+            schema,
+            sym,
+            force_mapper,
+            force_region,
+            power_on,
+        } => {
+            if schema {
+                println!("{}", ticks::schema_json());
+                return ExitCode::SUCCESS;
+            }
+            let (Some(rom), Some(spec)) = (rom, spec) else {
+                eprintln!("error: <ROM> and --spec are required unless --schema is given");
+                return ExitCode::from(2);
+            };
+            ticks::run_ticks(
+                &rom,
+                &ticks::TicksOptions {
+                    spec: &spec,
+                    out: &out,
+                    shots_dir: shots_dir.as_deref(),
+                    sym: sym.as_deref(),
+                    force_mapper: force_mapper.as_deref(),
+                    force_region: force_region.as_deref(),
+                    power_on: power_on.as_deref(),
+                },
+            )
+        }
         Command::WramTrace {
             rom,
             steps,

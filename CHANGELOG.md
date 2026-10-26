@@ -32,6 +32,21 @@ fast-forwarded to (binaries attached by CI). Format inspired by
     headless, through Mesen2's native core; `tools/trace-diff.py` pairs
     two trace files row by row and says what differs.
 
+- **`luna ticks`: a record of the game's state at every tick.** A spec
+  (TOML) names the routine that starts a tick and the memory zones to
+  read; `luna ticks` writes them at every arrival on it, just before its
+  first instruction, as JSONL in the `tick-record` format (version 1): a
+  header, one line per tick, an end line. Zones are raw bytes in memory
+  order with the byte order in the header, so a record from luna and one
+  from another emulator in the same format pair tick by tick, whatever
+  the speed of each. A start point, conditions in a portable part of the
+  debugger's language, pokes at a tick (a random seed), an input script
+  counted in arrivals and pictures at chosen ticks are optional. Anything
+  doubtful in the spec — an unknown key or symbol, a zone on the I/O
+  registers or on unmapped memory, a condition outside the portable
+  part — refuses it before the run (exit 2). `--schema` prints the
+  format's JSON Schema.
+
 ### Fixed
 
 - **Two 65C816 edge cases in emulation mode**, found when the
