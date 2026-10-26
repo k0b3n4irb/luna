@@ -13,6 +13,12 @@ A `PostToolUse` hook in `.claude/settings.json` runs the **full rebuild
 "rebuild after each change" mechanical, not a thing to remember — a stale
 binary can never silently survive an edit. Do not remove or weaken it.
 
+On a machine shared with other heavy jobs, the hook first takes
+`$XDG_RUNTIME_DIR/heavy-jobs.lock` (when `flock` exists): one heavy job
+at a time. An edit made while a rebuild is still waiting for its turn is
+covered by that rebuild, so at most one waits. Run long test suites under
+the same lock (`flock "$XDG_RUNTIME_DIR/heavy-jobs.lock" <command>`).
+
 ## Canonical rebuild command
 
 ```

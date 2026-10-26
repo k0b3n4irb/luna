@@ -677,6 +677,144 @@ state divergence (THE method's confound-free oracle). Line format:
 | `--force-region <R>` | header | As in `state`. |
 | `--input <SCRIPT>` | — | Joypad-1 script ([input scripts](input-scripts.md)). |
 
+## `luna ticks` — a record per game tick
+
+```
+luna ticks [OPTIONS] --spec <SPEC> <ROM>
+```
+
+A game advances by ticks, not by frames: one tick of its logic may span
+several frames, and a frame boundary may fall in the middle of one. `luna
+ticks` reads named memory zones at **every arrival on the routine that
+starts a tick**, just before its first instruction, and writes them as
+JSONL in the `tick-record` format. Two runs then line up tick by tick
+whatever their speed: two builds of a game, or a port and the program it
+reproduces, recorded on its own machine by another emulator that writes
+the same format. The first tick where the zones differ is the first
+divergence of the game's state.
+
+| Option | Default | Purpose |
+|---|---|---|
+| `--spec <SPEC>` | — | The record's description (TOML, below). |
+| `--out <PATH>` | `-` | The record; `-` is stdout. |
+| `--shots-dir <DIR>` | `<OUT>.shots` | Where the `[shots]` pictures go. |
+| `--schema` | — | Print the JSON Schema of the three kinds of line, and exit (no ROM needed). |
+| `--sym <PATH>` | `<ROM>.sym` | WLA-DX symbol file. |
+| `--force-mapper <M>` | auto | As in `state`. |
+| `--force-region <R>` | header | As in `state`. |
+| `--power-on <S>` | `zero` | As in `state`. |
+
+Exit 0: the record is complete. Exit 1: the run fell short of it (a tick
+or a start never reached, fewer ticks than asked for); the record still
+ends with its end line, which says why. Exit 2: the spec was refused, and
+nothing ran.
+
+### The spec
+
+```toml
+format = 1
+tick   = { symbol = "matchDecide", if = "[mode] == 2" }  # if: optional
+start  = { symbol = "matchInit", hit = 1 }               # optional
+ticks  = 3000                     # stop after this many ticks; or:
+until_frame = 36000               # stop at this frame (default: 10 minutes)
+input  = "pad.txt"                # optional, see below
+
+[[poke]]                          # optional: bytes written at a tick
+tick  = 1
+at    = "rngSeed"
+bytes = "78563412"                # hex, in memory order
+
+[[zone]]
+name   = "ball"                   # the key a comparison pairs
+at     = "ball_x"                 # symbol, symbol+N, BANK:OFFSET, or APU:, VRAM:, CGRAM:, OAM:
+length = 6                        # bytes, decimal
+
+[shots]                           # optional: a picture at some ticks
+ticks  = [1, 100, 500]
+native = false                    # true: the 512-wide native capture
+```
+
+- **The ticks.** `t` = N is the N-th arrival on `tick.symbol` where
+  `tick.if` holds, counted from the `start`: the `hit`-th arrival on
+  `start.symbol` where `start.if` holds. An arrival that is both the start
+  and a tick is tick 1.
+- **The zones** are read without touching the bus: WRAM, cartridge RAM
+  and ROM through the CPU's addresses, and `APU:OFFSET` (SPC700 RAM),
+  `VRAM:WORD` (a word address, as `VMADD` takes it), `CGRAM:COLOR` (a
+  colour index) and `OAM:OFFSET`, all in hex. A zone that reaches the I/O
+  registers (`$2000-$5FFF` of the system banks), that nothing maps, or
+  that runs past the end of its memory, refuses the spec. Lengths are
+  always decimal.
+- **The pokes** go into WRAM at the tick's arrival, before its zones are
+  read: the seed of a random generator, so the run does not depend on how
+  long a menu waited.
+- **The input** is a [joypad script](input-scripts.md) whose entries count
+  arrivals on a routine, as `luna state --input-at`: by default the tick's,
+  from power-on (so the script can also drive the menus before the
+  `start`). The table form names the port and the routine:
+  `input = { file = "pad.txt", port = 1, at = "mainLoop" }`; `at = "frame"`
+  counts frames instead. The file is relative to the spec.
+- Every key is checked: an unknown key, symbol or zone name given twice
+  refuses the spec too.
+
+### The conditions
+
+`tick.if` and `start.if` take a small part of the [debugger's
+expression language](debugging.md), the part every program that writes
+the format evaluates alike:
+
+```
+cond = conj { "||" conj } ;   conj = cmp { "&&" cmp } ;
+cmp  = term [ relop term ] ;  relop = "==" | "!=" | "<" | "<=" | ">" | ">=" ;
+term = read | number | "(" read "&" number ")" ;
+read = "[" ref "]" | "{" ref "}" ;   ref = name [ "+" decimal ] ;
+number = decimal | "$" hex | "0x" hex ;
+```
+
+`[name]` reads a byte and `{name}` a word in the machine's own byte
+order; values and comparisons are unsigned; spaces do not count. A mask
+is written in parentheses, `([flags] & $80) != 0`, because `&` binds
+less tightly than `==`. Anything outside this, or a name that is not a
+symbol, refuses the spec.
+
+### The record
+
+One JSON object per line. The first is the header:
+
+```json
+{"format":"tick-record","version":1,"producer":{"name":"luna","version":"1.42.0+…"},
+ "subject":{"machine":"snes","sha256":"…","file":"game.sfc"},"endian":"little",
+ "tick":{"symbol":"tick"},
+ "clock":{"frame":"frame_end","cycles":"snes_master","hz":21477272,"beam":"line,mclk"},
+ "zones":[{"name":"halves","at":"half_a","length":2}]}
+```
+
+then one line per tick, and an end line that a complete record always
+has:
+
+```json
+{"t":1,"frame":0,"cycles":307000,"beam":[225,100],"z":{"halves":"0000"}}
+{"t":2,"frame":3,"cycles":1379098,"beam":[225,98],"z":{"halves":"0101"}}
+{"t":3,"frame":6,"cycles":2451196,"beam":[225,100],"z":{"halves":"027f"}}
+{"end":{"ticks":3,"reason":"limit"}}
+```
+
+- `z`: each zone's bytes, lowercase hex **in memory order**, in the
+  spec's order. Decoding them (width, sign, the header's `endian`) is the
+  comparison's job, done once for both sides.
+- `frame`, `cycles` and `beam` only say where the tick fell; their units
+  are in `clock`. Two records are paired by `t`, never by frame.
+- `in`: the joypad masks that changed since the previous tick (on the
+  first, those that are not zero).
+- `screen`: at a `[shots]` tick, the FNV-1a 64 of the picture and its PNG
+  file, in `shots_dir`.
+- `end.reason`: `limit` (the ticks asked for), `until_frame`,
+  `frame_cap`, `halted` or `error`. A record without its end line was cut
+  short.
+- `version` goes up with any change that breaks reading; a field a reader
+  may ignore can be added without it. `luna ticks --schema` prints the
+  schema of each kind of line.
+
 ## `luna bench` — whole-corpus compatibility report
 
 ```
