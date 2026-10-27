@@ -46,9 +46,13 @@ pub struct TickSpec {
     /// Stop at this frame (default: ten minutes after the call).
     #[serde(default)]
     pub until_frame: Option<u64>,
-    /// A joypad script.
+    /// A joypad script (port 1 by default).
     #[serde(default)]
     pub input: Option<TickInput>,
+    /// A second joypad script, on another port (2 by default), with the
+    /// same numbering as `input`.
+    #[serde(default)]
+    pub input2: Option<TickInput>,
     /// Bytes written into WRAM at a tick, or at an arrival on a routine.
     #[serde(default)]
     pub poke: Vec<TickPoke>,
@@ -95,8 +99,8 @@ const fn one() -> u64 {
 #[derive(Debug, Clone, serde::Deserialize, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum TickInput {
-    /// The script's file, for port 1, numbered by arrivals on the tick's
-    /// routine.
+    /// The script's file, for the slot's default port, numbered by arrivals
+    /// on the tick's routine.
     File(PathBuf),
     /// The full form.
     Table(TickInputTable),
@@ -112,18 +116,14 @@ pub struct TickInputTable {
     /// The script itself. Or `file`.
     #[serde(default)]
     pub script: Option<String>,
-    /// The port, 1 to 5.
-    #[serde(default = "port_one")]
-    pub port: u8,
+    /// The port, 1 to 5 (default: 1 for `input`, 2 for `input2`).
+    #[serde(default)]
+    pub port: Option<u8>,
     /// The routine whose arrivals (counted from the start of the run)
     /// number the entries; `"frame"` numbers them by frame. Default: the
-    /// tick's routine.
+    /// tick's routine. `input` and `input2` share one numbering.
     #[serde(default)]
     pub at: Option<String>,
-}
-
-const fn port_one() -> u8 {
-    1
 }
 
 /// Bytes written into WRAM at a tick or at an arrival on a routine.
@@ -226,6 +226,8 @@ struct Header {
     zones: Vec<ZoneOut>,
     #[serde(skip_serializing_if = "Option::is_none")]
     inputs: Option<InputOut>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    inputs2: Option<InputOut>,
     /// Where the `screen` files of the tick lines are.
     #[serde(skip_serializing_if = "Option::is_none")]
     shots_dir: Option<String>,
@@ -888,8 +890,8 @@ struct Recorder<'w> {
     zones: Vec<(String, Space, u32)>,
     pokes: Vec<Poke>,
     shots: Option<Shots>,
-    port: Option<u8>,
-    last_pad: Option<u16>,
+    /// The ports the input scripts drive, with their last mask written.
+    pads: Vec<(u8, Option<u16>)>,
     limit: Option<u64>,
     t: u64,
     out: &'w mut dyn Write,
@@ -951,12 +953,17 @@ impl Recorder<'_> {
             let bytes = read_zone(em, *space, *len).map_err(|e| format!("zone `{name}`: {e}"))?;
             z.push((name.clone(), hex(&bytes)));
         }
-        let input = self.port.and_then(|port| {
-            let mask = em.joypad(port - 1).ok()?;
-            let changed = self.last_pad.map_or(mask != 0, |last| last != mask);
-            self.last_pad = Some(mask);
-            changed.then(|| BTreeMap::from([(port.to_string(), format!("0x{mask:04x}"))]))
-        });
+        let mut changed = BTreeMap::new();
+        for (port, last) in &mut self.pads {
+            let Ok(mask) = em.joypad(*port - 1) else {
+                continue;
+            };
+            if last.map_or(mask != 0, |l| l != mask) {
+                changed.insert(port.to_string(), format!("0x{mask:04x}"));
+            }
+            *last = Some(mask);
+        }
+        let input = (!changed.is_empty()).then_some(changed);
         let screen = match &self.shots {
             Some((ticks, native, dir)) if ticks.contains(&t) => {
                 let (png, hash) = if *native {
@@ -1075,7 +1082,12 @@ impl Emulator {
             .iter()
             .map(|p| resolve_poke(self, p))
             .collect::<Result<Vec<_>, _>>()?;
-        let (mut script, inputs) = self.tick_input(spec, options.base_dir)?;
+        let (mut script, inputs, inputs2) = self.tick_inputs(spec, options.base_dir)?;
+        let pads: Vec<(u8, Option<u16>)> = inputs
+            .iter()
+            .chain(&inputs2)
+            .map(|i| (i.port, None))
+            .collect();
         let shots = match &spec.shots {
             Some(s) => {
                 let dir = options
@@ -1133,6 +1145,7 @@ impl Emulator {
                 })
                 .collect(),
             inputs,
+            inputs2,
             shots_dir: shots
                 .as_ref()
                 .map(|(_, _, d)| d.to_string_lossy().into_owned()),
@@ -1174,11 +1187,7 @@ impl Emulator {
             zones,
             pokes,
             shots,
-            port: spec.input.as_ref().map(|i| match i {
-                TickInput::File(_) => 1,
-                TickInput::Table(t) => t.port,
-            }),
-            last_pad: None,
+            pads,
             limit: spec.ticks,
             t: 0,
             out,
@@ -1205,59 +1214,92 @@ impl Emulator {
         self.finish_record(spec, &mut rec, &run, frame_bound)
     }
 
-    /// The input script, and what the header says of it.
-    fn tick_input(
+    /// The input script (`input` and `input2` in one), and what the header
+    /// says of each.
+    fn tick_inputs(
         &self,
         spec: &TickSpec,
         base_dir: &Path,
-    ) -> Result<(InputScript, Option<InputOut>), String> {
+    ) -> Result<(InputScript, Option<InputOut>, Option<InputOut>), String> {
         let mut script = InputScript::new();
-        let Some(input) = &spec.input else {
-            return Ok((script, None));
-        };
-        let (file, inline, port, at) = match input {
-            TickInput::File(f) => (Some(f.clone()), None, 1, None),
-            TickInput::Table(t) => (t.file.clone(), t.script.clone(), t.port, t.at.clone()),
-        };
-        if !(1..=5).contains(&port) {
-            return Err(format!("input.port {port}: ports are 1 to 5"));
-        }
-        let body = match (&file, inline) {
-            (Some(f), None) => {
-                let path = base_dir.join(f);
-                std::fs::read_to_string(&path)
-                    .map_err(|e| format!("input `{}`: {e}", path.display()))?
+        let mut outs = [None, None];
+        for (slot, (key, input, default_port)) in [
+            ("input", spec.input.as_ref(), 1),
+            ("input2", spec.input2.as_ref(), 2),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let Some(input) = input else {
+                continue;
+            };
+            let (file, inline, port, at) = match input {
+                TickInput::File(f) => (Some(f.clone()), None, default_port, None),
+                TickInput::Table(t) => (
+                    t.file.clone(),
+                    t.script.clone(),
+                    t.port.unwrap_or(default_port),
+                    t.at.clone(),
+                ),
+            };
+            if !(1..=5).contains(&port) {
+                return Err(format!("{key}.port {port}: ports are 1 to 5"));
             }
-            (None, Some(s)) => s,
-            _ => return Err("input: give either `file` or `script`".to_string()),
-        };
-        script
-            .add_pad(port - 1, &body)
-            .map_err(|e| format!("input: {e}"))?;
-        let at = at.unwrap_or_else(|| spec.tick.symbol.clone());
-        if at == "frame" {
-            if script.has_after() {
-                return Err(
-                    "input: an `N+K` entry counts frames after an arrival; it needs `at` \
-                     to name a routine"
-                        .to_string(),
-                );
-            }
-        } else {
-            let pc = self
-                .resolve_address(&at)
-                .map_err(|e| format!("input.at `{at}`: {e}"))?;
-            script.set_clock_pc(pc);
+            let body = match (&file, inline) {
+                (Some(f), None) => {
+                    let path = base_dir.join(f);
+                    std::fs::read_to_string(&path)
+                        .map_err(|e| format!("{key} `{}`: {e}", path.display()))?
+                }
+                (None, Some(s)) => s,
+                _ => return Err(format!("{key}: give either `file` or `script`")),
+            };
+            script
+                .add_pad(port - 1, &body)
+                .map_err(|e| format!("{key}: {e}"))?;
+            outs[slot] = Some(InputOut {
+                file: file
+                    .as_ref()
+                    .and_then(|f| f.file_name())
+                    .map(|n| n.to_string_lossy().into_owned()),
+                port,
+                at: at.unwrap_or_else(|| spec.tick.symbol.clone()),
+            });
         }
-        let out = InputOut {
-            file: file
-                .as_ref()
-                .and_then(|f| f.file_name())
-                .map(|n| n.to_string_lossy().into_owned()),
-            port,
-            at,
-        };
-        Ok((script, Some(out)))
+        let [inputs, inputs2] = outs;
+        if let (Some(a), Some(b)) = (&inputs, &inputs2) {
+            if a.port == b.port {
+                return Err(format!(
+                    "input and input2 both drive port {}: give input2 another port",
+                    a.port
+                ));
+            }
+            // One script, one clock: both count the same arrivals (or frames).
+            if a.at != b.at {
+                return Err(format!(
+                    "input counts by `{}` and input2 by `{}`: both must count by the same \
+                     routine, or both by frame",
+                    a.at, b.at
+                ));
+            }
+        }
+        if let Some(at) = inputs.as_ref().or(inputs2.as_ref()).map(|i| i.at.as_str()) {
+            if at == "frame" {
+                if script.has_after() {
+                    return Err(
+                        "input: an `N+K` entry counts frames after an arrival; it needs `at` \
+                         to name a routine"
+                            .to_string(),
+                    );
+                }
+            } else {
+                let pc = self
+                    .resolve_address(at)
+                    .map_err(|e| format!("input.at `{at}`: {e}"))?;
+                script.set_clock_pc(pc);
+            }
+        }
+        Ok((script, inputs, inputs2))
     }
 
     /// Write the end line and say what fell short.

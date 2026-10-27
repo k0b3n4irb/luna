@@ -718,6 +718,7 @@ start  = { symbol = "matchInit", hit = 1 }               # optional
 ticks  = 3000                     # stop after this many ticks; or:
 until_frame = 36000               # stop at this frame (default: 10 minutes)
 input  = "pad.txt"                # optional, see below
+input2 = "pad2.txt"               # optional: a second pad (port 2)
 
 [[poke]]                          # optional: bytes written at a tick
 tick  = 1
@@ -763,7 +764,10 @@ native = false                    # true: the 512-wide native capture
   from power-on (so the script can also drive the menus before the
   `start`). The table form names the port and the routine:
   `input = { file = "pad.txt", port = 1, at = "mainLoop" }`; `at = "frame"`
-  counts frames instead. The file is relative to the spec.
+  counts frames instead, and `script = "…"` gives the script inline. The
+  file is relative to the spec. `input2` takes a second script, in the same
+  forms, on another port (2 by default) and counted the same way as
+  `input`: a two-player game is driven from one record.
 - Every key is checked: an unknown key, symbol or zone name given twice
   refuses the spec too.
 
@@ -815,7 +819,8 @@ has:
 - `frame`, `cycles` and `beam` only say where the tick fell; their units
   are in `clock`. Two records are paired by `t`, never by frame.
 - `in`: the joypad masks that changed since the previous tick (on the
-  first, those that are not zero).
+  first, those that are not zero), by port; the header names the scripts
+  in `inputs` and `inputs2`.
 - `screen`: at a `[shots]` tick, the FNV-1a 64 of the picture and its PNG
   file, in `shots_dir`.
 - `end.reason`: `limit` (the ticks asked for), `until_frame`,
