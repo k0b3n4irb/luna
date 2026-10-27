@@ -239,6 +239,27 @@ fn the_input_script_counts_arrivals_and_the_line_says_what_changed() {
 }
 
 #[test]
+fn a_second_pad_rides_the_same_numbering_on_its_own_port() {
+    let dir = fresh_dir("input2");
+    std::fs::write(dir.join("pad1.txt"), "2:0x1000\n").unwrap();
+    std::fs::write(dir.join("pad2.txt"), "2:0x0080\n3:0\n").unwrap();
+    let spec = format!(
+        "{BASE}ticks = 4\ninput = \"pad1.txt\"\ninput2 = \"pad2.txt\"\n\
+         [[zone]]\nname = \"a\"\nat = \"half_a\"\nlength = 1\n"
+    );
+    let (out, lines) = ticks(&dir, &spec, &[]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert_eq!(lines[0]["inputs"]["port"], 1);
+    assert_eq!(lines[0]["inputs2"]["port"], 2);
+    assert_eq!(lines[0]["inputs2"]["file"], "pad2.txt");
+    // Both change at arrival 2; only the second pad at arrival 3.
+    assert_eq!(lines[2]["in"]["1"], "0x1000");
+    assert_eq!(lines[2]["in"]["2"], "0x0080");
+    assert!(lines[3]["in"].get("1").is_none(), "{:?}", lines[3]);
+    assert_eq!(lines[3]["in"]["2"], "0x0000");
+}
+
+#[test]
 fn shots_are_files_beside_the_record() {
     let dir = fresh_dir("shots");
     let spec = format!(
@@ -311,6 +332,20 @@ fn a_bad_spec_is_refused_before_anything_runs() {
                 "{BASE}[[poke]]\ntick = 1\non = {{ symbol = \"main\" }}\nat = \"half_a\"\nbytes = \"00\"\n"
             ),
             "either `tick` or `on`",
+        ),
+        (
+            format!(
+                "{BASE}input = {{ script = \"1:0\", port = 2 }}\n\
+                 input2 = {{ script = \"1:0\" }}\n"
+            ),
+            "both drive port 2",
+        ),
+        (
+            format!(
+                "{BASE}input = {{ script = \"1:0\" }}\n\
+                 input2 = {{ script = \"1:0\", at = \"frame\" }}\n"
+            ),
+            "same routine",
         ),
     ];
     for (spec, why) in cases {

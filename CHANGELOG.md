@@ -41,7 +41,7 @@ fast-forwarded to (binaries attached by CI). Format inspired by
   from another emulator in the same format pair tick by tick, whatever
   the speed of each. A start point, conditions in a portable part of the
   debugger's language, pokes at a tick (a random seed) or at an arrival
-  on a routine since power-on (past the menus), an input script
+  on a routine since power-on (past the menus), one or two input scripts
   counted in arrivals and pictures at chosen ticks are optional. Anything
   doubtful in the spec — an unknown key or symbol, a zone on the I/O
   registers or on unmapped memory, a condition outside the portable
