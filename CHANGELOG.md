@@ -53,6 +53,12 @@ fast-forwarded to (binaries attached by CI). Format inspired by
     `symbol+N` / `BANK:OFFSET` keys every front-end takes) and
     `Emulator::arrival_holds`.
 
+- **`luna state --then-frames N`**: with `--until-pc`, run `N` more frames
+  after the stop, then take the screenshot, the `--layer-shots`, the
+  peeks and the JSON as usual. One run per screen instead of two (one to
+  find the arrival's frame, one to capture); `until_pc` keeps the frame
+  and the line of the arrival.
+
 ### Fixed
 
 - **Two 65C816 edge cases in emulation mode**, found when the

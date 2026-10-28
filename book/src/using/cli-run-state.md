@@ -127,6 +127,7 @@ and is the hub for every headless diagnostic.
 | `--until-frame <F>` | — | Run until PPU frame `F` (then snapshot) instead of the `-n` count, which is then ignored. Frame-indexed baselines and asserts (see `run`). |
 | `--until-pc <SYMBOL>` | — | Run until execution **reaches a routine** (then snapshot): a `.sym` label, `label+N`, or `BANK:OFFSET` in hex. The stop is just before its first instruction runs. Bounded by `--until-frame` when given, else by 36000 frames; not reaching it is an error (exit 1). See *Stopping on a routine* below. |
 | `--hit <N>` | `1` | With `--until-pc`: stop the `N`-th time execution reaches it. |
+| `--then-frames <N>` | — | With `--until-pc`: run `N` more frames after the stop, then take the screenshot, the `--layer-shots`, the peeks and the `--out`. One run per screen instead of two (one to find the arrival, one to capture); `until_pc` in the JSON still gives the arrival's frame and line, and the scripted input and `--poke-at`s go on through those frames. |
 | `--until-if <EXPR>` | — | With `--until-pc`: stop only at an arrival where this [expression](mcp.md#expressions) is non-zero (`--hit N`: the `N`-th such arrival). The JSON's `until_pc.hits_seen` is the arrival it stopped on. |
 | `--peek-at <SYMBOL>` | — | Read every `--peek` **each time** execution reaches this routine, one line per arrival with its frame and scanline. The run length stays `-n` / `--until-frame` / `--until-pc`. |
 | `--peek-at-out <PATH>` | — | Write the `--peek-at` rows as CSV (`hit,frame,line`, then one column of hex bytes per `--peek`) instead of printing them. |
@@ -381,6 +382,21 @@ luna state --until-pc tick --until-if "{half_a} == $0303" --out - game.sfc
 # The second tick where the score is non-zero.
 luna state --until-pc tick --until-if "[score] != 0" --hit 2 --out - game.sfc
 ```
+
+To capture a screen "N frames after" an arrival, say so in the same run
+instead of finding the arrival first and running again to the frame:
+
+```bash
+# The picture 40 frames after the 6382nd arrival on matchDecide.
+luna state game.sfc --until-pc matchDecide --hit 6382 --then-frames 40 \
+    --screenshot end.png --layer-shots shots/
+```
+
+`until_pc` in the JSON keeps the frame and the line of the arrival; the
+machine itself stands `N` frames later, as after `--until-frame`.
+With `N` of 2 or more the search for the arrival composes no picture (over
+half the work of a run); the last frames are rendered whole, and the picture
+is byte for byte the one a second run to the same frame gives.
 
 The condition is an expression in Mesen2's debugger language
 ([Expressions](mcp.md#expressions)), evaluated as an exec breakpoint's

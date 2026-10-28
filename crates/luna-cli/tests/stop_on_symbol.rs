@@ -82,6 +82,91 @@ fn text(out: &Output) -> String {
     )
 }
 
+/// `--then-frames N` runs N frames past the arrival, then reads as usual:
+/// the same state as stopping by frame number there, with the arrival kept
+/// in `until_pc`.
+#[test]
+fn then_frames_continues_past_the_arrival_and_keeps_it_in_the_record() {
+    let dir = fresh_dir("then_frames");
+    let rom = slow_tick_rom(&dir);
+    let json = |args: &[&str]| -> serde_json::Value {
+        let out = luna("state", &rom, args);
+        assert!(out.status.success(), "{}", text(&out));
+        serde_json::from_slice(&out.stdout).unwrap()
+    };
+    let at = json(&[
+        "--until-pc",
+        "tick_end",
+        "--hit",
+        "2",
+        "--peek",
+        "half_a:2",
+        "--out",
+        "-",
+    ]);
+    let frame = at["until_pc"]["frame"].as_u64().unwrap();
+    let line = at["until_pc"]["line"].as_u64().unwrap();
+
+    let then = json(&[
+        "--until-pc",
+        "tick_end",
+        "--hit",
+        "2",
+        "--then-frames",
+        "4",
+        "--peek",
+        "half_a:2",
+        "--out",
+        "-",
+    ]);
+    // The arrival is the record; the machine stands four frames later.
+    let u = &then["until_pc"];
+    assert_eq!((&u["frame"], &u["line"]), (&frame.into(), &line.into()));
+    assert_eq!(
+        (&u["hit"], &u["hits_seen"], &u["reached"]),
+        (&2.into(), &2.into(), &true.into())
+    );
+    assert_eq!(then["scheduler"]["frame_count"], frame + 4);
+
+    // The same instant by frame number.
+    let by_frame = json(&[
+        "--until-frame",
+        &(frame + 4).to_string(),
+        "--peek",
+        "half_a:2",
+        "--out",
+        "-",
+    ]);
+    assert_eq!(then["peeks"], by_frame["peeks"]);
+    assert_eq!(
+        then["scheduler"]["frame_count"],
+        by_frame["scheduler"]["frame_count"]
+    );
+    assert_eq!(then["cpu"], by_frame["cpu"]);
+
+    // The picture is the same too, though the search for the arrival
+    // composed none (N >= 2 defers the rendering to the arrival).
+    let hash = |args: &[&str]| -> String {
+        let mut all = vec!["--print-fbhash", "--out", "-"];
+        all.extend_from_slice(args);
+        let out = luna("state", &rom, &all);
+        assert!(out.status.success(), "{}", text(&out));
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .find(|l| l.starts_with("fbhash="))
+            .unwrap_or_else(|| panic!("no fbhash: {}", text(&out)))
+            .to_string()
+    };
+    assert_eq!(
+        hash(&["--until-pc", "tick_end", "--hit", "2", "--then-frames", "4"]),
+        hash(&["--until-frame", &(frame + 4).to_string()])
+    );
+
+    // Without `--until-pc` it makes no sense, and clap says so.
+    let out = luna("state", &rom, &["--then-frames", "4"]);
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out));
+}
+
 #[test]
 fn until_pc_stops_on_the_asked_arrival_with_a_consistent_state() {
     let dir = fresh_dir("until_pc");
