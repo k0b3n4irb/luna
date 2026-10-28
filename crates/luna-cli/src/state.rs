@@ -514,7 +514,9 @@ impl Watch {
                 peeks: read_peeks(em, peek_specs, false),
             });
         }
-        if let Some(u) = self.until.as_mut().filter(|u| u.addr == addr) {
+        // After the stop (`--then-frames`), the arrival that ended the run is
+        // the record: later arrivals no longer count.
+        if let Some(u) = self.until.as_mut().filter(|u| u.addr == addr && !u.reached) {
             u.hits_seen += 1;
             let holds = self
                 .condition
@@ -697,6 +699,7 @@ pub(crate) fn run_state(
     until_pc: Option<&str>,
     hit: u64,
     until_if: Option<&str>,
+    then_frames: Option<u64>,
     peek_at: Option<&str>,
     peek_at_out: Option<&std::path::Path>,
     input_at: Option<&str>,
@@ -1157,6 +1160,17 @@ pub(crate) fn run_state(
             None => luna_api::ScriptBound::Steps(remaining),
         };
         let pcs = w.pcs.clone();
+        // With `--then-frames N` (N >= 2) no picture is read before the
+        // arrival, and the frames after it are all rendered whole: the
+        // search for the arrival composes no pixel, which is over half the
+        // work of a run and changes nothing else of the machine.
+        let defer_render = then_frames.is_some_and(|n| n >= 2)
+            && !no_render
+            && shots.is_none()
+            && w.until.is_some();
+        if defer_render {
+            em.set_rendering(false).expect("rom just loaded");
+        }
         let run = em.run_script_watching(&mut script, bound, &pcs, |em, ev| match ev {
             luna_api::WatchEvent::Pc(i) => w.on_pc(em, i, peek_specs),
             luna_api::WatchEvent::Frame => {
@@ -1169,6 +1183,34 @@ pub(crate) fn run_state(
                 shots.as_mut().is_some_and(|shots| shots.on_frame(em))
             }
         });
+        if defer_render {
+            em.set_rendering(true).expect("rom just loaded");
+        }
+        // `--then-frames`: the run goes on, N frames past the arrival it
+        // stopped on, with the same script and the same watch.
+        let run = match (run, then_frames, w.until.as_ref()) {
+            (Ok(true), Some(n), Some(u)) if u.reached => {
+                let target = u.frame.unwrap_or(0) + n;
+                em.run_script_watching(
+                    &mut script,
+                    luna_api::ScriptBound::Frame(target),
+                    &pcs,
+                    |em, ev| match ev {
+                        luna_api::WatchEvent::Pc(i) => w.on_pc(em, i, peek_specs),
+                        luna_api::WatchEvent::Frame => {
+                            if keep_audio && let Ok(mut chunk) = em.drain_audio(usize::MAX) {
+                                audio_accum.append(&mut chunk);
+                            }
+                            if let Some(writers) = writers.as_mut() {
+                                let _ = em.collect_vram_writes(writers);
+                            }
+                            shots.as_mut().is_some_and(|shots| shots.on_frame(em))
+                        }
+                    },
+                )
+            }
+            (run, _, _) => run,
+        };
         if let Err(e) = run {
             eprintln!("step warning: {e}");
             step_failed = true;
