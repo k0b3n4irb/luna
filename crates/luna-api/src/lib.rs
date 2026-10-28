@@ -2451,13 +2451,29 @@ impl Emulator {
         interrupt: &std::sync::atomic::AtomicBool,
     ) -> Result<u64, ApiError> {
         let start_frame = self.snes.as_ref().ok_or(ApiError::NoRom)?.frame_count;
-        self.run_core(
+        let run = self.run_core(
             max_steps,
             Some(interrupt),
             |snes, _| (snes.frame_count != start_frame).then_some(()),
             |_| None,
-        )
-        .map(|run| run.steps)
+        )?;
+        self.present_completed_frame();
+        Ok(run.steps)
+    }
+
+    /// Show the frame that just completed, whole. A step that ends past
+    /// the frame wrap — a DMA spanning the boundary runs its whole length
+    /// in one step — leaves the buffers holding the next frame's first
+    /// rows over the old frame's last ones, a picture no screen showed.
+    /// This puts the completed picture back (the frame runs
+    /// [`Self::step_until_frame`], [`Self::run_to_pc_or_frame`] and the
+    /// input-script runs end with it); the next frame draws its rows again
+    /// as the beam reaches them. Returns whether anything had been drawn
+    /// over. Does nothing mid-frame when the frame did not just wrap.
+    pub fn present_completed_frame(&mut self) -> bool {
+        self.snes
+            .as_mut()
+            .is_some_and(|snes| snes.ppu.present_completed_frame())
     }
 
     /// Probe CPU liveness from the current state: step up to `max_steps`
@@ -3964,7 +3980,11 @@ impl Emulator {
             },
             |_| None,
         )?;
-        Ok(run.stop.unwrap_or(PcStop::Budget))
+        let stop = run.stop.unwrap_or(PcStop::Budget);
+        if stop == PcStop::Frame {
+            self.present_completed_frame();
+        }
+        Ok(stop)
     }
 
     /// Run until the Super FX starts a job (`go` = `true`) or finishes one
