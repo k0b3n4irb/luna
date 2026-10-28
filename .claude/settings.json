@@ -1,4 +1,6 @@
 {
+  "model": "opusplan",
+  "effortLevel": "medium",
   "permissions": {
     "allow": [
       "Bash(cargo build*)",
