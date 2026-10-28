@@ -193,6 +193,21 @@ pub enum PpuMemory {
     Oam,
 }
 
+/// The picture of the frame that last completed, saved before the next
+/// frame drew over it (see [`Ppu::present_completed_frame`]).
+#[derive(Clone, Default)]
+struct CompletedFrame {
+    /// The next frame has not drawn its first row yet: the buffers still
+    /// hold the completed picture, so nothing was saved.
+    pending: bool,
+    /// The saved buffers hold the completed picture.
+    valid: bool,
+    framebuffer: Vec<[u8; 3]>,
+    native: Vec<[u8; 3]>,
+    native_wide_rows: Vec<bool>,
+    layers: Vec<Option<LayerPixel>>,
+}
+
 /// One byte a port read from or wrote into a PPU memory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PpuAccess {
@@ -472,6 +487,12 @@ pub struct Ppu {
     /// capture, not console state: save states skip it.
     #[serde(skip)]
     pub layer_framebuffer: Vec<Option<LayerPixel>>,
+    /// The frame that just completed, kept when the next frame starts
+    /// drawing over its picture before anyone has looked (see
+    /// [`Self::present_completed_frame`]). Not console state: save states
+    /// skip it.
+    #[serde(skip)]
+    completed: CompletedFrame,
 
     /// How far the current scanline has been rendered into the
     /// framebuffer. Phase 2 of gap G6: a `$21xx` write that lands
@@ -610,6 +631,7 @@ impl Ppu {
             native_framebuffer: Vec::new(),
             native_wide_rows: Vec::new(),
             layer_framebuffer: Vec::new(),
+            completed: CompletedFrame::default(),
             last_flushed_dot: 0,
             line_sprites: None,
             // Post-reset state is forced-blanked (INIDISP=$80), so
@@ -630,6 +652,53 @@ impl Ppu {
     pub const fn latch_frame_content(&mut self) {
         self.frame_visible_content = self.frame_visible_content_accum;
         self.frame_visible_content_accum = false;
+        // The picture just completed is in the buffers; the first row the
+        // next frame draws saves it before overwriting it.
+        self.completed.valid = false;
+        self.completed.pending = true;
+    }
+
+    /// Put the picture of the frame that just completed back into the
+    /// buffers, when the next frame has already drawn over its top rows.
+    ///
+    /// A step that ends past the frame wrap — a DMA that spans the
+    /// boundary runs its whole length in one step — leaves the buffers
+    /// holding the new frame's first rows on the old frame's last ones: a
+    /// picture no screen ever showed. A caller that stopped *at* a frame
+    /// boundary (`--until-frame`) wants the frame that just completed.
+    /// Returns whether anything had been drawn over. The rows of the new
+    /// frame that were drawn are lost with it: the frame in progress shows
+    /// the old picture there until it draws them again.
+    pub const fn present_completed_frame(&mut self) -> bool {
+        if !self.completed.valid {
+            return false;
+        }
+        self.completed.valid = false;
+        std::mem::swap(&mut self.framebuffer, &mut self.completed.framebuffer);
+        if self.native_capture && !self.completed.native.is_empty() {
+            std::mem::swap(&mut self.native_framebuffer, &mut self.completed.native);
+            std::mem::swap(
+                &mut self.native_wide_rows,
+                &mut self.completed.native_wide_rows,
+            );
+        }
+        if !self.layer_framebuffer.is_empty() && !self.completed.layers.is_empty() {
+            std::mem::swap(&mut self.layer_framebuffer, &mut self.completed.layers);
+        }
+        true
+    }
+
+    /// Save the completed frame before the first row of the next one is
+    /// drawn over it.
+    fn save_completed_frame(&mut self) {
+        self.completed.pending = false;
+        self.completed.framebuffer.clone_from(&self.framebuffer);
+        self.completed.native.clone_from(&self.native_framebuffer);
+        self.completed
+            .native_wide_rows
+            .clone_from(&self.native_wide_rows);
+        self.completed.layers.clone_from(&self.layer_framebuffer);
+        self.completed.valid = true;
     }
 
     /// ares `latch.oamAddress` for the line being drawn right now: the
@@ -855,6 +924,9 @@ impl Ppu {
             );
             // Not interlaced: both native rows carry the same field.
             native_odd = native_even;
+        }
+        if self.completed.pending {
+            self.save_completed_frame();
         }
         let off = yi * FRAME_W;
         self.framebuffer[off + si..off + ei].copy_from_slice(&row[si..ei]);
@@ -1931,6 +2003,43 @@ mod tests {
             [0, 0, 0],
             "last line should be backdrop"
         );
+    }
+
+    #[test]
+    fn the_completed_frame_comes_back_when_the_next_one_drew_over_it() {
+        // A step that ends past the frame wrap leaves the next frame's
+        // first rows over the old frame's last ones; the completed picture
+        // is saved before the first of them and can be put back.
+        let mut p = ppu_with_solid_bg1_tile();
+        let opts = RenderOptions::default();
+        p.render_current_scanline(1, opts);
+        p.render_current_scanline(2, opts);
+        let red = p.framebuffer()[0];
+        assert_ne!(red, [0, 0, 0]);
+        assert_eq!(p.framebuffer()[crate::FRAME_W], red, "row 1 is red too");
+
+        // The wrap with nothing drawn yet: the buffers hold the picture.
+        p.latch_frame_content();
+        assert!(!p.present_completed_frame(), "nothing was drawn over");
+
+        // The next frame blanks its first row (forced blank) before anyone
+        // looked.
+        p.write(register::INIDISP, 0x8F);
+        p.render_current_scanline(1, opts);
+        assert_eq!(
+            p.framebuffer()[0],
+            [0, 0, 0],
+            "row 0 now belongs to the new frame"
+        );
+        assert!(p.present_completed_frame(), "the old picture is put back");
+        assert_eq!(p.framebuffer()[0], red);
+        assert_eq!(p.framebuffer()[crate::FRAME_W], red);
+        assert!(!p.present_completed_frame(), "once");
+
+        // A later wrap forgets it: the frame in progress is the picture.
+        p.render_current_scanline(1, opts);
+        p.latch_frame_content();
+        assert!(!p.present_completed_frame());
     }
 
     #[test]

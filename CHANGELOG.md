@@ -61,6 +61,16 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ### Fixed
 
+- **A run to a frame boundary ends on the frame that completed, whole.** A
+  step that runs past the frame wrap — a general DMA spanning the boundary
+  runs its whole length in one step, for instance a 64 KB VRAM clear — left
+  the next frame's first rows drawn over the old frame's last ones, so
+  `luna state --until-frame N`, `--then-frames` and `--screenshot-frames`
+  (and the GUI, for a frame) showed a picture no screen ever showed. The
+  completed picture is now kept until the next frame draws over it and
+  put back at a frame stop (`Emulator::present_completed_frame`). Found
+  by comparing a port with Mesen2 pixel for pixel: one frame of fifty
+  differed, and it was this.
 - **Two 65C816 edge cases in emulation mode**, found when the
   `SingleStepTests/65816` suite corrected them (2026-10-15/16): `JSR
   (a,x)` pushes its return address without wrapping in page 1 (from
