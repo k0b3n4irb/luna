@@ -202,6 +202,8 @@ struct CompletedFrame {
     pending: bool,
     /// The saved buffers hold the completed picture.
     valid: bool,
+    /// The accessors show the saved picture instead of the live buffers.
+    showing: bool,
     framebuffer: Vec<[u8; 3]>,
     native: Vec<[u8; 3]>,
     native_wide_rows: Vec<bool>,
@@ -655,37 +657,27 @@ impl Ppu {
         // The picture just completed is in the buffers; the first row the
         // next frame draws saves it before overwriting it.
         self.completed.valid = false;
+        self.completed.showing = false;
         self.completed.pending = true;
     }
 
-    /// Put the picture of the frame that just completed back into the
-    /// buffers, when the next frame has already drawn over its top rows.
+    /// Show the picture of the frame that just completed, whole, from here
+    /// until the next row is drawn.
     ///
     /// A step that ends past the frame wrap — a DMA that spans the
-    /// boundary runs its whole length in one step — leaves the buffers
-    /// holding the new frame's first rows on the old frame's last ones: a
-    /// picture no screen ever showed. A caller that stopped *at* a frame
-    /// boundary (`--until-frame`) wants the frame that just completed.
-    /// Returns whether anything had been drawn over. The rows of the new
-    /// frame that were drawn are lost with it: the frame in progress shows
-    /// the old picture there until it draws them again.
+    /// boundary runs its whole length in one step — leaves the live
+    /// buffers holding the new frame's first rows on the old frame's last
+    /// ones: a picture no screen ever showed. A caller that stopped *at* a
+    /// frame boundary (`--until-frame`) wants the frame that just
+    /// completed. Its picture was saved before the first of those rows;
+    /// the readers ([`Self::framebuffer`], [`Self::native_framebuffer`],
+    /// [`Self::layer_frame`], [`Self::native_frame_is_wide`]) return it
+    /// until the beam draws again, then go back to the live buffers, whose
+    /// rows of the new frame were never touched. Returns whether the
+    /// picture was drawn over.
     pub const fn present_completed_frame(&mut self) -> bool {
-        if !self.completed.valid {
-            return false;
-        }
-        self.completed.valid = false;
-        std::mem::swap(&mut self.framebuffer, &mut self.completed.framebuffer);
-        if self.native_capture && !self.completed.native.is_empty() {
-            std::mem::swap(&mut self.native_framebuffer, &mut self.completed.native);
-            std::mem::swap(
-                &mut self.native_wide_rows,
-                &mut self.completed.native_wide_rows,
-            );
-        }
-        if !self.layer_framebuffer.is_empty() && !self.completed.layers.is_empty() {
-            std::mem::swap(&mut self.layer_framebuffer, &mut self.completed.layers);
-        }
-        true
+        self.completed.showing = self.completed.valid;
+        self.completed.showing
     }
 
     /// Save the completed frame before the first row of the next one is
@@ -928,6 +920,7 @@ impl Ppu {
         if self.completed.pending {
             self.save_completed_frame();
         }
+        self.completed.showing = false;
         let off = yi * FRAME_W;
         self.framebuffer[off + si..off + ei].copy_from_slice(&row[si..ei]);
         if layered {
@@ -997,8 +990,13 @@ impl Ppu {
         if self.layer_framebuffer.is_empty() || layer >= LAYERS {
             return &[];
         }
+        let buf = if self.completed.showing && !self.completed.layers.is_empty() {
+            &self.completed.layers
+        } else {
+            &self.layer_framebuffer
+        };
         let o = layer * FRAME_H_MAX * FRAME_W;
-        &self.layer_framebuffer[o..o + self.frame_height() * FRAME_W]
+        &buf[o..o + self.frame_height() * FRAME_W]
     }
 
     /// Rows the current frame's picture has: 224, or 239 when the frame
@@ -1024,26 +1022,38 @@ impl Ppu {
     /// 512 columns to be shown whole. `false` when capture is off.
     #[must_use]
     pub fn native_frame_is_wide(&self) -> bool {
-        self.native_wide_rows
-            .iter()
-            .take(self.frame_height())
-            .any(|&w| w)
+        let rows = if self.completed.showing && !self.completed.native_wide_rows.is_empty() {
+            &self.completed.native_wide_rows
+        } else {
+            &self.native_wide_rows
+        };
+        rows.iter().take(self.frame_height()).any(|&w| w)
     }
 
     /// Borrow the current persistent framebuffer: 256 × [`Self::frame_height`]
     /// BGR888 pixels. Cheap accessor — no rendering happens here.
     #[must_use]
     pub fn framebuffer(&self) -> &[[u8; 3]] {
-        let len = (FRAME_W * self.frame_height()).min(self.framebuffer.len());
-        &self.framebuffer[..len]
+        let buf = if self.completed.showing {
+            &self.completed.framebuffer
+        } else {
+            &self.framebuffer
+        };
+        let len = (FRAME_W * self.frame_height()).min(buf.len());
+        &buf[..len]
     }
 
     /// Borrow the native capture: 512 × [`Self::native_frame_height`]
     /// pixels, empty when capture is off.
     #[must_use]
     pub fn native_framebuffer(&self) -> &[[u8; 3]] {
-        let len = (FRAME_W * 2 * self.native_frame_height()).min(self.native_framebuffer.len());
-        &self.native_framebuffer[..len]
+        let buf = if self.completed.showing && !self.completed.native.is_empty() {
+            &self.completed.native
+        } else {
+            &self.native_framebuffer
+        };
+        let len = (FRAME_W * 2 * self.native_frame_height()).min(buf.len());
+        &buf[..len]
     }
 
     /// Where a CPU CGRAM access lands right now (ares `io.cpp:47-61`,
@@ -2031,13 +2041,17 @@ mod tests {
             [0, 0, 0],
             "row 0 now belongs to the new frame"
         );
-        assert!(p.present_completed_frame(), "the old picture is put back");
+        assert!(p.present_completed_frame(), "the old picture is shown");
         assert_eq!(p.framebuffer()[0], red);
         assert_eq!(p.framebuffer()[crate::FRAME_W], red);
-        assert!(!p.present_completed_frame(), "once");
 
-        // A later wrap forgets it: the frame in progress is the picture.
-        p.render_current_scanline(1, opts);
+        // Only shown: the new frame's row stays in the live buffer, so the
+        // readers go back to it as soon as the beam draws again.
+        p.render_current_scanline(2, opts);
+        assert_eq!(p.framebuffer()[0], [0, 0, 0], "row 0 of the new frame");
+        assert_eq!(p.framebuffer()[crate::FRAME_W], [0, 0, 0], "row 1 too");
+
+        // A later wrap forgets the saved picture: nothing to show.
         p.latch_frame_content();
         assert!(!p.present_completed_frame());
     }

@@ -2457,7 +2457,13 @@ impl Emulator {
             |snes, _| (snes.frame_count != start_frame).then_some(()),
             |_| None,
         )?;
-        self.present_completed_frame();
+        if self
+            .snes
+            .as_ref()
+            .is_some_and(|s| s.frame_count != start_frame)
+        {
+            self.present_completed_frame();
+        }
         Ok(run.steps)
     }
 
@@ -2465,11 +2471,11 @@ impl Emulator {
     /// the frame wrap — a DMA spanning the boundary runs its whole length
     /// in one step — leaves the buffers holding the next frame's first
     /// rows over the old frame's last ones, a picture no screen showed.
-    /// This puts the completed picture back (the frame runs
-    /// [`Self::step_until_frame`], [`Self::run_to_pc_or_frame`] and the
-    /// input-script runs end with it); the next frame draws its rows again
-    /// as the beam reaches them. Returns whether anything had been drawn
-    /// over. Does nothing mid-frame when the frame did not just wrap.
+    /// The picture readers return the completed one instead (the frame
+    /// runs [`Self::step_until_frame`], [`Self::run_to_pc_or_frame`] and
+    /// the input-script runs end with it), until the machine runs on and
+    /// the beam draws again; the frame in progress is never touched.
+    /// Returns whether the picture had been drawn over.
     pub fn present_completed_frame(&mut self) -> bool {
         self.snes
             .as_mut()

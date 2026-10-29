@@ -68,7 +68,9 @@ fast-forwarded to (binaries attached by CI). Format inspired by
   `luna state --until-frame N`, `--then-frames` and `--screenshot-frames`
   (and the GUI, for a frame) showed a picture no screen ever showed. The
   completed picture is now kept until the next frame draws over it and
-  put back at a frame stop (`Emulator::present_completed_frame`). Found
+  shown at a frame stop (`Emulator::present_completed_frame`): the readers
+  return it, and go back to the live buffers, which the next frame's rows
+  were never taken from, as soon as the machine runs on. Found
   by comparing a port with Mesen2 pixel for pixel: one frame of fifty
   differed, and it was this.
 - **Two 65C816 edge cases in emulation mode**, found when the
