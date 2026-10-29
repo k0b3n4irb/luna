@@ -228,6 +228,15 @@ fn fnv1a_64(bytes: &[u8]) -> u64 {
     h
 }
 
+/// What the per-voice capture held ([`Emulator::take_voice_samples`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct VoiceSamples {
+    /// One entry per DSP sample: the (left, right) of voices 0 to 7.
+    pub samples: Vec<[(i16, i16); 8]>,
+    /// Samples refused for want of room (the capture holds sixty seconds).
+    pub dropped: u64,
+}
+
 /// What ended [`Emulator::run_to_pc_or_frame`] (issue #269).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PcStop {
@@ -3533,6 +3542,34 @@ impl Emulator {
             .apu_real
             .audio_queue
             .len())
+    }
+
+    /// Turn the per-voice capture on or off. On, the DSP files each
+    /// voice's own output — after its envelope and its left / right volume,
+    /// before the main volume, the echo and the `FLG` mute — one stereo
+    /// sample per DSP sample, from now on, up to sixty seconds. Off drops
+    /// what was captured. Read it with [`Self::take_voice_samples`].
+    pub fn set_voice_capture(&mut self, on: bool) -> Result<(), ApiError> {
+        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        snes.apu_real.dsp.voice_tap = on.then(luna_apu::dsp::VoiceTap::default);
+        Ok(())
+    }
+
+    /// Take what the per-voice capture holds so far. Sample `n` is the
+    /// `n`-th since the capture began, so it lines up with the mixed output
+    /// drained from the same point ([`Self::drain_audio`]). Empty when the
+    /// capture is off.
+    pub fn take_voice_samples(&mut self) -> Result<VoiceSamples, ApiError> {
+        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        Ok(snes
+            .apu_real
+            .dsp
+            .voice_tap
+            .as_mut()
+            .map_or_else(VoiceSamples::default, |tap| VoiceSamples {
+                samples: std::mem::take(&mut tap.samples),
+                dropped: tap.dropped,
+            }))
     }
 
     /// Drain up to `max` stereo (i16, i16) audio samples from the

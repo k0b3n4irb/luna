@@ -643,6 +643,7 @@ pub(crate) fn run_state(
     out: &std::path::Path,
     screenshot: Option<&std::path::Path>,
     audio_out: Option<&std::path::Path>,
+    voice_wav_dir: Option<&std::path::Path>,
     input_script: Option<&str>,
     extra_pad_scripts: &[(u8, Option<&str>)],
     port1: &str,
@@ -915,6 +916,14 @@ pub(crate) fn run_state(
         && let Err(e) = em.enable_wdm_log()
     {
         eprintln!("error: enable_wdm_log: {e}");
+        return ExitCode::from(1);
+    }
+    // `--voice-wav-dir`: the DSP files each voice's own output from the
+    // start of the run, so every file lines up with `--audio-out`.
+    if voice_wav_dir.is_some()
+        && let Err(e) = em.set_voice_capture(true)
+    {
+        eprintln!("error: --voice-wav-dir: {e}");
         return ExitCode::from(1);
     }
     // Gamepad (`--input` / `--input2` …), mouse (`--mouse`) and Super Scope
@@ -1792,6 +1801,16 @@ pub(crate) fn run_state(
             secs
         );
     }
+    if let Some(dir) = voice_wav_dir {
+        let written = em
+            .take_voice_samples()
+            .map_err(|e| e.to_string())
+            .and_then(|v| write_voice_wavs(dir, &v.samples, v.dropped));
+        if let Err(e) = written {
+            eprintln!("error: --voice-wav-dir {}: {e}", dir.display());
+            return ExitCode::from(1);
+        }
+    }
     // --srm-out: persist battery SRAM to a `.srm` file (the write half of a
     // cross-run power-cycle test).
     if let Some(path) = srm_out {
@@ -1822,6 +1841,32 @@ pub(crate) fn run_state(
     } else {
         ExitCode::SUCCESS
     }
+}
+
+/// `--voice-wav-dir`: one WAV per S-DSP voice, `voice0.wav` to `voice7.wav`.
+fn write_voice_wavs(
+    dir: &std::path::Path,
+    samples: &[[(i16, i16); 8]],
+    dropped: u64,
+) -> Result<(), String> {
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    for voice in 0..8 {
+        let one: Vec<(i16, i16)> = samples.iter().map(|s| s[voice]).collect();
+        let path = dir.join(format!("voice{voice}.wav"));
+        write_wav(&path, &one).map_err(|e| format!("writing {}: {e}", path.display()))?;
+    }
+    eprintln!(
+        "Voice WAVs written to {}  (8 files, {} samples = {:.2}s @ 32 kHz stereo each)",
+        dir.display(),
+        samples.len(),
+        samples.len() as f64 / 32_000.0
+    );
+    if dropped > 0 {
+        eprintln!(
+            "warning: the voice capture holds sixty seconds; {dropped} later samples are not in the files"
+        );
+    }
+    Ok(())
 }
 
 /// Read every `--peek` spec. `verbose` prints the labelled hexdumps and
