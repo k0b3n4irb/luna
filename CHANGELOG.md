@@ -65,7 +65,8 @@ fast-forwarded to (binaries attached by CI). Format inspired by
   volume, the echo and the `FLG` mute — and sample for sample aligned with
   `--audio-out`. For following a piece of music voice by voice instead of
   on the mix. `Emulator::set_voice_capture` / `take_voice_samples` in
-  luna-api (sixty seconds at most).
+  luna-api. Sixty seconds are kept unless `--voice-wav-seconds N` (up to
+  3600; about a megabyte of memory per second) says more.
 
 - **`luna ticks`: `until` and the battery RAM.** `until = { symbol, hit, if }`
   ends the record on an arrival on another routine and records it as the

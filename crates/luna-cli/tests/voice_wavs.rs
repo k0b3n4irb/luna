@@ -82,3 +82,44 @@ fn one_wav_per_voice_each_as_long_as_the_mix() {
     assert!(!voices.join("voice8.wav").exists());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn the_length_kept_is_adjustable_and_a_short_one_says_what_is_missing() {
+    let dir = std::env::temp_dir().join("luna_voice_wavs_seconds");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let rom = dir.join("spin.sfc");
+    std::fs::write(&rom, spin_rom()).unwrap();
+    let voices = dir.join("voices");
+    let run = |frames: &str, seconds: &str| {
+        let out = Command::new(luna_bin())
+            .arg("state")
+            .arg(&rom)
+            .args(["--force-mapper", "lorom", "--until-frame", frames])
+            .arg("--voice-wav-dir")
+            .arg(&voices)
+            .args(["--voice-wav-seconds", seconds, "--out", "/dev/null"])
+            .output()
+            .expect("run luna");
+        assert!(out.status.success());
+        String::from_utf8_lossy(&out.stderr).into_owned()
+    };
+    // Half a second of run, a second of room: nothing is lost.
+    let said = run("30", "1");
+    assert!(!said.contains("warning"), "{said}");
+    let whole = wav_samples(&voices.join("voice0.wav"));
+    assert!(whole > 10_000 && whole < 32_000, "{whole}");
+
+    // A second and a half of run, a second of room: the files hold one
+    // second and the run says how many samples they lack.
+    let said = run("90", "1");
+    assert!(
+        said.contains("warning") && said.contains("not in the files"),
+        "{said}"
+    );
+    for v in 0..8 {
+        let n = wav_samples(&voices.join(format!("voice{v}.wav")));
+        assert_eq!(n, 32_000, "voice {v}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

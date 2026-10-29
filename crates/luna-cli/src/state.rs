@@ -644,6 +644,7 @@ pub(crate) fn run_state(
     screenshot: Option<&std::path::Path>,
     audio_out: Option<&std::path::Path>,
     voice_wav_dir: Option<&std::path::Path>,
+    voice_wav_seconds: Option<u32>,
     input_script: Option<&str>,
     extra_pad_scripts: &[(u8, Option<&str>)],
     port1: &str,
@@ -921,7 +922,9 @@ pub(crate) fn run_state(
     // `--voice-wav-dir`: the DSP files each voice's own output from the
     // start of the run, so every file lines up with `--audio-out`.
     if voice_wav_dir.is_some()
-        && let Err(e) = em.set_voice_capture(true)
+        && let Err(e) = em.set_voice_capture_seconds(Some(
+            voice_wav_seconds.unwrap_or(luna_api::VOICE_TAP_DEFAULT_SECONDS),
+        ))
     {
         eprintln!("error: --voice-wav-dir: {e}");
         return ExitCode::from(1);

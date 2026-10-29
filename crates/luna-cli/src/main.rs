@@ -424,10 +424,21 @@ enum Command {
         /// the voice's output after its envelope and its left / right
         /// volume, before the main volume, the echo and the `FLG` mute.
         /// Sample `n` of a file is sample `n` of `--audio-out`, so a note
-        /// can be followed voice by voice. At most sixty seconds. Example:
+        /// can be followed voice by voice. Sixty seconds unless
+        /// `--voice-wav-seconds` says otherwise. Example:
         /// `--until-frame 1800 --voice-wav-dir voices/`.
         #[arg(long = "voice-wav-dir")]
         voice_wav_dir: Option<PathBuf>,
+        /// With `--voice-wav-dir`: how many seconds of each voice to keep
+        /// (default 60; each second costs about a megabyte of memory for
+        /// the eight voices). A longer run says how many samples the
+        /// files lack.
+        #[arg(
+            long = "voice-wav-seconds",
+            requires = "voice_wav_dir",
+            value_parser = clap::value_parser!(u32).range(1..=3600)
+        )]
+        voice_wav_seconds: Option<u32>,
         /// Scripted joypad-1 input. Format: comma-separated
         /// `frame:hex` checkpoints (frame number in decimal, hex
         /// mask with optional `0x` prefix). The mask is latched at
@@ -1557,6 +1568,7 @@ fn main() -> ExitCode {
             screenshot,
             audio_out,
             voice_wav_dir,
+            voice_wav_seconds,
             input,
             input2,
             input3,
@@ -1656,6 +1668,7 @@ fn main() -> ExitCode {
                 screenshot.as_deref(),
                 audio_out.as_deref(),
                 voice_wav_dir.as_deref(),
+                voice_wav_seconds,
                 input.as_deref(),
                 &[
                     (1, input2.as_deref()),

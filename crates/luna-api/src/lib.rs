@@ -19,7 +19,7 @@ use std::path::Path;
 /// and MCP consume it through `luna-api` rather than depending on
 /// `luna-apu` (`.claude/rules/api-first.md`).
 pub use luna_apu::SpcStepKind;
-pub use luna_apu::dsp::DspWriteEvent;
+pub use luna_apu::dsp::{DspWriteEvent, VOICE_TAP_DEFAULT_SECONDS};
 pub use luna_cartridge::Region;
 use luna_cartridge::{CartError, Cartridge};
 pub use luna_core::PowerOnState;
@@ -233,7 +233,7 @@ fn fnv1a_64(bytes: &[u8]) -> u64 {
 pub struct VoiceSamples {
     /// One entry per DSP sample: the (left, right) of voices 0 to 7.
     pub samples: Vec<[(i16, i16); 8]>,
-    /// Samples refused for want of room (the capture holds sixty seconds).
+    /// Samples refused for want of room (the capture's length).
     pub dropped: u64,
 }
 
@@ -3547,11 +3547,19 @@ impl Emulator {
     /// Turn the per-voice capture on or off. On, the DSP files each
     /// voice's own output — after its envelope and its left / right volume,
     /// before the main volume, the echo and the `FLG` mute — one stereo
-    /// sample per DSP sample, from now on, up to sixty seconds. Off drops
-    /// what was captured. Read it with [`Self::take_voice_samples`].
+    /// sample per DSP sample, from now on, up to sixty seconds (about a
+    /// megabyte a second). Off drops what was captured. Read it with
+    /// [`Self::take_voice_samples`]; [`Self::set_voice_capture_seconds`]
+    /// asks for another length.
     pub fn set_voice_capture(&mut self, on: bool) -> Result<(), ApiError> {
+        self.set_voice_capture_seconds(on.then_some(luna_apu::dsp::VOICE_TAP_DEFAULT_SECONDS))
+    }
+
+    /// The per-voice capture ([`Self::set_voice_capture`]) with room for
+    /// `seconds` of audio, or off with `None`.
+    pub fn set_voice_capture_seconds(&mut self, seconds: Option<u32>) -> Result<(), ApiError> {
         let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
-        snes.apu_real.dsp.voice_tap = on.then(luna_apu::dsp::VoiceTap::default);
+        snes.apu_real.dsp.voice_tap = seconds.map(luna_apu::dsp::VoiceTap::with_seconds);
         Ok(())
     }
 
