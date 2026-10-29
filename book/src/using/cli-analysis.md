@@ -717,6 +717,9 @@ tick   = { symbol = "matchDecide", if = "[mode] == 2" }  # if: optional
 start  = { symbol = "matchInit", hit = 1 }               # optional
 ticks  = 3000                     # stop after this many ticks; or:
 until_frame = 36000               # stop at this frame (default: 10 minutes)
+until  = { symbol = "gameOver", hit = 1 }   # optional: end on another routine
+srm_in  = "save.srm"              # optional: battery RAM to load first
+srm_out = "after.srm"             # optional: battery RAM to keep after the run
 input  = "pad.txt"                # optional, see below
 input2 = "pad2.txt"               # optional: a second pad (port 2)
 
@@ -744,6 +747,20 @@ native = false                    # true: the 512-wide native capture
   `tick.if` holds, counted from the `start`: the `hit`-th arrival on
   `start.symbol` where `start.if` holds. An arrival that is both the start
   and a tick is tick 1.
+- **`until`** ends the record on the `hit`-th arrival (1 by default) on
+  another routine, where its own `if` holds, counted like the `start`'s
+  from power-on: that arrival is recorded as the **last tick** (the next
+  `t`, its zones read before the routine runs, after the pokes due there),
+  and the end line says `until`. An arrival that is also a tick is one
+  tick. `ticks`, when given, becomes a maximum; an `until` the run does not
+  reach before `until_frame` (or the ten-minute cap) is a shortfall, and
+  before the `start` it ends the record with no tick. The header gives it
+  as `tick.until`. For recording a whole match up to its result.
+- **`srm_in` / `srm_out`**: the battery RAM, as `luna state --srm-in` and
+  `--srm-out` (files relative to the spec). `srm_in` seeds it before the
+  run, for a check that loads a save and reads memory after the game
+  writes; `srm_out` keeps what it holds after the run. A cartridge with no
+  battery RAM refuses both.
 - **The zones** are read without touching the bus: WRAM, cartridge RAM
   and ROM through the CPU's addresses, and `APU:OFFSET` (SPC700 RAM),
   `VRAM:WORD` (a word address, as `VMADD` takes it), `CGRAM:COLOR` (a
@@ -823,7 +840,8 @@ has:
   in `inputs` and `inputs2`.
 - `screen`: at a `[shots]` tick, the FNV-1a 64 of the picture and its PNG
   file, in `shots_dir`.
-- `end.reason`: `limit` (the ticks asked for), `until_frame`,
+- `end.reason`: `limit` (the ticks asked for), `until` (the record's
+  closing arrival), `until_frame`,
   `frame_cap`, `halted` or `error`. A record without its end line was cut
   short.
 - `version` goes up with any change that breaks reading; a field a reader

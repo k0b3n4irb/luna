@@ -46,6 +46,18 @@ pub struct TickSpec {
     /// Stop at this frame (default: ten minutes after the call).
     #[serde(default)]
     pub until_frame: Option<u64>,
+    /// Stop on the `hit`-th arrival on this other routine, recording it as
+    /// the last tick: its zones read before the routine runs. `ticks`
+    /// becomes a maximum.
+    #[serde(default)]
+    pub until: Option<TickStart>,
+    /// Battery SRAM to load before the run: a `.srm` file (relative to the
+    /// spec's folder). The machine must have been loaded but not run.
+    #[serde(default)]
+    pub srm_in: Option<PathBuf>,
+    /// Write the battery SRAM to this `.srm` file after the run.
+    #[serde(default)]
+    pub srm_out: Option<PathBuf>,
     /// A joypad script (port 1 by default).
     #[serde(default)]
     pub input: Option<TickInput>,
@@ -76,8 +88,9 @@ pub struct TickPoint {
     pub cond: Option<String>,
 }
 
-/// Where tick 1 may start: the `hit`-th arrival on `symbol` where `if`
-/// holds. An arrival that is both the start and a tick is tick 1.
+/// An arrival on `symbol` where `if` holds, the `hit`-th. As `start`, where
+/// tick 1 may start (an arrival that is both the start and a tick is tick
+/// 1); as `until`, where the record ends.
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TickStart {
@@ -257,6 +270,8 @@ struct HeaderTick {
     cond: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     start: Option<TickStart>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    until: Option<TickStart>,
 }
 
 /// What the informative time fields of a tick line count.
@@ -887,6 +902,9 @@ struct Recorder<'w> {
     start: Option<(u32, u64, Option<Expression>)>,
     start_matches: u64,
     started: bool,
+    until: Option<(u32, u64, Option<Expression>)>,
+    until_matches: u64,
+    ended_by_until: bool,
     zones: Vec<(String, Space, u32)>,
     pokes: Vec<Poke>,
     shots: Option<Shots>,
@@ -923,19 +941,42 @@ impl Recorder<'_> {
             self.start_matches += 1;
             self.started = self.start_matches == *hit;
         }
+        // The arrival that ends the record (`until`) is recorded as its last
+        // tick, whatever the tick's routine and condition.
+        let reached = self.until.as_ref().is_some_and(|(until_pc, _, cond)| {
+            *until_pc == pc && cond.as_ref().is_none_or(|c| em.arrival_holds(c, pc))
+        });
+        if reached {
+            self.until_matches += 1;
+        }
+        let end_now = reached
+            && self
+                .until
+                .as_ref()
+                .is_some_and(|(_, hit, _)| self.until_matches == *hit);
+        if end_now && !self.started {
+            // Ended before the start: no tick (the start not reached is
+            // the failure).
+            self.ended_by_until = true;
+            return true;
+        }
         // The arrival that starts the record may itself be tick 1.
-        if !self.started
-            || pc != self.tick_pc
-            || !self
+        let is_tick = self.started
+            && pc == self.tick_pc
+            && self
                 .tick_cond
                 .as_ref()
-                .is_none_or(|c| em.arrival_holds(c, pc))
-        {
+                .is_none_or(|c| em.arrival_holds(c, pc));
+        if !is_tick && !end_now {
             return false;
         }
         self.t += 1;
         if let Err(e) = self.write_tick(em) {
             self.error = Some(e);
+            return true;
+        }
+        if end_now {
+            self.ended_by_until = true;
             return true;
         }
         self.limit == Some(self.t)
@@ -1015,6 +1056,9 @@ fn check_spec(spec: &TickSpec) -> Result<(), String> {
     if spec.start.as_ref().is_some_and(|s| s.hit == 0) {
         return Err("start.hit counts from 1".to_string());
     }
+    if spec.until.as_ref().is_some_and(|u| u.hit == 0) {
+        return Err("until.hit counts from 1".to_string());
+    }
     let mut names: Vec<&str> = Vec::new();
     for z in &spec.zone {
         if z.name.is_empty() || names.contains(&z.name.as_str()) {
@@ -1073,6 +1117,21 @@ impl Emulator {
                 Ok((pc, s.hit, cond))
             })
             .transpose()?;
+        let until = spec
+            .until
+            .as_ref()
+            .map(|u| -> Result<_, String> {
+                let pc = self
+                    .resolve_address(&u.symbol)
+                    .map_err(|e| format!("until.symbol `{}`: {e}", u.symbol))?;
+                let cond = u
+                    .cond
+                    .as_deref()
+                    .map(|c| self.compile_tick_condition("until.if", c))
+                    .transpose()?;
+                Ok((pc, u.hit, cond))
+            })
+            .transpose()?;
         let mut zones = Vec::with_capacity(spec.zone.len());
         for z in &spec.zone {
             zones.push((z.name.clone(), resolve_zone(self, z)?, z.length));
@@ -1088,6 +1147,16 @@ impl Emulator {
             .chain(&inputs2)
             .map(|i| (i.port, None))
             .collect();
+        if (spec.srm_in.is_some() || spec.srm_out.is_some()) && self.sram().is_empty() {
+            return Err("srm_in / srm_out: this cartridge has no battery RAM".to_string());
+        }
+        if let Some(file) = &spec.srm_in {
+            let path = options.base_dir.join(file);
+            let data =
+                std::fs::read(&path).map_err(|e| format!("srm_in `{}`: {e}", path.display()))?;
+            self.load_sram(&data)
+                .map_err(|e| format!("srm_in `{}`: {e}", path.display()))?;
+        }
         let shots = match &spec.shots {
             Some(s) => {
                 let dir = options
@@ -1125,6 +1194,7 @@ impl Emulator {
                 symbol: spec.tick.symbol.clone(),
                 cond: spec.tick.cond.clone(),
                 start: spec.start.clone(),
+                until: spec.until.clone(),
             },
             clock: Clock {
                 frame: "frame_end",
@@ -1170,10 +1240,13 @@ impl Emulator {
         if let Some((pc, _, _)) = start {
             pcs.push(pc);
         }
-        for pc in std::iter::once(tick_pc).chain(pokes.iter().filter_map(|p| match p.when {
-            PokeWhen::Arrival { pc, .. } => Some(pc),
-            PokeWhen::Tick(_) => None,
-        })) {
+        for pc in std::iter::once(tick_pc)
+            .chain(until.iter().map(|u| u.0))
+            .chain(pokes.iter().filter_map(|p| match p.when {
+                PokeWhen::Arrival { pc, .. } => Some(pc),
+                PokeWhen::Tick(_) => None,
+            }))
+        {
             if !pcs.contains(&pc) {
                 pcs.push(pc);
             }
@@ -1184,6 +1257,9 @@ impl Emulator {
             start_matches: 0,
             started: start.is_none(),
             start,
+            until,
+            until_matches: 0,
+            ended_by_until: false,
             zones,
             pokes,
             shots,
@@ -1211,7 +1287,7 @@ impl Emulator {
                 snes.ppu.set_native_capture(false);
             }
         }
-        self.finish_record(spec, &mut rec, &run, frame_bound)
+        self.finish_record(spec, &mut rec, &run, frame_bound, options.base_dir)
     }
 
     /// The input script (`input` and `input2` in one), and what the header
@@ -1309,6 +1385,7 @@ impl Emulator {
         rec: &mut Recorder<'_>,
         run: &Result<bool, crate::ApiError>,
         frame_bound: u64,
+        base_dir: &Path,
     ) -> Result<TickOutcome, String> {
         let mut failures = Vec::new();
         let reason = match (run, &rec.error) {
@@ -1320,6 +1397,7 @@ impl Emulator {
                 failures.push(e.to_string());
                 "error"
             }
+            (Ok(true), None) if rec.ended_by_until => "until",
             (Ok(true), None) => "limit",
             (Ok(false), None) => {
                 if self.frame_count().unwrap_or(0) < frame_bound {
@@ -1349,12 +1427,26 @@ impl Emulator {
             ));
         } else if t == 0 {
             failures.push(format!("tick `{}` was not reached", spec.tick.symbol));
-        } else if let Some(limit) = spec.ticks.filter(|&l| t < l) {
+        } else if let Some(limit) = spec.ticks.filter(|&l| t < l && reason != "until") {
             failures.push(format!("{t} of the {limit} ticks asked for ({reason})"));
         } else if spec.ticks.is_none() && reason == "frame_cap" {
             failures.push(format!(
                 "no `ticks` nor `until_frame`: stopped after {FRAME_CAP} frames"
             ));
+        }
+        if let Some(u) = &spec.until
+            && !matches!(reason, "until" | "limit" | "error")
+        {
+            failures.push(format!(
+                "until `{}` (arrival {}) was not reached ({reason})",
+                u.symbol, u.hit
+            ));
+        }
+        if let Some(file) = &spec.srm_out {
+            let path = base_dir.join(file);
+            if let Err(e) = std::fs::write(&path, self.sram()) {
+                failures.push(format!("srm_out `{}`: {e}", path.display()));
+            }
         }
         for p in rec.pokes.iter().filter(|p| !p.done) {
             let when = match p.when {

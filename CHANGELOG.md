@@ -67,6 +67,13 @@ fast-forwarded to (binaries attached by CI). Format inspired by
   on the mix. `Emulator::set_voice_capture` / `take_voice_samples` in
   luna-api (sixty seconds at most).
 
+- **`luna ticks`: `until` and the battery RAM.** `until = { symbol, hit, if }`
+  ends the record on an arrival on another routine and records it as the
+  last tick (`end.reason` `until`; `ticks` becomes a maximum), to record a
+  whole match up to its result. `srm_in` / `srm_out` load and keep the
+  battery RAM around the run, as `luna state --srm-in` / `--srm-out`.
+  Also in MCP `record_ticks`.
+
 ### Fixed
 
 - **A run to a frame boundary ends on the frame that completed, whole.** A

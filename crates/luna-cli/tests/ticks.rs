@@ -372,3 +372,123 @@ fn the_schema_needs_no_rom() {
         assert!(v[kind].is_object(), "{kind}");
     }
 }
+
+#[test]
+fn until_ends_the_record_on_another_routine_as_its_last_tick() {
+    let dir = fresh_dir("until");
+    // `tick_end` is the end of each tick; the second one ends the record.
+    let spec = format!(
+        "{BASE}ticks = 10\nuntil = {{ symbol = \"tick_end\", hit = 2 }}\n\
+         [[zone]]\nname = \"halves\"\nat = \"half_a\"\nlength = 2\n"
+    );
+    let (out, lines) = ticks(&dir, &spec, &[]);
+    assert!(out.status.success(), "{}", text(&out));
+    let z: Vec<&str> = lines[1..lines.len() - 1]
+        .iter()
+        .map(|l| l["z"]["halves"].as_str().unwrap())
+        .collect();
+    // Two ticks, then the arrival that ends the run, read before it runs.
+    assert_eq!(z, ["0000", "0101", "0202"]);
+    let end = &lines.last().unwrap()["end"];
+    assert_eq!(
+        (&end["ticks"], &end["reason"]),
+        (&3.into(), &"until".into())
+    );
+    assert_eq!(lines[0]["tick"]["until"]["symbol"], "tick_end");
+    assert_eq!(lines[0]["tick"]["until"]["hit"], 2);
+
+    // An `until` the run never reaches is a shortfall.
+    let spec = format!("{BASE}until_frame = 20\nuntil = {{ symbol = \"tick_end\", hit = 99 }}\n");
+    let (out, lines) = ticks(&dir, &spec, &[]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("was not reached"),
+        "{}",
+        text(&out)
+    );
+    assert_eq!(lines.last().unwrap()["end"]["reason"], "until_frame");
+
+    // Before the start it ends the record with no tick.
+    let spec = format!(
+        "{BASE}start = {{ symbol = \"tick\", hit = 5 }}\n\
+         until = {{ symbol = \"tick_end\" }}\n"
+    );
+    let (out, lines) = ticks(&dir, &spec, &[]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    let end = &lines.last().unwrap()["end"];
+    assert_eq!(
+        (&end["ticks"], &end["reason"]),
+        (&0.into(), &"until".into())
+    );
+}
+
+/// A `LoROM` with 8 KB of battery RAM whose loop counts up in the first
+/// byte of it: the tick is the top of the loop.
+fn counter_rom(dir: &Path) -> PathBuf {
+    let prog = [
+        0xAF, 0x00, 0x00, 0x70, // 8000 LDA $700000    tick:
+        0x1A, // 8004 INC A
+        0x8F, 0x00, 0x00, 0x70, // 8005 STA $700000
+        0x80, 0xF5, // 8009 BRA $8000
+    ];
+    let mut r = vec![0u8; 0x8000];
+    r[..prog.len()].copy_from_slice(&prog);
+    r[0x7FC0..0x7FD5].copy_from_slice(b"LUNA SRAM COUNTER    ");
+    r[0x7FD5] = 0x20;
+    r[0x7FD6] = 0x02; // ROM + RAM + battery
+    r[0x7FD7] = 0x05;
+    r[0x7FD8] = 0x03; // 8 KB
+    r[0x7FFC] = 0x00;
+    r[0x7FFD] = 0x80;
+    let rom = dir.join("counter.sfc");
+    std::fs::write(&rom, &r).unwrap();
+    std::fs::write(dir.join("counter.sym"), "[labels]\n00:8000 tick\n").unwrap();
+    rom
+}
+
+#[test]
+fn srm_in_seeds_the_battery_ram_and_srm_out_keeps_it() {
+    let dir = fresh_dir("srm");
+    let rom = counter_rom(&dir);
+    std::fs::write(dir.join("in.srm"), [5u8; 8192]).unwrap();
+    std::fs::write(
+        dir.join("spec.toml"),
+        "format = 1\ntick = { symbol = \"tick\" }\nticks = 3\n\
+         srm_in = \"in.srm\"\nsrm_out = \"out.srm\"\n\
+         [[zone]]\nname = \"count\"\nat = \"70:0000\"\nlength = 1\n",
+    )
+    .unwrap();
+    let out = Command::new(luna_bin())
+        .arg("ticks")
+        .arg(&rom)
+        .args(["--force-mapper", "lorom", "--spec"])
+        .arg(dir.join("spec.toml"))
+        .output()
+        .expect("run luna");
+    assert!(out.status.success(), "{}", text(&out));
+    let lines: Vec<serde_json::Value> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let z: Vec<&str> = lines[1..4]
+        .iter()
+        .map(|l| l["z"]["count"].as_str().unwrap())
+        .collect();
+    // Read before each loop runs: the seed, then two increments.
+    assert_eq!(z, ["05", "06", "07"]);
+    let saved = std::fs::read(dir.join("out.srm")).unwrap();
+    assert_eq!((saved.len(), saved[0]), (8192, 7));
+
+    // A cartridge with no battery RAM refuses both keys.
+    let (out, _) = ticks(
+        &dir,
+        &format!("{BASE}ticks = 2\nsrm_in = \"in.srm\"\n"),
+        &[],
+    );
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("no battery RAM"),
+        "{}",
+        text(&out)
+    );
+}
