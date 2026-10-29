@@ -76,6 +76,12 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ### Fixed
 
+- **A bare name for a `static` routine is no longer ambiguous with its own
+  local labels.** `--until-pc loadBank` was refused when the `.sym` held
+  `loadBank.sound` and `loadBank.sound@loop`, `loadBank.sound@done`…
+  (WLA-DX writes a routine's local labels as `routine@label`): the labels
+  of a routine that is itself a candidate are not candidates. Two routines
+  of that name stay ambiguous, named.
 - **A run to a frame boundary ends on the frame that completed, whole.** A
   step that runs past the frame wrap — a general DMA spanning the boundary
   runs its whole length in one step, for instance a 64 KB VRAM clear — left

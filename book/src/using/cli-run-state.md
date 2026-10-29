@@ -496,8 +496,10 @@ label: OpenSNES emits `player_x.main` for `static u16 player_x` in
 `main.c`. Where a label is accepted (`--peek`, `--assert`, the keys of a
 `luna test` manifest, the `symbol` argument of the MCP tools), the bare
 name stands for that label when it is the **only** `name.<suffix>` in the
-table. The exact name always wins, and two candidates are refused by name
-rather than picked:
+table. A routine's own local labels (`loadBank.sound@loop` beside
+`loadBank.sound`) do not count as candidates: `loadBank` is the routine. The
+exact name always wins, and two candidates are refused by name rather than
+picked:
 
 ```bash
 # OpenSNES's dsp1_ground: `static … tab_ab` in main.c, `7e:2000 tab_ab.main` in the .sym.
