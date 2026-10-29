@@ -347,6 +347,7 @@ impl SymbolTable {
                     && e.name.len() > prefix.len()
             })
             .collect();
+        let found = Self::without_local_labels(&found);
         match found.as_slice() {
             [] => Err(SymbolError::Unknown(name.to_string())),
             [only] => Ok(only.value),
@@ -355,6 +356,26 @@ impl SymbolTable {
                 candidates: many.iter().map(|e| (e.name.clone(), e.value)).collect(),
             }),
         }
+    }
+
+    /// Drop the local labels of a candidate that is itself in the list:
+    /// WLA-DX writes a routine's own labels as `routine@label`, so a static
+    /// `loadBank` in `sound.c` reaches the `.sym` as `loadBank.sound` and
+    /// `loadBank.sound@loop`, `loadBank.sound@done`… — one routine, not
+    /// several. Two routines (`loadBank.a`, `loadBank.b`) stay ambiguous.
+    fn without_local_labels<'a>(found: &[&'a Entry]) -> Vec<&'a Entry> {
+        let names: Vec<&str> = found.iter().map(|e| e.name.as_str()).collect();
+        found
+            .iter()
+            .copied()
+            .filter(|e| {
+                !names.iter().any(|parent| {
+                    e.name.len() > parent.len()
+                        && e.name.starts_with(parent)
+                        && e.name.as_bytes()[parent.len()] == b'@'
+                })
+            })
+            .collect()
     }
 
     /// The size in bytes the `.sym` records for a CPU label: WLA-DX writes
@@ -370,15 +391,16 @@ impl SymbolTable {
         } else {
             let prefix = format!("{name}.");
             let start = self.name_range_start(&prefix);
-            let mut found = self.by_name[start..]
+            let candidates: Vec<&Entry> = self.by_name[start..]
                 .iter()
                 .map(|&i| &self.entries[i])
                 .take_while(|e| e.name.starts_with(&prefix))
-                .filter(|e| label(e) && e.name.len() > prefix.len());
-            let only = found.next()?;
-            if found.next().is_some() {
+                .filter(|e| label(e) && e.name.len() > prefix.len())
+                .collect();
+            let found = Self::without_local_labels(&candidates);
+            let [only] = found.as_slice() else {
                 return None;
-            }
+            };
             only.name.clone()
         };
         self.find_in_space(&format!("_sizeof_{full}"), SymbolSpace::Cpu)
@@ -552,6 +574,44 @@ version 1
         assert_eq!(t.resolve("main2"), Some(0x00_8000));
         assert_eq!(t.resolve("main"), None);
         assert_eq!(t.resolve_spc("driver_loop"), Some(0x0500));
+    }
+
+    /// A static routine and its own local labels (`routine.file`,
+    /// `routine.file@loop`…) are one routine: the bare name stands for it.
+    /// Two routines of that name, each with local labels, stay ambiguous.
+    #[test]
+    fn a_static_routine_is_not_ambiguous_with_its_local_labels() {
+        let t = SymbolTable::parse(
+            "[labels]\n\
+             00:8000 loadBank.sound\n\
+             00:8010 loadBank.sound@loop\n\
+             00:8020 loadBank.sound@done\n\
+             00:9000 twin.a\n\
+             00:9004 twin.a@x\n\
+             00:9100 twin.b\n\
+             00:9104 twin.b@x\n\
+             00:a000 lonely.a@x\n\
+             00:a004 lonely.a@y\n\
+             [definitions]\n\
+             00000030 _sizeof_loadBank.sound\n",
+        );
+        assert_eq!(t.resolve("loadBank"), Some(0x00_8000));
+        assert_eq!(t.resolve("loadBank.sound"), Some(0x00_8000));
+        assert_eq!(t.resolve("loadBank.sound@loop"), Some(0x00_8010));
+        assert_eq!(t.size_of("loadBank"), Some(0x30));
+        // Two routines, each with a local label: still two.
+        assert_eq!(t.resolve("twin"), None);
+        let err = t.lookup("twin").unwrap_err().to_string();
+        assert!(
+            err.contains("`twin.a`") && err.contains("`twin.b`"),
+            "{err}"
+        );
+        assert!(
+            !err.contains('@'),
+            "the local labels are not candidates: {err}"
+        );
+        // Local labels with no routine label among them: no parent to prefer.
+        assert_eq!(t.resolve("lonely"), None);
     }
 
     /// `OpenSNES` ask of 2026-10-06, with their own fixture's two lines
