@@ -419,6 +419,15 @@ enum Command {
         /// Optional audio dump path (32 kHz stereo WAV).
         #[arg(long)]
         audio_out: Option<PathBuf>,
+        /// Also write each S-DSP voice on its own, `voice0.wav` to
+        /// `voice7.wav` in this folder (created if absent): 32 kHz stereo,
+        /// the voice's output after its envelope and its left / right
+        /// volume, before the main volume, the echo and the `FLG` mute.
+        /// Sample `n` of a file is sample `n` of `--audio-out`, so a note
+        /// can be followed voice by voice. At most sixty seconds. Example:
+        /// `--until-frame 1800 --voice-wav-dir voices/`.
+        #[arg(long = "voice-wav-dir")]
+        voice_wav_dir: Option<PathBuf>,
         /// Scripted joypad-1 input. Format: comma-separated
         /// `frame:hex` checkpoints (frame number in decimal, hex
         /// mask with optional `0x` prefix). The mask is latched at
@@ -1547,6 +1556,7 @@ fn main() -> ExitCode {
             out,
             screenshot,
             audio_out,
+            voice_wav_dir,
             input,
             input2,
             input3,
@@ -1645,6 +1655,7 @@ fn main() -> ExitCode {
                 &out,
                 screenshot.as_deref(),
                 audio_out.as_deref(),
+                voice_wav_dir.as_deref(),
                 input.as_deref(),
                 &[
                     (1, input2.as_deref()),

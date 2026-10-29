@@ -59,6 +59,14 @@ fast-forwarded to (binaries attached by CI). Format inspired by
   find the arrival's frame, one to capture); `until_pc` keeps the frame
   and the line of the arrival.
 
+- **`luna state --voice-wav-dir <DIR>`**: one WAV per S-DSP voice,
+  `voice0.wav` to `voice7.wav`, taken apart from the mix — each voice's
+  output after its envelope and its left / right volume, before the main
+  volume, the echo and the `FLG` mute — and sample for sample aligned with
+  `--audio-out`. For following a piece of music voice by voice instead of
+  on the mix. `Emulator::set_voice_capture` / `take_voice_samples` in
+  luna-api (sixty seconds at most).
+
 ### Fixed
 
 - **A run to a frame boundary ends on the frame that completed, whole.** A

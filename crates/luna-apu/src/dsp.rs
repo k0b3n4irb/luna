@@ -342,6 +342,47 @@ pub struct Dsp {
     /// ticked by the APU bridge while `write_log` is on.
     #[serde(skip)]
     pub trace_cycles: u64,
+    /// Optional per-voice capture: each voice's own output, one stereo
+    /// sample per DSP sample. `None` = off (the voice path pays a single
+    /// `Option` check). See [`VoiceTap`].
+    #[serde(skip)]
+    pub voice_tap: Option<VoiceTap>,
+}
+
+/// Most DSP samples a [`VoiceTap`] keeps: sixty seconds at 32 kHz. Past it
+/// the capture stops growing and says so (`dropped`), instead of eating
+/// the machine.
+pub const VOICE_TAP_CAPACITY: usize = 32_000 * 60;
+
+/// Each voice's own output, as the DSP mixes it: the voice's sample after
+/// its envelope and its `VxVOLL` / `VxVOLR`, before the main volume
+/// (`MVOLL` / `MVOLR`), the echo and the `FLG` mute. Sample `n` of voice
+/// `v` is the `n`-th sample the DSP produced since the capture began, so
+/// it lines up with the mixed output drained from the same point.
+#[derive(Debug, Clone, Default)]
+pub struct VoiceTap {
+    /// What the voices have added to the sample being built.
+    acc: [[i32; 2]; 8],
+    /// One entry per DSP sample: the (left, right) of each voice.
+    pub samples: Vec<[(i16, i16); 8]>,
+    /// Samples refused for want of room ([`VOICE_TAP_CAPACITY`]).
+    pub dropped: u64,
+}
+
+impl VoiceTap {
+    /// The sample is complete: file what the voices added, start over.
+    fn commit(&mut self) {
+        let mut out = [(0i16, 0i16); 8];
+        for (o, a) in out.iter_mut().zip(&self.acc) {
+            *o = (a[0] as i16, a[1] as i16);
+        }
+        self.acc = [[0; 2]; 8];
+        if self.samples.len() < VOICE_TAP_CAPACITY {
+            self.samples.push(out);
+        } else {
+            self.dropped += 1;
+        }
+    }
 }
 
 impl Default for Dsp {
@@ -377,6 +418,7 @@ impl Dsp {
             last_sample: (0, 0),
             write_log: None,
             trace_cycles: 0,
+            voice_tap: None,
         };
         // Trigger gaussian table init so the first sample isn't slow.
         let _ = gaussian_table();
@@ -667,6 +709,9 @@ impl Dsp {
 
     fn voice_output(&mut self, vi: usize, channel: usize) {
         let amp = (i32::from(self.latch.output) * (self.voices[vi].volume[channel] as i32)) >> 7;
+        if let Some(tap) = &mut self.voice_tap {
+            tap.acc[vi][channel] = sclamp16(amp);
+        }
         self.mainvol.output[channel] += amp;
         self.mainvol.output[channel] = sclamp16(self.mainvol.output[channel]);
         if self.voices[vi]._echo {
@@ -915,6 +960,9 @@ impl Dsp {
         let outr = self.echo_output(1);
         self.mainvol.output[0] = 0;
         self.mainvol.output[1] = 0;
+        if let Some(tap) = &mut self.voice_tap {
+            tap.commit();
+        }
         let (outl, outr) = if self.mainvol.mute {
             (0i16, 0i16)
         } else {
@@ -1321,6 +1369,60 @@ mod tests {
         dsp.write(0x07, 0x7F); // GAIN: direct, max
         dsp.write(0x4C, 0x01); // KON voice 0
         (0..64).map(|_| dsp.main(&mut aram)).collect()
+    }
+
+    /// The voice tap files each voice's own output, one entry per DSP
+    /// sample, and the sum of the voices through the main volume is the
+    /// mixed output (echo off): same instants, same values.
+    #[test]
+    fn the_voice_tap_is_the_mix_taken_apart() {
+        let mut dsp = Dsp::new();
+        let mut aram: Box<[u8; 0x10000]> =
+            vec![0u8; 0x10000].into_boxed_slice().try_into().unwrap();
+        aram[0x0200..0x0204].copy_from_slice(&[0x00, 0x03, 0x00, 0x03]);
+        aram[0x0300] = 0xB3;
+        aram[0x0301..0x0309].copy_from_slice(&[0x12, 0x34, 0x56, 0x78, 0x87, 0x65, 0x43, 0x21]);
+        dsp.write(0x6C, 0x20);
+        dsp.write(0x5D, 0x02);
+        dsp.write(0x0C, 0x7F);
+        dsp.write(0x1C, 0x7F);
+        // Voice 3 plays the sample, at different left and right volumes.
+        dsp.write(0x30, 0x60); // V3VOL_L
+        dsp.write(0x31, 0x20); // V3VOL_R
+        dsp.write(0x32, 0x00);
+        dsp.write(0x33, 0x10);
+        dsp.write(0x34, 0x00);
+        dsp.write(0x35, 0x00);
+        dsp.write(0x37, 0x7F);
+        dsp.write(0x4C, 0x08); // KON voice 3
+        dsp.voice_tap = Some(VoiceTap::default());
+        let mix: Vec<(i16, i16)> = (0..64).map(|_| dsp.main(&mut aram)).collect();
+        let tap = dsp.voice_tap.take().unwrap();
+        assert_eq!(tap.samples.len(), 64, "one entry per DSP sample");
+        assert_eq!(tap.dropped, 0);
+        for (n, (voices, (l, r))) in tap.samples.iter().zip(&mix).enumerate() {
+            for (v, &(vl, vr)) in voices.iter().enumerate() {
+                if v != 3 {
+                    assert_eq!((vl, vr), (0, 0), "voice {v} is silent (sample {n})");
+                }
+            }
+            let (vl, vr) = voices[3];
+            assert_eq!(
+                (i32::from(vl) * 0x7F) >> 7,
+                i32::from(*l),
+                "left, sample {n}"
+            );
+            assert_eq!(
+                (i32::from(vr) * 0x7F) >> 7,
+                i32::from(*r),
+                "right, sample {n}"
+            );
+        }
+        assert!(tap.samples.iter().any(|v| v[3].0 != 0), "the voice sounded");
+        assert!(
+            tap.samples.iter().any(|v| v[3].0.abs() > v[3].1.abs() * 2),
+            "left is louder than right, as set"
+        );
     }
 
     /// Full-voice PCM regression golden. The BRR decoder is correctness-tested
