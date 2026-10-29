@@ -349,27 +349,46 @@ pub struct Dsp {
     pub voice_tap: Option<VoiceTap>,
 }
 
-/// Most DSP samples a [`VoiceTap`] keeps: sixty seconds at 32 kHz. Past it
-/// the capture stops growing and says so (`dropped`), instead of eating
-/// the machine.
-pub const VOICE_TAP_CAPACITY: usize = 32_000 * 60;
+/// Seconds a [`VoiceTap`] keeps by default. Past its capacity the capture
+/// stops growing and says so (`dropped`), instead of eating the machine:
+/// each second is 32 000 samples of 32 bytes, about a megabyte.
+pub const VOICE_TAP_DEFAULT_SECONDS: u32 = 60;
 
 /// Each voice's own output, as the DSP mixes it: the voice's sample after
 /// its envelope and its `VxVOLL` / `VxVOLR`, before the main volume
 /// (`MVOLL` / `MVOLR`), the echo and the `FLG` mute. Sample `n` of voice
 /// `v` is the `n`-th sample the DSP produced since the capture began, so
 /// it lines up with the mixed output drained from the same point.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct VoiceTap {
     /// What the voices have added to the sample being built.
     acc: [[i32; 2]; 8],
+    /// Most samples kept.
+    capacity: usize,
     /// One entry per DSP sample: the (left, right) of each voice.
     pub samples: Vec<[(i16, i16); 8]>,
-    /// Samples refused for want of room ([`VOICE_TAP_CAPACITY`]).
+    /// Samples refused for want of room.
     pub dropped: u64,
 }
 
+impl Default for VoiceTap {
+    fn default() -> Self {
+        Self::with_seconds(VOICE_TAP_DEFAULT_SECONDS)
+    }
+}
+
 impl VoiceTap {
+    /// A capture that keeps up to `seconds` of audio (32 kHz).
+    #[must_use]
+    pub const fn with_seconds(seconds: u32) -> Self {
+        Self {
+            acc: [[0; 2]; 8],
+            capacity: 32_000 * seconds as usize,
+            samples: Vec::new(),
+            dropped: 0,
+        }
+    }
+
     /// The sample is complete: file what the voices added, start over.
     fn commit(&mut self) {
         let mut out = [(0i16, 0i16); 8];
@@ -377,7 +396,7 @@ impl VoiceTap {
             *o = (a[0] as i16, a[1] as i16);
         }
         self.acc = [[0; 2]; 8];
-        if self.samples.len() < VOICE_TAP_CAPACITY {
+        if self.samples.len() < self.capacity {
             self.samples.push(out);
         } else {
             self.dropped += 1;
