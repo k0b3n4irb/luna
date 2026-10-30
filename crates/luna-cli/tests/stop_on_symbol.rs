@@ -637,7 +637,10 @@ fn a_value_assert_compares_a_word_when_the_symbol_is_a_word() {
     let dir = fresh_dir("value_width");
     slow_tick_rom(&dir);
     let mut sym = std::fs::read_to_string(dir.join("game.sym")).unwrap();
-    sym.push_str("7e:0010 pair\n7e:0010 lone\n[definitions]\n00000002 _sizeof_pair\n");
+    sym.push_str(
+        "7e:0010 pair\n7e:0010 lone\n7e:0010 quad\n[definitions]\n\
+         00000002 _sizeof_pair\n00000004 _sizeof_quad\n",
+    );
     std::fs::write(dir.join("game.sym"), sym).unwrap();
     let head = "rom = \"game.sfc\"\nforce_mapper = \"lorom\"\nframes = 40\n\
                 [[checkpoint]]\nat_symbol = \"tick_end\"\nhit = 3\n[checkpoint.values]\n";
@@ -667,6 +670,22 @@ fn a_value_assert_compares_a_word_when_the_symbol_is_a_word() {
     // A symbol with no recorded size, and an address, keep the old rule.
     assert!(run("lone.toml", "lone = 3").status.success());
     assert!(run("addr.toml", "\"7E:0010\" = 3").status.success());
+
+    // A bigger symbol (an array or a struct) cannot be compared whole by a
+    // byte or a word: the first byte it is, and the run says so, once.
+    let out = run("quad.toml", "quad = 3");
+    assert!(out.status.success(), "{}", text(&out));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("warning: values.quad: compares the first byte of a 4-byte symbol"),
+        "{stderr}"
+    );
+    let out = run("quad_width.toml", "quad = { eq = 3, width = 1 }");
+    assert!(
+        !String::from_utf8_lossy(&out.stderr).contains("warning"),
+        "{}",
+        text(&out)
+    );
 }
 
 /// A game that logs, at the start of each tick, the pad it sees (the low

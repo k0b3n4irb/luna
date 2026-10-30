@@ -2026,6 +2026,24 @@ fn check_value(
         em.symbol_size(key)
     };
     let width = value_width(cmp.width, fit, size);
+    // No `width` given, and the symbol is bigger than the bytes compared:
+    // the assert looks at the start of an array or a struct, which a test
+    // of a 16-bit field inside it would not mean (it passed while the field
+    // held 277 and the expected value fitted in a byte). Say so, once per
+    // key: `width = 1` (or 2), or a `key+N` for an element, says what is
+    // meant and silences it.
+    if cmp.width.is_none()
+        && let Some(size) = size.filter(|&s| s > u32::from(width) && s > 2)
+        && warned_wide_symbol(key)
+    {
+        eprintln!(
+            "warning: values.{key}: compares the first {} of a {size}-byte symbol \
+             (no `width` given): write `width = {}` to say that is meant, or `{key}+N` \
+             for another element",
+            if width == 1 { "byte" } else { "2 bytes" },
+            width,
+        );
+    }
     let got = read_value(em, key, width)?;
     let label = match size {
         Some(size) if u32::from(width) < size => format!(
@@ -2039,6 +2057,17 @@ fn check_value(
         _ => format!("values.{key}"),
     };
     Ok(eval_cmp(&label, got, &cmp))
+}
+
+/// Whether `key` has not been warned about yet in this process: a manifest
+/// checks the same key at every hit of a checkpoint.
+fn warned_wide_symbol(key: &str) -> bool {
+    use std::collections::HashSet;
+    use std::sync::{Mutex, OnceLock};
+    static SEEN: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    SEEN.get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+        .is_ok_and(|mut seen| seen.insert(key.to_string()))
 }
 
 /// How many bytes a value assert compares: the `width` the manifest

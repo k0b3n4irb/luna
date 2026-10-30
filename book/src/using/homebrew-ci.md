@@ -161,7 +161,10 @@ What each assert means:
   (`_sizeof_<name>`, which WLA-DX writes) is compared as a little-endian
   u16, so `cam_x = 21` fails when the variable holds 277. A symbol with
   no recorded size, an array, an address or a `symbol+N` key compares 1
-  byte if every bound fits, else a u16. A failure on fewer bytes than
+  byte if every bound fits, else a u16 (a symbol the `.sym` sizes at 3
+  bytes or more — an array, a struct — also prints a warning once, since
+  only its start is compared: `width = 1` says that is meant, `key+N`
+  names another element). A failure on fewer bytes than
   the symbol has says so (`values.cam_x (first byte of a 2-byte
   symbol): …`):
 

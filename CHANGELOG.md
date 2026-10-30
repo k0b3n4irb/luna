@@ -77,6 +77,17 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ### Fixed
 
+- **A writes-only memory trace keeps no NMI/IRQ marker.** The markers skip
+  the address filters (they are for placing an access in time), and also
+  skipped `writes_only`, so they counted against `max_events`: 200 ticks
+  of a game gave 11 387 events for about 200 writes. `--trace-writes` and
+  MCP `enable_mem_trace { writes_only }` now keep writes only, as their
+  documentation said.
+- **`[asserts.values]` warns when a bigger symbol is compared by its first
+  byte.** A symbol the `.sym` sizes at 3 bytes or more, given no `width`,
+  is compared on one byte (or two when the bound needs it), which a test
+  of a 16-bit field inside a struct does not mean; luna prints a warning
+  once per key. `width = 1` says it is meant and silences it.
 - **A bare name for a `static` routine is no longer ambiguous with its own
   local labels.** `--until-pc loadBank` was refused when the `.sym` held
   `loadBank.sound` and `loadBank.sound@loop`, `loadBank.sound@done`…
