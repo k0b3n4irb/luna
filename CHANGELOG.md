@@ -77,6 +77,15 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ### Fixed
 
+- **A PC in ROM folds onto its mirror's label, never onto a RAM label.**
+  An SDK that assembles under `.BASE $80` labels its code `80:xxxx`, while
+  the vectors run it through bank `$00`: `luna profile` credited
+  `jml NmiHandler` at `$00:8248` to the highest RAM label of bank `$00`
+  (`oamQueueEntry`, `00:1520`), 28 KB away. The label lookup (`profile`, the
+  traces, the listing, `--vram-writers`) now looks, for an address in ROM, in
+  the banks that mirror it (`$00-$3F` / `$80-$BF` / `$40-$7D` / `$C0-$FF`) as
+  well as its own, and skips RAM labels; with no ROM label before it, the
+  address goes to its 256-byte page row.
 - **A writes-only memory trace keeps no NMI/IRQ marker.** The markers skip
   the address filters (they are for placing an access in time), and also
   skipped `writes_only`, so they counted against `max_events`: 200 ticks

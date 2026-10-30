@@ -642,6 +642,15 @@ Unmapped or WRAM-resident code is listed as it ran (`$7E:xxxx`, `$80:`
 FastROM mirrors and all): fold the mirrors yourself if your listing is in
 `$00:` terms.
 
+**Which label a PC folds onto.** The nearest `--sym` label at or below it,
+in its own bank — and, for a PC in ROM, in the banks that mirror it: an
+SDK that assembles under `.BASE $80` labels its code `80:xxxx`, and the
+reset and interrupt vectors run it through bank `$00`, so `$00:8248` folds
+onto `80:8248 NmiEntry`. A RAM label (`$7E`/`$7F`, or below `$8000` in the
+system banks) never takes a ROM PC; with no ROM label before it, the PC goes
+to the 256-byte page row (`$00:8200 (no symbol)`). The row's `addr` is the
+label's own.
+
 > **Local labels split a routine's row.** An assembler that emits its
 > internal labels (WLA-DX writes `NmiHandler@oam_done`, `@mp5_done`, …)
 > gives each one its own row, because every PC folds onto the *nearest*

@@ -223,3 +223,78 @@ fn profile_budget_gates_on_the_worst_frame() {
     let out = run(&["nmi_handler"], None);
     assert_eq!(out.status.code(), Some(2));
 }
+
+/// An SDK that assembles under `.BASE $80` labels its code `80:xxxx` while
+/// the vectors run it in bank `$00`; a RAM label sits below it in that
+/// bank. The profile folds the PCs onto the mirrored labels, and never
+/// onto the RAM variable (issue: a RAM label credited with ROM code).
+#[test]
+fn profile_folds_a_bank_00_pc_onto_its_mirrored_label_not_a_ram_label() {
+    let dir = std::env::temp_dir().join("luna_profile_mirror");
+    let _ = std::fs::create_dir_all(&dir);
+    let rom = rom_with_sym(&dir);
+    std::fs::write(
+        dir.join("game.sym"),
+        "[labels]\n00:1520 oamQueueEntry\n80:8000 main\n80:8006 wait_vblank\n80:8009 nmi_handler\n",
+    )
+    .unwrap();
+    let json = dir.join("profile.json");
+    let out = Command::new(luna_bin())
+        .arg("profile")
+        .arg(&rom)
+        .args([
+            "--force-mapper",
+            "lorom",
+            "--from-frame",
+            "2",
+            "--until-frame",
+            "6",
+        ])
+        .arg("--out")
+        .arg(&json)
+        .output()
+        .expect("run luna profile");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&json).unwrap()).unwrap();
+    let names: Vec<&str> = v["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["symbol"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["wait_vblank", "nmi_handler"], "{v}");
+
+    // With no ROM label at all, the RAM label still gets no ROM code: the
+    // 256-byte page row says so.
+    std::fs::write(dir.join("game.sym"), "[labels]\n00:1520 oamQueueEntry\n").unwrap();
+    let out = Command::new(luna_bin())
+        .arg("profile")
+        .arg(&rom)
+        .args([
+            "--force-mapper",
+            "lorom",
+            "--from-frame",
+            "2",
+            "--until-frame",
+            "6",
+        ])
+        .arg("--out")
+        .arg(&json)
+        .output()
+        .expect("run luna profile");
+    assert!(out.status.success());
+    let v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&json).unwrap()).unwrap();
+    let names: Vec<&str> = v["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["symbol"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["$00:8000 (no symbol)"], "{v}");
+}

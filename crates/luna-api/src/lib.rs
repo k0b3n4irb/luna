@@ -5815,12 +5815,11 @@ impl Emulator {
     }
 
     /// The row a profiled PC folds onto: the nearest loaded `.sym` label
-    /// at or below it in the same bank (`FastROM` mirror aware), else its
-    /// 256-byte page.
+    /// at or below it in the same bank — and, for a PC in ROM, in the banks
+    /// that mirror it, never a RAM label — else its 256-byte page.
     fn profile_key(syms: Option<&SymbolTable>, pc: u32) -> (String, u32) {
         syms.and_then(|t| {
             t.nearest_label(pc)
-                .or_else(|| t.nearest_label(pc ^ 0x80_0000))
                 .map(|(name, addr)| (name.to_string(), addr))
         })
         .unwrap_or_else(|| {
