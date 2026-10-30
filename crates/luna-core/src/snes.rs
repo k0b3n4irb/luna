@@ -2739,7 +2739,9 @@ impl SnesBus<'_> {
     /// Emit a synthetic NMI/IRQ delivery-timing marker into the memory trace.
     /// Unlike a bus access it bypasses the bank/offset filters — it is a
     /// *when did the line get raised* event, the thing to diff against
-    /// ares/Mesen when checking interrupt timing.
+    /// ares/Mesen when checking interrupt timing. A writes-only trace
+    /// ([`MemTraceFilter::writes_only`]) has no room for it: a marker is not
+    /// a write, and it would count against `max_events`.
     #[inline]
     fn trace_irq_signal(&mut self, kind: MemEventKind, value: u8) {
         let pc = self.cpu_pc_full;
@@ -2749,7 +2751,7 @@ impl SnesBus<'_> {
         let force_blank = self.ppu.inidisp & 0x80 != 0;
         let hclock = self.hclock();
         if let Some(log) = self.mem_trace_log.as_mut() {
-            if log.events.len() >= log.max_events {
+            if log.writes_only || log.events.len() >= log.max_events {
                 return;
             }
             let addr_full = if matches!(kind, MemEventKind::NmiSignal) {

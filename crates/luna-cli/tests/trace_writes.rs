@@ -139,3 +139,74 @@ fn no_render_is_refused_with_an_option_that_reads_the_picture() {
     };
     assert_eq!(json(&with), json(&without));
 }
+
+/// Writes `$80` to `$4200` (NMI on), then spins; the NMI handler is an
+/// `RTI`.
+fn nmi_rom(path: &Path) {
+    let prog = [
+        0x78, // 8000 SEI
+        0xA9, 0x80, 0x8D, 0x00, 0x42, // LDA #$80 : STA $4200
+        0x80, 0xFE, // 8006 BRA $8006
+        0x40, // 8008 RTI  (nmi)
+    ];
+    let mut r = vec![0u8; 0x1_0000];
+    r[..prog.len()].copy_from_slice(&prog);
+    r[0x7FC0..0x7FD5].copy_from_slice(b"LUNA TRACE NMI       ".as_ref());
+    r[0x7FD5] = 0x20;
+    r[0x7FD7] = 0x07;
+    r[0x7FFC] = 0x00;
+    r[0x7FFD] = 0x80;
+    for off in [0x7FEA, 0x7FFA] {
+        r[off] = 0x08;
+        r[off + 1] = 0x80;
+    }
+    std::fs::write(path, &r).expect("write rom");
+}
+
+/// A writes-only trace holds writes and nothing else: the NMI/IRQ delivery
+/// markers, which skip the address filters, are not kept either (they
+/// counted against `max_events` and drowned the writes).
+#[test]
+fn a_writes_only_trace_keeps_no_interrupt_marker() {
+    let dir = std::env::temp_dir().join("luna_trace_writes_nmi");
+    let _ = std::fs::create_dir_all(&dir);
+    let rom_path = dir.join("game.sfc");
+    nmi_rom(&rom_path);
+    let kinds = |extra: &[&str]| -> Vec<String> {
+        let csv = dir.join("t.csv");
+        let _ = std::fs::remove_file(&csv);
+        let out = Command::new(luna_bin())
+            .arg("state")
+            .arg(&rom_path)
+            .args([
+                "--force-mapper",
+                "lorom",
+                "--until-frame",
+                "6",
+                "--out",
+                "/dev/null",
+            ])
+            .arg("--mem-trace")
+            .arg(&csv)
+            .args(extra)
+            .output()
+            .expect("run luna state");
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        std::fs::read_to_string(&csv)
+            .unwrap()
+            .lines()
+            .skip(1)
+            .map(|l| l.split(',').nth(4).unwrap().to_string())
+            .collect()
+    };
+    // Control: with the address filter alone the markers are there.
+    let all = kinds(&["--mem-trace-addr", "4200:4211"]);
+    assert!(all.iter().any(|k| k == "N"), "{all:?}");
+    // Writes only: the write to $4200, and no marker.
+    let writes = kinds(&["--trace-writes", "4200"]);
+    assert_eq!(writes, ["W"], "{writes:?}");
+}
