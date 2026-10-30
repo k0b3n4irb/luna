@@ -1,3 +1,11 @@
+---
+paths:
+  - "book/**"
+  - "docs/**"
+  - ".claude/**"
+  - "*.md"
+---
+
 # Documentation drift — the docs are checked against the tree (auto-loaded)
 
 The guide (`book/src/`), `docs/`, `README.md`, `CONTRIBUTING.md`,

@@ -1,3 +1,11 @@
+---
+paths:
+  - "crates/luna-ppu/**"
+  - "crates/luna-core/src/dma/**"
+  - "crates/luna-core/src/coproc/**"
+  - "crates/luna-bus/src/sa1.rs"
+---
+
 # Coprocessor / DMA / PPU Test Discipline (auto-loaded)
 
 Anything touching these paths has tight cross-coupling and silent

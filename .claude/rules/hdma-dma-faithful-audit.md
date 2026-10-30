@@ -1,3 +1,8 @@
+---
+paths:
+  - "crates/luna-core/src/dma/**"
+---
+
 # HDMA / DMA — faithful port + systematic ares audit (PILLAR, auto-loaded)
 
 IMPORTANT: The DMA/HDMA controller is a **pillar** subsystem — shared by

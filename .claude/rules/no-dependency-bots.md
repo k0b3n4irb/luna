@@ -1,3 +1,9 @@
+---
+paths:
+  - ".github/**"
+  - "**/Cargo.toml"
+---
+
 # No dependency bots — permanently (auto-loaded)
 
 NEVER add, enable, suggest or merge anything from an automated dependency

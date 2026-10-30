@@ -1,3 +1,10 @@
+---
+paths:
+  - "crates/luna-apu/**"
+  - "crates/luna-ppu/**"
+  - "crates/luna-gui/**"
+---
+
 # Audible / visible-rendering fixes — test BEFORE commit (auto-loaded)
 
 For any change that affects something a human can perceive at runtime
