@@ -35,3 +35,10 @@ a long conversation.
   golden and CPU suites, the doc-drift check), whoever wrote the code. An
   agent that does worse than the main session would have is reported, with
   the case, and its tier changes.
+
+## One lot per conversation; the architect defaults to Sonnet (2026-10-30)
+
+- A finished lot ends the conversation: write the resume note, commit, push, and end the turn. Do not chain the next lot in the
+  same conversation (the context re-read on every turn is the first cost).
+- The `architect` agent runs on Sonnet by default. Ask for Opus explicitly (`model: opus` in the Agent call) only after two failed
+  plans or for a genuinely hard call; never to execute.
