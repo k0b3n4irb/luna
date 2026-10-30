@@ -1,3 +1,9 @@
+---
+paths:
+  - ".github/**"
+  - "CHANGELOG.md"
+---
+
 # GitHub housekeeping — five releases, one month of Actions runs (auto-loaded)
 
 The GitHub side of the repository is kept small, as part of the routine:
