@@ -416,36 +416,86 @@ impl SymbolTable {
             .map(|e| e.value as u16)
     }
 
-    /// Nearest CPU label at or below `addr` **within the same bank**,
-    /// rendered as `name` (exact) or `name+0xNN`. The same-bank guard
-    /// keeps a `$00`-bank label from claiming a `$7E` WRAM address.
-    /// Constants never annotate.
+    /// Nearest CPU label at or below `addr`, rendered as `name` (exact) or
+    /// `name+0xNN`: in the same bank (the guard keeps a `$00`-bank label
+    /// from claiming a `$7E` WRAM address) and, for an address in ROM, in
+    /// the banks that mirror it — see [`Self::nearest_entry`]. Constants
+    /// never annotate.
     #[must_use]
     pub fn nearest(&self, addr: u32) -> Option<String> {
-        let addr = addr & 0x00FF_FFFF;
-        let idx = self.cpu_by_addr.partition_point(|&(a, _)| a <= addr);
-        let &(label_addr, name_idx) = self.cpu_by_addr.get(idx.checked_sub(1)?)?;
-        if label_addr >> 16 != addr >> 16 {
-            return None;
-        }
-        Some(Self::annotate(
-            &self.entries[name_idx].name,
-            addr - label_addr,
-        ))
+        let (dist, idx) = self.nearest_entry(addr)?;
+        Some(Self::annotate(&self.entries[idx].name, dist))
     }
 
-    /// The label at or below `addr` in the same bank, as `(name, label
-    /// address)` — the un-annotated form [`Self::nearest`] renders, for
-    /// folding many addresses onto one symbol (issue #227).
+    /// The label [`Self::nearest`] picks, as `(name, label address)` — the
+    /// un-annotated form, for folding many addresses onto one symbol (issue
+    /// #227). The address is the label's own, so a PC reached through
+    /// either mirror of a routine lands on one row.
     #[must_use]
     pub(crate) fn nearest_label(&self, addr: u32) -> Option<(&str, u32)> {
-        let addr = addr & 0x00FF_FFFF;
-        let idx = self.cpu_by_addr.partition_point(|&(a, _)| a <= addr);
-        let &(label_addr, name_idx) = self.cpu_by_addr.get(idx.checked_sub(1)?)?;
-        if label_addr >> 16 != addr >> 16 {
-            return None;
+        let (_, idx) = self.nearest_entry(addr)?;
+        let e = &self.entries[idx];
+        Some((e.name.as_str(), e.value))
+    }
+
+    /// Whether `bank:off` is in ROM: banks `$40-$7D` and `$C0-$FF`, and the
+    /// upper half of the system banks (`$00-$3F`, `$80-$BF`). Below
+    /// `$8000` there, and in `$7E` / `$7F`, an address is RAM or a
+    /// register.
+    const fn is_rom_space(bank: u32, off: u32) -> bool {
+        match bank {
+            0x7E | 0x7F => false,
+            0x00..=0x3F | 0x80..=0xBF => off >= 0x8000,
+            _ => true,
         }
-        Some((self.entries[name_idx].name.as_str(), label_addr))
+    }
+
+    /// The banks that show the same ROM byte at `off` as `bank` does (the
+    /// `LoROM` / `FastROM` / `HiROM` mirrors; `bank` itself first). An SDK that
+    /// assembles under `.BASE $80` labels its code in `$80-$BF` while the
+    /// reset and interrupt vectors enter it through `$00-$3F`.
+    fn rom_mirrors(bank: u32, off: u32) -> impl Iterator<Item = u32> {
+        let low = bank & 0x3F;
+        [bank, low | 0x80, low | 0xC0, low | 0x40, low]
+            .into_iter()
+            .enumerate()
+            .filter(move |&(i, b)| {
+                (i == 0 || b != bank) && (off >= 0x8000 || (0x40..=0x7D).contains(&b) || b >= 0xC0)
+            })
+            .map(|(_, b)| b)
+    }
+
+    /// The label an address folds onto, as `(distance past it, entry)`.
+    /// The nearest at or below it within one bank — never across banks —
+    /// and, for an address in ROM, the nearest over its mirrors (the bank
+    /// itself wins a tie), skipping labels that are not in ROM: a ROM
+    /// address is never credited to a RAM label, it has none.
+    fn nearest_entry(&self, addr: u32) -> Option<(u32, usize)> {
+        let addr = addr & 0x00FF_FFFF;
+        let (bank, off) = (addr >> 16, addr & 0xFFFF);
+        let rom = Self::is_rom_space(bank, off);
+        let banks: Vec<u32> = if rom {
+            Self::rom_mirrors(bank, off).collect()
+        } else {
+            vec![bank]
+        };
+        let mut best: Option<(u32, usize)> = None;
+        for b in banks {
+            let probe = (b << 16) | off;
+            let at = self.cpu_by_addr.partition_point(|&(a, _)| a <= probe);
+            let Some(&(label_addr, idx)) = at.checked_sub(1).and_then(|i| self.cpu_by_addr.get(i))
+            else {
+                continue;
+            };
+            let label_off = label_addr & 0xFFFF;
+            if label_addr >> 16 != b || (rom && !Self::is_rom_space(b, label_off)) {
+                continue;
+            }
+            if best.is_none_or(|(o, _)| label_off > o) {
+                best = Some((label_off, idx));
+            }
+        }
+        best.map(|(label_off, idx)| (off - label_off, idx))
     }
 
     /// Nearest ARAM label at or below `addr`, rendered like
@@ -515,6 +565,40 @@ version 1
         // [definitions] constants resolve to their value (v2, #179)...
         assert_eq!(t.resolve("SOME_CONSTANT"), Some(0x10));
         assert_eq!(t.resolve("nope"), None);
+    }
+
+    /// An SDK that assembles under `.BASE $80` labels its code in `$80-$BF`
+    /// while the vectors enter it through `$00-$3F`: a ROM address folds onto
+    /// the label of its mirror, and never onto a RAM label.
+    #[test]
+    fn a_rom_address_folds_onto_its_mirror_and_never_onto_ram() {
+        let t = SymbolTable::parse(
+            "[labels]\n\
+             00:1520 oamQueueEntry\n\
+             7e:2000 slot_marker\n\
+             80:8000 start\n\
+             80:8248 NmiEntry\n\
+             c0:9000 hirom_fn\n\
+             00:a000 own_bank\n",
+        );
+        // The vector's `jml` runs in bank $00: NmiEntry, not the RAM label.
+        assert_eq!(t.nearest(0x00_8248).as_deref(), Some("NmiEntry"));
+        assert_eq!(t.nearest(0x00_8250).as_deref(), Some("NmiEntry+0x08"));
+        assert_eq!(t.nearest(0x00_8100).as_deref(), Some("start+0x100"));
+        assert_eq!(t.nearest_label(0x00_8248), Some(("NmiEntry", 0x80_8248)));
+        // Either mirror lands on the same row.
+        assert_eq!(t.nearest_label(0x80_8250), Some(("NmiEntry", 0x80_8248)));
+        // HiROM: C0-FF holds the code, the vectors run it through 00-3F.
+        assert_eq!(t.nearest(0x00_9004).as_deref(), Some("hirom_fn+0x04"));
+        // The PC's own bank wins a tie, and its label is nearer here.
+        assert_eq!(t.nearest(0x00_a002).as_deref(), Some("own_bank+0x02"));
+        // Below the first ROM label: the page row, not the RAM label.
+        let only_ram = SymbolTable::parse("[labels]\n00:1520 ram\n7e:2000 wram\n");
+        assert_eq!(only_ram.nearest(0x00_8248), None);
+        assert_eq!(only_ram.nearest(0x7E_2002).as_deref(), Some("wram+0x02"));
+        // RAM keeps its labels: low RAM code and WRAM code.
+        assert_eq!(t.nearest(0x00_1522).as_deref(), Some("oamQueueEntry+0x02"));
+        assert_eq!(t.nearest(0x7E_2004).as_deref(), Some("slot_marker+0x04"));
     }
 
     #[test]
