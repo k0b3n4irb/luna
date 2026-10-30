@@ -586,9 +586,11 @@ The last column names the routine when a `.sym` is loaded (the one beside
 the ROM, or `--sym`); it is empty without one.
 
 The `hdma1` row at line 12 is the overwrite: an HDMA channel enabled
-mid-frame whose table still points at stale data. The CSV also keeps the
-interrupt markers, to place the writes in time — `kind` `N` (NMI, at
-`$4210`) and `I` (IRQ, at `$4211`) — so count writes on `kind` `W`. The same stream is
+mid-frame whose table still points at stale data. A trace without
+`--trace-writes` also keeps the interrupt markers, to place accesses in
+time — `kind` `N` (NMI, at `$4210`) and `I` (IRQ, at `$4211`), which skip
+the address filters; `--trace-writes` keeps writes only, markers
+included in what it drops. The same stream is
 available over MCP (`enable_mem_trace { offsets, writes_only }`), and a
 `run_until_mem_write` / `bp_add mem` watchpoint fires on the DMA / HDMA
 write too.
