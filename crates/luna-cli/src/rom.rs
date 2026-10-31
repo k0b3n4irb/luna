@@ -78,3 +78,26 @@ pub(crate) fn load_rom_into(
     }
     Ok(())
 }
+
+/// True when `sym` is the `<rom>.sym` that `load_rom_into` already loaded, so an
+/// explicit `--sym` naming it must not load (and announce) it a second time.
+pub(crate) fn is_auto_sym(rom: &std::path::Path, sym: &std::path::Path) -> bool {
+    let auto = rom.with_extension("sym");
+    if auto == sym {
+        return true;
+    }
+    matches!((auto.canonicalize(), sym.canonicalize()), (Ok(a), Ok(b)) if a == b)
+}
+
+#[cfg(test)]
+mod auto_sym_tests {
+    use super::is_auto_sym;
+    use std::path::Path;
+
+    #[test]
+    fn the_sibling_sym_is_recognised_other_files_are_not() {
+        let rom = Path::new("build/game.sfc");
+        assert!(is_auto_sym(rom, Path::new("build/game.sym")));
+        assert!(!is_auto_sym(rom, Path::new("build/other.sym")));
+    }
+}
