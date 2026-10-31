@@ -788,7 +788,7 @@ pub(crate) fn run_state(
     }
     // Explicit `--sym` overrides the `<rom>.sym` auto-detection done by
     // `load_rom_into` (issue #67).
-    if let Some(sym_path) = sym {
+    if let Some(sym_path) = sym.filter(|s| !crate::rom::is_auto_sym(rom, s)) {
         match em.load_symbols(sym_path) {
             Ok(n) => eprintln!("loaded {n} symbols from {}", sym_path.display()),
             Err(e) => {

@@ -256,7 +256,7 @@ pub(crate) fn run_profile(rom: &std::path::Path, o: &ProfileOptions<'_>) -> Exit
     if o.no_render {
         em.set_rendering(false).expect("rom just loaded");
     }
-    if let Some(sym) = o.sym {
+    if let Some(sym) = o.sym.filter(|s| !crate::rom::is_auto_sym(rom, s)) {
         match em.load_symbols(sym) {
             Ok(n) => eprintln!("loaded {n} symbols from {}", sym.display()),
             Err(e) => {

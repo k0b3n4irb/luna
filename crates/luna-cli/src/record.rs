@@ -636,7 +636,7 @@ fn record(o: &RecordOptions<'_>) -> Result<(), Fail> {
         o.power_on,
     )
     .map_err(Fail::run)?;
-    if let Some(sym) = o.sym {
+    if let Some(sym) = o.sym.filter(|s| !crate::rom::is_auto_sym(o.rom, s)) {
         let n = em
             .load_symbols(sym)
             .map_err(|e| Fail::run(format!("--sym {}: {e}", sym.display())))?;

@@ -2135,7 +2135,7 @@ fn serve_mcp(
             eprintln!("error: {e}");
             return ExitCode::from(1);
         }
-        if let Some(sym) = sym {
+        if let Some(sym) = sym.filter(|s| !crate::rom::is_auto_sym(rom, s)) {
             match em.load_symbols(sym) {
                 Ok(n) => eprintln!("loaded {n} symbols from {}", sym.display()),
                 Err(e) => {
