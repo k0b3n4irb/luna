@@ -77,6 +77,9 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ### Fixed
 
+- **`luna state`: a `--peek` that cannot be read fails the run.** An unknown
+  symbol or a bad spec used to print `error` (in the JSON, or as a CSV
+  cell with `--peek-at-out`) and still exit 0; the exit is now 1.
 - **A PC in ROM folds onto its mirror's label, never onto a RAM label.**
   An SDK that assembles under `.BASE $80` labels its code `80:xxxx`, while
   the vectors run it through bank `$00`: `luna profile` credited

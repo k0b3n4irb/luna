@@ -1281,6 +1281,14 @@ pub(crate) fn run_state(
             eprintln!("error: {}", p.missed(end_frame));
             step_failed = true;
         }
+        if w.hits
+            .iter()
+            .flat_map(|h| &h.peeks)
+            .any(|p| p.error.is_some())
+        {
+            eprintln!("error: a --peek could not be read at a --peek-at arrival");
+            step_failed = true;
+        }
         if let Some((spec, _)) = &w.peek_at {
             if let Some(path) = peek_at_out {
                 match std::fs::write(path, peek_hits_csv(peek_specs, &w.hits)) {
@@ -1351,6 +1359,11 @@ pub(crate) fn run_state(
     // Each --peek result also lands, machine-readable, in the --out JSON
     // (issue #175) — the stderr hexdump stays for humans.
     let peek_outs = read_peeks(&mut em, peek_specs, true);
+    // A peek that could not be read (unknown symbol, bad spec) fails the run:
+    // the JSON `error` field alone let a harness read a CSV full of `error`.
+    if peek_outs.iter().any(|p| p.error.is_some()) {
+        step_failed = true;
+    }
 
     // --assert / --assert-aram / --assert-vram: native pass/fail (exit 0/1) so
     // headless consumers don't have to parse the peek dump.
