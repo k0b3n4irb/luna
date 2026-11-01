@@ -99,12 +99,31 @@ level and the notes started on each S-DSP voice.
 | `--poke-at <ROUTINE>`, `--poke-hit <N>`, `--poke <NAME=HEX>` | — | Write bytes at an arrival on a routine, as in `state`: record a scene the game only reaches through a menu. A `--poke-at` the run never reaches fails the record (exit `1`). |
 | `--sym <FILE>` | the `.sym` beside the ROM | The names `--poke-at`, `--poke` and `--input-at` resolve. |
 | `--video-kbps <N>` | `500` | Bitrate the picture is held to, which bounds the size of the file. |
+| `--raw <FILE\|->` | off | The bare picture instead of the video: see below. |
+| `--raw-audio <FILE>` | `<BASE>.pcm` | With `--raw`: where the sound goes. |
 | `--sheet-every <N>` | one second | Frames between two pictures of the contact sheets. |
 | `--no-video` | off | Write the timeline and the sheets only; `ffmpeg` is not needed. |
 | `--ffmpeg <PATH>` | `ffmpeg` | The encoder to run. |
 | `--force-mapper <M>` | auto | As in `state`. |
 | `--force-region <R>` | header | As in `state`. |
 | `--power-on <S>` | `zero` | As in `frames`. |
+
+**The bare picture.** `--raw` writes every frame as raw RGB
+(3 bytes a dot), 512 dots wide — the true hi-res frame in Mode 5 and
+pseudo-hires, each dot doubled otherwise — with no strip, no timeline
+and no sheets, to a file or to stdout (`-`), and the sound as 16-bit
+stereo little-endian PCM in a file of its own. `--out` is then optional.
+The size and the rate are said on stderr as one JSON line before the first frame, and the
+sound rate, the frame count and the number of frames whose height had to
+be cropped or padded black to keep the size fixed (overscan switching
+mid-run) in a second line at the end; stdout carries nothing but pictures.
+The sound is whole once luna exits.
+
+```
+luna record game.sfc --count 600 --raw - --raw-audio /tmp/a.pcm 2>/tmp/info.json |
+  ffmpeg -f rawvideo -pixel_format rgb24 -video_size 512x448 -framerate 60.0988 -i - \
+         -c:v libx264 -pix_fmt yuv420p /tmp/picture.mp4
+```
 
 **The size.** Measured on two commercial games, a minute weighs 3 MB
 when the picture is calm and 5 MB in an action scene, sound included.

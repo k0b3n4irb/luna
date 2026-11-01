@@ -253,3 +253,72 @@ fn a_poke_the_run_never_reaches_fails_the_record() {
         "{stderr}"
     );
 }
+
+#[test]
+fn raw_writes_the_bare_picture_and_the_sound_apart() {
+    let dir = fresh_dir("raw");
+    let rom = dir.join("game.sfc");
+    synthetic_rom(&rom);
+    let video = dir.join("frames.rgb");
+    let sound = dir.join("sound.pcm");
+    let out = record(
+        &rom,
+        &[
+            "--raw",
+            video.to_str().unwrap(),
+            "--raw-audio",
+            sound.to_str().unwrap(),
+            "--count",
+            "5",
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    let head = err.lines().next().expect("a header line");
+    assert!(head.contains("\"width\":512"), "{head}");
+    assert!(head.contains("\"pixel_format\":\"rgb24\""), "{head}");
+    let height: usize = head
+        .split("\"height\":")
+        .nth(1)
+        .and_then(|s| s.split([',', '}']).next())
+        .and_then(|s| s.parse().ok())
+        .expect("a height");
+    let bytes = std::fs::metadata(&video).expect("stream written").len() as usize;
+    assert_eq!(
+        bytes,
+        5 * 512 * height * 3,
+        "five whole pictures, nothing else"
+    );
+    assert!(err.contains("\"frames\":5"), "{err}");
+    assert!(std::fs::metadata(&sound).expect("pcm written").len() > 0);
+    // Nothing but the stream and the sound: no strip, timeline or sheets.
+    let others: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(others.len(), 3, "{others:?}");
+}
+
+#[test]
+fn raw_to_stdout_keeps_the_stream_clean() {
+    let dir = fresh_dir("raw-stdout");
+    let rom = dir.join("game.sfc");
+    synthetic_rom(&rom);
+    let out = record(&rom, &["--raw", "-", "--count", "3"]);
+    assert!(out.status.success());
+    assert!(!out.stdout.is_empty() && out.stdout.len().is_multiple_of(512 * 3));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("\"sound_file\":null"));
+}
+
+#[test]
+fn raw_refuses_the_options_of_the_video() {
+    let dir = fresh_dir("raw-conflict");
+    let rom = dir.join("game.sfc");
+    synthetic_rom(&rom);
+    let out = record(&rom, &["--raw", "-", "--no-video"]);
+    assert_eq!(out.status.code(), Some(2));
+}

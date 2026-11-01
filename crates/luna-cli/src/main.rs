@@ -911,8 +911,20 @@ enum Command {
         /// Base path of the files written: `--out /tmp/demo` gives
         /// `/tmp/demo.mp4`, `/tmp/demo.md`, `/tmp/demo-1.png` … (a
         /// trailing `.mp4` is dropped).
-        #[arg(short = 'o', long)]
-        out: PathBuf,
+        #[arg(short = 'o', long, required_unless_present = "raw")]
+        out: Option<PathBuf>,
+        /// Write the bare picture instead of the video: every frame as
+        /// raw RGB (3 bytes a dot), 512 dots wide, rows as the screen
+        /// draws them, to this file or to stdout (`-`). No strip, no
+        /// timeline, no sheets, no `ffmpeg`. The size and the rate are
+        /// said on stderr as one JSON line before the first frame, the
+        /// sound rate in a second one at the end.
+        #[arg(long, value_name = "FILE|-", conflicts_with_all = ["no_video", "sheet_every"])]
+        raw: Option<PathBuf>,
+        /// With `--raw`: where the sound goes, 16-bit stereo little-endian
+        /// PCM (default: `<OUT>.pcm` when `--out` is given, else none).
+        #[arg(long = "raw-audio", requires = "raw")]
+        raw_audio: Option<PathBuf>,
         /// First PPU frame recorded, frame-indexed like
         /// `state --until-frame`.
         #[arg(long = "from-frame", default_value_t = 1)]
@@ -1771,6 +1783,8 @@ fn main() -> ExitCode {
         Command::Record {
             rom,
             out,
+            raw,
+            raw_audio,
             from_frame,
             count,
             sheet_every,
@@ -1789,7 +1803,9 @@ fn main() -> ExitCode {
             sym,
         } => record::run_record(&record::RecordOptions {
             rom: &rom,
-            out: &out,
+            out: out.as_deref(),
+            raw: raw.as_deref(),
+            raw_audio: raw_audio.as_deref(),
             from_frame,
             count,
             sheet_every,

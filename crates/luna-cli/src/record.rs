@@ -35,7 +35,10 @@ pub(crate) const DEFAULT_VIDEO_KBPS: u32 = 500;
 /// What `luna record` was asked for.
 pub(crate) struct RecordOptions<'a> {
     pub rom: &'a Path,
-    pub out: &'a Path,
+    pub out: Option<&'a Path>,
+    /// `--raw`: the bare picture to this file, or to stdout for `-`.
+    pub raw: Option<&'a Path>,
+    pub raw_audio: Option<&'a Path>,
     pub from_frame: u64,
     pub count: u64,
     pub sheet_every: Option<u64>,
@@ -537,6 +540,33 @@ struct Capture<'a> {
     shots: Vec<Shot>,
     audio: Vec<(i16, i16)>,
     seconds: Vec<Second>,
+    raw: Option<Raw>,
+}
+
+/// The bare picture stream of `--raw`: a fixed size for the whole run, so
+/// a reader can be told it once.
+struct Raw {
+    sink: Box<dyn std::io::Write>,
+    w: usize,
+    h: usize,
+    /// Frames whose picture was not this height (cropped or padded black).
+    resized: u64,
+}
+
+impl Raw {
+    fn frame(&mut self, native: &[u8]) -> Result<(), Fail> {
+        let row = self.w * 3;
+        let rows = native.len() / row;
+        if rows != self.h {
+            self.resized += 1;
+        }
+        let keep = rows.min(self.h);
+        let mut out = native[..keep * row].to_vec();
+        out.resize(self.h * row, 0);
+        self.sink
+            .write_all(&out)
+            .map_err(|e| Fail::run(format!("the reader stopped taking the frames: {e}")))
+    }
 }
 
 impl Capture<'_> {
@@ -556,6 +586,10 @@ impl Capture<'_> {
         let time = i as f64 / self.fps;
         let stamp = format!("F{:06} T{time:07.2}", shot.frame);
 
+        if let Some(raw) = self.raw.as_mut() {
+            let native = em.render_frame_rgb_native().map_err(Fail::run)?;
+            raw.frame(&native)?;
+        }
         if let Some(encoder) = self.encoder.as_mut() {
             let native = em.render_frame_rgb_native().map_err(Fail::run)?;
             let picture = self.canvas.h - STRIP_H;
@@ -573,7 +607,7 @@ impl Capture<'_> {
             self.canvas.text(4, picture + 2, 3, &strip);
             encoder.frame(&self.canvas.rgb)?;
         }
-        if i.is_multiple_of(self.sheets.every) {
+        if self.raw.is_none() && i.is_multiple_of(self.sheets.every) {
             let rgba = em.render_frame_rgba(false).map_err(Fail::run)?;
             let rgb: Vec<u8> = rgba
                 .chunks_exact(4)
@@ -614,13 +648,13 @@ fn record(o: &RecordOptions<'_>) -> Result<(), Fail> {
     if o.sheet_every == Some(0) {
         return Err(Fail(2, "--sheet-every must be at least 1".into()));
     }
-    let base = if o.out.extension().is_some_and(|e| e == "mp4") {
-        o.out.with_extension("")
-    } else {
-        o.out.to_path_buf()
+    let base = match o.out {
+        Some(out) if out.extension().is_some_and(|e| e == "mp4") => out.with_extension(""),
+        Some(out) => out.to_path_buf(),
+        None => PathBuf::new(),
     };
     // Know the encoder before the run, not after it.
-    let codec = if o.no_video {
+    let codec = if o.no_video || o.raw.is_some() {
         None
     } else {
         Some(h264_args(o.ffmpeg, o.video_kbps)?)
@@ -642,7 +676,7 @@ fn record(o: &RecordOptions<'_>) -> Result<(), Fail> {
             .map_err(|e| Fail::run(format!("--sym {}: {e}", sym.display())))?;
         eprintln!("loaded {n} symbols from {}", sym.display());
     }
-    if codec.is_some() {
+    if codec.is_some() || o.raw.is_some() {
         em.set_native_capture(true).map_err(Fail::run)?;
     }
     let extra_pads = [(1u8, o.input2)];
@@ -712,7 +746,31 @@ fn record(o: &RecordOptions<'_>) -> Result<(), Fail> {
         )?),
         None => None,
     };
+    let raw = match o.raw {
+        Some(path) => {
+            let sink: Box<dyn std::io::Write> = if path == Path::new("-") {
+                Box::new(std::io::BufWriter::new(std::io::stdout().lock()))
+            } else {
+                let file = std::fs::File::create(path)
+                    .map_err(|e| Fail::run(format!("creating {}: {e}", path.display())))?;
+                Box::new(std::io::BufWriter::new(file))
+            };
+            let (w, h) = (VIDEO_W, tile_h * 2);
+            eprintln!(
+                "{{\"width\":{w},\"height\":{h},\"pixel_format\":\"rgb24\",\"fps\":{fps},\"standard\":\"{}\"}}",
+                if fps < 55.0 { "PAL" } else { "NTSC" }
+            );
+            Some(Raw {
+                sink,
+                w,
+                h,
+                resized: 0,
+            })
+        }
+        None => None,
+    };
     let mut capture = Capture {
+        raw,
         fps,
         canvas,
         encoder,
@@ -742,6 +800,7 @@ fn record(o: &RecordOptions<'_>) -> Result<(), Fail> {
         return Err(e);
     }
     let Capture {
+        raw: finished_raw,
         canvas: frame_canvas,
         mut encoder,
         mut sheets,
@@ -756,7 +815,9 @@ fn record(o: &RecordOptions<'_>) -> Result<(), Fail> {
             shots.len()
         );
     }
-    sheets.flush()?;
+    if finished_raw.is_none() {
+        sheets.flush()?;
+    }
     let Some(last) = shots.last() else {
         return Err(Fail::run("no frame was recorded"));
     };
@@ -766,6 +827,36 @@ fn record(o: &RecordOptions<'_>) -> Result<(), Fail> {
     // played at the rate that makes them last as long as its pictures.
     let picture_s = shots.len() as f64 / fps;
     let sound_hz = (audio.len() as f64 / picture_s).round() as u32;
+    if let Some(mut raw) = finished_raw {
+        raw.sink
+            .flush()
+            .map_err(|e| Fail::run(format!("the reader stopped taking the frames: {e}")))?;
+        drop(raw.sink);
+        let pcm = o
+            .raw_audio
+            .map(Path::to_path_buf)
+            .or_else(|| o.out.map(|_| beside(&base, ".pcm")));
+        if let Some(path) = &pcm {
+            let bytes: Vec<u8> = audio
+                .iter()
+                .flat_map(|&(l, r)| [l.to_le_bytes(), r.to_le_bytes()])
+                .flatten()
+                .collect();
+            std::fs::write(path, bytes)
+                .map_err(|e| Fail::run(format!("writing {}: {e}", path.display())))?;
+        }
+        eprintln!(
+            "{{\"frames\":{},\"first_frame\":{first_frame},\"resized\":{},\"sound_hz\":{sound_hz},\"sound_format\":\"s16le\",\"sound_channels\":2,\"sound_file\":{}}}",
+            shots.len(),
+            raw.resized,
+            pcm.as_ref()
+                .map_or_else(|| "null".to_owned(), |p| format!("\"{}\"", p.display()))
+        );
+        return match pokes.iter().find(|p| !p.applied) {
+            Some(p) => Err(Fail::run(p.missed(last.frame))),
+            None => Ok(()),
+        };
+    }
     let mut written = Vec::new();
     if let Some(encoder) = encoder.take() {
         encoder.finish()?;

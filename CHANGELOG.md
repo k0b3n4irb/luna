@@ -7,6 +7,11 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ## [Unreleased]
 
+- `luna record --raw <FILE|->` writes the bare picture — raw RGB, 512 dots
+  wide, no strip, timeline or sheets — to a file or to stdout, with the sound
+  as PCM in a file of its own (`--raw-audio`) and the size, rate and sound
+  rate said as JSON on stderr, for any program that reads raw video.
+
 ## [1.42.0] — 2026-11-01
 
 Mesen2's trace logger arrives for the 65C816, and `luna ticks` records
