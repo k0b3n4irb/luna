@@ -76,6 +76,7 @@ pub mod paths;
 mod power_on;
 pub mod symbols;
 pub mod ticks;
+pub mod ticks_compare;
 pub mod trace_logger;
 pub mod video;
 mod vocab;
@@ -101,6 +102,10 @@ pub use ticks::{
     TICK_RECORD_VERSION, TickInput, TickInputTable, TickOutcome, TickPoint, TickPoke, TickPokeOn,
     TickRecordOptions, TickShots, TickSpec, TickStart, TickZone, check_tick_condition,
     tick_record_schema,
+};
+pub use ticks_compare::{
+    CompareEnd, CompareOptions, CompareSide, FirstDivergence, TickComparison, UnpairedTick,
+    ZoneDiff, compare_tick_records,
 };
 pub use vocab::{
     dsp_register_index, dsp_register_name, dsp_register_table, force_mapper_names, parse_region,

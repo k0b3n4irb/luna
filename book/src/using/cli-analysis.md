@@ -876,6 +876,49 @@ has:
   may ignore can be added without it. `luna ticks --schema` prints the
   schema of each kind of line.
 
+### Comparing two records — `--compare`
+
+```
+luna ticks --compare <A> <B> [--csv <FILE|->] [--zone NAME]...
+```
+
+Two records of the same game (two builds, or a port and the program it
+reproduces) say where they part ways: the **first tick** where a zone's
+bytes differ, with the zone, the byte offset inside it and both byte
+values. No ROM and no spec: the records may come from luna or from any
+program that writes the format. Ticks are paired by `t`, never by frame or
+cycles, and `frame`, `cycles` and `beam` are never compared.
+
+```
+$ luna ticks --compare original.jsonl port.jsonl --csv diff.csv
+first divergence at tick 3, zone `halves`, byte 0: A=02 B=ff (3 of 5 tick(s) differ)
+$ echo $?
+1
+$ cat diff.csv
+t,zone,first_offset,a,b,differing_bytes
+3,halves,0,02,ff,1
+4,halves,0,03,00,1
+5,halves,0,04,01,1
+```
+
+- Both headers must name the same zones, of the same lengths (the `at`
+  may differ: it is where each machine keeps them). Otherwise the
+  comparison is refused; `--zone NAME` (repeatable) restricts it to zones
+  both records have.
+- The bytes are compared as stored, in memory order. Records of different
+  `endian` differ wherever a word does; the summary does not decode them.
+- A record shorter than the other diverges by `length` at the first tick
+  it lacks, and the summary gives both end lines' reasons. A record without
+  its end line is compared as far as it goes and reported as cut short.
+- `--csv` has one row per differing zone per tick, all of them, the first
+  row being the first divergence, so a spreadsheet can plot where the two
+  runs drift. `a` and `b` are the bytes at `first_offset`. When one record
+  is shorter, a last row (zone `-`, `present` / `absent`) marks the first
+  missing tick.
+- Exit 0: identical. Exit 1: they diverge. Exit 2: they cannot be compared
+  (unreadable, not a version-1 `tick-record`, different zones, a tick line
+  out of order).
+
 ## `luna bench` — whole-corpus compatibility report
 
 ```

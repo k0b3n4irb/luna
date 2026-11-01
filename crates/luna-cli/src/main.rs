@@ -1295,15 +1295,39 @@ enum Command {
     /// bytes in memory order; the header gives the byte order. Exit 0 =
     /// the record is complete, 1 = the run fell short of it (the end line
     /// says why), 2 = the spec was refused and nothing ran.
+    ///
+    /// `--compare A B` compares two records instead (no ROM, no spec) and
+    /// reports the first tick where a zone differs: exit 0 = identical,
+    /// 1 = they diverge, 2 = they cannot be compared.
     Ticks {
         /// Path to the .sfc / .smc ROM file.
-        #[arg(required_unless_present = "schema")]
+        #[arg(required_unless_present_any = ["schema", "compare"])]
         rom: Option<PathBuf>,
         /// The spec (TOML): the tick routine, the zones, and optionally a
         /// start point, a limit, an input script, pokes and pictures. See
         /// the guide for every key.
-        #[arg(long, required_unless_present = "schema")]
+        #[arg(long, required_unless_present_any = ["schema", "compare"])]
         spec: Option<PathBuf>,
+        /// Compare two records (JSONL files, `-` for one of them on stdin)
+        /// and report the first tick where a zone differs. Pairs ticks by
+        /// `t`; the clock fields are never compared. Exit 0 = identical,
+        /// 1 = they diverge, 2 = they cannot be compared.
+        #[arg(
+            long,
+            num_args = 2,
+            value_names = ["A", "B"],
+            conflicts_with_all = ["rom", "spec", "out", "shots_dir", "schema", "sym", "force_mapper", "force_region", "power_on"]
+        )]
+        compare: Option<Vec<PathBuf>>,
+        /// With `--compare`: write every differing zone of every tick as CSV
+        /// (`t,zone,first_offset,a,b,differing_bytes`) to this file, `-` for
+        /// stdout.
+        #[arg(long, requires = "compare")]
+        csv: Option<PathBuf>,
+        /// With `--compare`: compare only this zone (repeatable). Without
+        /// it, both records must name the same zones.
+        #[arg(long = "zone", requires = "compare")]
+        zone: Vec<String>,
         /// Where the record goes; `-` is stdout.
         #[arg(long, default_value = "-")]
         out: PathBuf,
@@ -2020,6 +2044,9 @@ fn main() -> ExitCode {
         Command::Ticks {
             rom,
             spec,
+            compare,
+            csv,
+            zone,
             out,
             shots_dir,
             schema,
@@ -2031,6 +2058,9 @@ fn main() -> ExitCode {
             if schema {
                 println!("{}", ticks::schema_json());
                 return ExitCode::SUCCESS;
+            }
+            if let Some([a, b]) = compare.as_deref() {
+                return ticks::run_compare(a, b, csv.as_deref(), &zone);
             }
             let (Some(rom), Some(spec)) = (rom, spec) else {
                 eprintln!("error: <ROM> and --spec are required unless --schema is given");

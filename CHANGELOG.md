@@ -7,6 +7,14 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ## [Unreleased]
 
+- `luna ticks --compare A B` compares two `tick-record` files and reports the
+  first tick where a zone differs (zone, byte offset, both bytes), with the
+  ticks compared and diverging; ticks are paired by `t`, never by the clock.
+  `--csv` lists every differing zone of every tick, `--zone` restricts the
+  comparison, a shorter or cut-short record is reported, and the exit code
+  is 0 identical, 1 diverging, 2 not comparable. The MCP tool
+  `compare_ticks` is the same comparison; `luna-api` has
+  `compare_tick_records`.
 - `luna record --raw <FILE|->` writes the bare picture — raw RGB, 512 dots
   wide, no strip, timeline or sheets — to a file or to stdout, with the sound
   as PCM in a file of its own (`--raw-audio`) and the size, rate and sound

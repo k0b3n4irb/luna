@@ -109,3 +109,58 @@ impl Write for Deferred<'_> {
         self.file.as_mut().map_or(Ok(()), Write::flush)
     }
 }
+
+/// `luna ticks --compare A B`: exit 0 when the records are identical, 1
+/// when they diverge, 2 when they cannot be compared.
+pub(crate) fn run_compare(a: &Path, b: &Path, csv: Option<&Path>, zones: &[String]) -> ExitCode {
+    match compare(a, b, csv, zones) {
+        Ok(c) => {
+            eprintln!("{}", c.summary());
+            if c.identical {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(1)
+            }
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn open(path: &Path) -> Result<Box<dyn std::io::BufRead>, String> {
+    if path == Path::new("-") {
+        return Ok(Box::new(std::io::BufReader::new(std::io::stdin())));
+    }
+    let f = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(Box::new(std::io::BufReader::new(f)))
+}
+
+fn compare(
+    a: &Path,
+    b: &Path,
+    csv: Option<&Path>,
+    zones: &[String],
+) -> Result<luna_api::TickComparison, String> {
+    let c = luna_api::compare_tick_records(
+        open(a)?,
+        open(b)?,
+        &luna_api::CompareOptions {
+            zones: zones.to_vec(),
+        },
+    )?;
+    if let Some(path) = csv {
+        let mut out: Box<dyn Write> = if path == Path::new("-") {
+            Box::new(std::io::stdout())
+        } else {
+            Box::new(std::io::BufWriter::new(
+                std::fs::File::create(path).map_err(|e| format!("{}: {e}", path.display()))?,
+            ))
+        };
+        c.write_csv(&mut out)
+            .and_then(|()| out.flush())
+            .map_err(|e| format!("writing the CSV: {e}"))?;
+    }
+    Ok(c)
+}

@@ -492,3 +492,98 @@ fn srm_in_seeds_the_battery_ram_and_srm_out_keeps_it() {
         text(&out)
     );
 }
+
+/// Two records of the slow-tick game, the second with one injected fault.
+fn two_records(dir: &Path) -> (PathBuf, PathBuf) {
+    let zone = "[[zone]]\nname = \"halves\"\nat = \"half_a\"\nlength = 2\n";
+    let record = |name: &str, extra: &str| {
+        let spec = format!("{BASE}ticks = 5\n{extra}{zone}");
+        let (out, _) = ticks(dir, &spec, &[]);
+        assert!(out.status.success(), "{}", text(&out));
+        let to = dir.join(name);
+        std::fs::rename(dir.join("record.jsonl"), &to).unwrap();
+        to
+    };
+    let a = record("a.jsonl", "");
+    let b = record(
+        "b.jsonl",
+        "[[poke]]\ntick = 3\nat = \"half_a\"\nbytes = \"ff\"\n",
+    );
+    (a, b)
+}
+
+fn compare(dir: &Path, args: &[&str]) -> Output {
+    Command::new(luna_bin())
+        .current_dir(dir)
+        .args(["ticks", "--compare"])
+        .args(args)
+        .output()
+        .expect("run luna")
+}
+
+#[test]
+fn compare_locates_the_first_divergence_and_writes_the_csv() {
+    let dir = fresh_dir("compare");
+    let (a, b) = two_records(&dir);
+    let (sa, sb) = (a.to_str().unwrap(), b.to_str().unwrap());
+
+    // The same record twice: identical, exit 0.
+    let out = compare(&dir, &[sa, sa]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).starts_with("identical: 5 tick(s)"),
+        "{}",
+        text(&out)
+    );
+
+    // One injected fault: exit 1, located at tick 3, byte 0 of the zone.
+    let csv = dir.join("diff.csv");
+    let out = compare(&dir, &[sa, sb, "--csv", csv.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stderr)
+            .contains("first divergence at tick 3, zone `halves`, byte 0: A=02 B=ff"),
+        "{}",
+        text(&out)
+    );
+    let rows = std::fs::read_to_string(&csv).unwrap();
+    let mut rows = rows.lines();
+    assert_eq!(rows.next(), Some("t,zone,first_offset,a,b,differing_bytes"));
+    assert!(rows.next().unwrap().starts_with("3,halves,0,02,ff,"));
+
+    // `--csv -` writes the rows to stdout.
+    let out = compare(&dir, &[sa, sb, "--csv", "-"]);
+    assert!(
+        String::from_utf8_lossy(&out.stdout).starts_with("t,zone,first_offset,a,b,"),
+        "{}",
+        text(&out)
+    );
+
+    // An unknown zone, or a file that is no record: exit 2.
+    let out = compare(&dir, &[sa, sb, "--zone", "nope"]);
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("not in both"));
+    let junk = dir.join("junk.jsonl");
+    std::fs::write(&junk, "hello\n").unwrap();
+    let out = compare(&dir, &[sa, junk.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out));
+    let out = compare(&dir, &[sa, "missing.jsonl"]);
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out));
+}
+
+#[test]
+fn compare_excludes_a_rom_and_a_spec() {
+    let dir = fresh_dir("compare_flags");
+    let out = Command::new(luna_bin())
+        .current_dir(&dir)
+        .args(["ticks", "--compare", "a", "b", "--spec", "s.toml"])
+        .output()
+        .expect("run luna");
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out));
+    let out = Command::new(luna_bin())
+        .current_dir(&dir)
+        .args(["ticks", "--zone", "x"])
+        .output()
+        .expect("run luna");
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out));
+}

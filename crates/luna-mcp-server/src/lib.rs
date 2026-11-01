@@ -1961,6 +1961,23 @@ pub struct RecordTicksResult {
     pub record: Option<String>,
 }
 
+/// `compare_ticks` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct CompareTicksParams {
+    /// The first `tick-record` file (JSONL).
+    pub a: String,
+    /// The second `tick-record` file.
+    pub b: String,
+    /// Compare only these zones (each in both records). Without it, both
+    /// records must name the same zones.
+    #[serde(default)]
+    pub zones: Vec<String>,
+    /// Also write every differing zone of every tick as CSV
+    /// (`t,zone,first_offset,a,b,differing_bytes`) to this file.
+    #[serde(default)]
+    pub csv_out: Option<String>,
+}
+
 /// The trace logger's CPU named `name`.
 fn trace_cpu(name: Option<&str>) -> Result<luna_api::TraceCpu, ErrorData> {
     match name.unwrap_or("snes") {
@@ -3408,6 +3425,45 @@ impl LunaServer {
             outcome,
             record,
         }))
+    }
+
+    #[rmcp::tool(
+        description = "Compare two `tick-record` files (as `luna ticks --compare`) and report the \
+                                first tick where a zone differs: its tick, zone, byte offset and both \
+                                bytes, with the number of ticks compared and diverging. Ticks are \
+                                paired by `t`; frame, cycles and beam are never compared. A record \
+                                that is shorter diverges by `length`; one without its end line is \
+                                flagged `truncated`. Records naming different zones are refused \
+                                unless `zones` restricts the comparison. Needs no ROM."
+    )]
+    async fn compare_ticks(
+        &self,
+        Parameters(params): Parameters<CompareTicksParams>,
+    ) -> Result<rmcp::Json<luna_api::TickComparison>, ErrorData> {
+        let open = |path: &str| {
+            std::fs::File::open(path)
+                .map(std::io::BufReader::new)
+                .map_err(|e| ErrorData::invalid_params(format!("{path}: {e}"), None))
+        };
+        let comparison = luna_api::compare_tick_records(
+            open(&params.a)?,
+            open(&params.b)?,
+            &luna_api::CompareOptions {
+                zones: params.zones,
+            },
+        )
+        .map_err(|e| ErrorData::invalid_params(e, None))?;
+        if let Some(path) = &params.csv_out {
+            let mut file = std::io::BufWriter::new(
+                std::fs::File::create(path)
+                    .map_err(|e| ErrorData::invalid_params(format!("{path}: {e}"), None))?,
+            );
+            comparison
+                .write_csv(&mut file)
+                .and_then(|()| std::io::Write::flush(&mut file))
+                .map_err(|e| ErrorData::invalid_params(format!("{path}: {e}"), None))?;
+        }
+        Ok(rmcp::Json(comparison))
     }
 
     #[rmcp::tool(

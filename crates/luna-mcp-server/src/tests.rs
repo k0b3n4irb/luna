@@ -2254,3 +2254,55 @@ async fn server_record_ticks_returns_the_record() {
     assert!(err.message.contains("I/O registers"), "{err:?}");
     let _ = std::fs::remove_file(&path);
 }
+
+/// `compare_ticks` locates the first divergence of two records and writes
+/// the CSV.
+#[tokio::test]
+async fn server_compare_ticks_locates_the_divergence() {
+    let dir = std::env::temp_dir().join("luna_mcp_compare_ticks");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let rec = |second: &str| {
+        format!(
+            "{{\"format\":\"tick-record\",\"version\":1,\"endian\":\"little\",\"zones\":[{{\"name\":\"pos\",\"at\":\"x\",\"length\":2}}]}}\n\
+             {{\"t\":1,\"z\":{{\"pos\":\"0000\"}}}}\n{{\"t\":2,\"z\":{{\"pos\":\"{second}\"}}}}\n\
+             {{\"end\":{{\"ticks\":2,\"reason\":\"limit\"}}}}\n"
+        )
+    };
+    let (a, b, csv) = (dir.join("a.jsonl"), dir.join("b.jsonl"), dir.join("d.csv"));
+    std::fs::write(&a, rec("0100")).unwrap();
+    std::fs::write(&b, rec("01ff")).unwrap();
+    let s = LunaServer::new();
+    let r = s
+        .compare_ticks(Parameters(CompareTicksParams {
+            a: a.to_string_lossy().into_owned(),
+            b: b.to_string_lossy().into_owned(),
+            zones: vec![],
+            csv_out: Some(csv.to_string_lossy().into_owned()),
+        }))
+        .await
+        .unwrap()
+        .0;
+    assert!(!r.identical);
+    let Some(luna_api::FirstDivergence::Bytes(d)) = &r.first else {
+        panic!("{r:?}");
+    };
+    assert_eq!((d.t, d.zone.as_str(), d.offset), (2, "pos", 1));
+    assert_eq!(
+        std::fs::read_to_string(&csv).unwrap(),
+        "t,zone,first_offset,a,b,differing_bytes\n2,pos,1,00,ff,1\n"
+    );
+    let Err(err) = s
+        .compare_ticks(Parameters(CompareTicksParams {
+            a: a.to_string_lossy().into_owned(),
+            b: b.to_string_lossy().into_owned(),
+            zones: vec!["nope".into()],
+            csv_out: None,
+        }))
+        .await
+    else {
+        panic!("an unknown zone was accepted");
+    };
+    assert!(err.message.contains("not in both"), "{err:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

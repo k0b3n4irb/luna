@@ -144,6 +144,7 @@ means that transport has no form of it.
 | the first frame where luna and a reference disagree | `luna wram-trace` | `wram_page_hashes`, `wram_snapshot` | [`luna wram-trace`](using/cli-analysis.md#luna-wram-trace--cross-emulator-state-differential) |
 | the method behind that comparison | — | — | [The differential harness](method/differential.md) |
 | the game's state at every tick, to compare with another run | `luna ticks --spec record.toml` | `record_ticks` | [`luna ticks`](using/cli-analysis.md#luna-ticks--a-record-per-game-tick) |
+| find the first tick where two records of a game differ | `luna ticks --compare a.jsonl b.jsonl --csv diff.csv` | `compare_ticks` | [Comparing two records](using/cli-analysis.md#comparing-two-records----compare) |
 | a report over a folder of ROMs | `luna bench` | — | [`luna bench`](using/cli-analysis.md#luna-bench--whole-corpus-compatibility-report) |
 | know which outputs are stable across runs | — | — | [Determinism guarantees](method/determinism.md#the-table) |
 
