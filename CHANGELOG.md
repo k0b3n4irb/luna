@@ -7,6 +7,23 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ## [Unreleased]
 
+## [1.42.0] — 2026-11-01
+
+Mesen2's trace logger arrives for the 65C816, and `luna ticks` records
+the state of a game at every tick, in a format two emulators can share.
+A few CLI traps are closed.
+
+**Upgrading from 1.41.0:**
+
+- **Save states stay at version 9:** a state saved by 1.41.0 loads.
+- **`luna state` exits 1 when a `--peek` cannot be read** (an unknown
+  symbol, a bad spec), where it exited 0 with `error` in the JSON. The
+  JSON is still written; a script that tolerated the old exit code
+  should read the `error` field instead, or expect the 1.
+- **The 65C816 disassembly is written as Mesen2 writes it** (see
+  *Changed* below): a script that compares disassembly text may need
+  its expectations updated.
+
 ### Added
 
 - **Mesen2's trace logger, for the 65C816** (Mesen2 parity roadmap D4a).
