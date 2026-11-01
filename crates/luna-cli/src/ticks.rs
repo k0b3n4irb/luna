@@ -15,6 +15,7 @@ pub(crate) struct TicksOptions<'a> {
     pub spec: &'a Path,
     pub out: &'a Path,
     pub shots_dir: Option<&'a Path>,
+    pub audio_out: Option<&'a Path>,
     pub sym: Option<&'a Path>,
     pub force_mapper: Option<&'a str>,
     pub force_region: Option<&'a str>,
@@ -77,6 +78,7 @@ fn record(rom: &Path, o: &TicksOptions<'_>) -> Result<luna_api::TickOutcome, Str
     let options = luna_api::TickRecordOptions {
         base_dir: o.spec.parent().unwrap_or_else(|| Path::new(".")),
         shots_dir,
+        audio_out: o.audio_out,
     };
     // The record goes to a buffer until the spec is accepted, so a refused
     // spec leaves no file behind; then straight to its destination.

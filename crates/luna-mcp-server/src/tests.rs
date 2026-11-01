@@ -2220,6 +2220,7 @@ async fn server_record_ticks_returns_the_record() {
             spec: spec.clone(),
             out: None,
             shots_dir: None,
+            audio_out: None,
         }))
         .await
         .unwrap()
@@ -2246,12 +2247,63 @@ async fn server_record_ticks_returns_the_record() {
             spec: bad,
             out: None,
             shots_dir: None,
+            audio_out: None,
         }))
         .await
     else {
         panic!("a zone on the I/O registers was accepted");
     };
     assert!(err.message.contains("I/O registers"), "{err:?}");
+
+    // One picture per frame from an anchor tick, and the sound of the same
+    // frames; the sound is refused without the pictures.
+    let dir = std::env::temp_dir().join("luna_mcp_ticks_every_frame");
+    let _ = std::fs::remove_dir_all(&dir);
+    let wav = dir.join("sound.wav");
+    let frames: luna_api::TickSpec = serde_json::from_value(serde_json::json!({
+        "format": 1,
+        "tick": { "symbol": "00:8007" },
+        "shots": { "every_frame": true, "from_tick": 1, "count": 4 }
+    }))
+    .unwrap();
+    s.load_rom(Parameters(LoadRomParams {
+        force_mapper: Some("lorom".into()),
+        ..rom_params(&path.to_string_lossy())
+    }))
+    .await
+    .unwrap();
+    let r = s
+        .record_ticks(Parameters(RecordTicksParams {
+            spec: frames,
+            out: None,
+            shots_dir: Some(dir.to_string_lossy().into_owned()),
+            audio_out: Some(wav.to_string_lossy().into_owned()),
+        }))
+        .await
+        .unwrap()
+        .0;
+    assert!(r.complete, "{r:?}");
+    assert!(dir.join("f000004.png").is_file() && !dir.join("f000005.png").exists());
+    assert!(std::fs::metadata(&wav).unwrap().len() > 44 + 4 * 4 * 500);
+    let no_pictures: luna_api::TickSpec = serde_json::from_value(serde_json::json!({
+        "format": 1,
+        "tick": { "symbol": "00:8007" },
+        "ticks": 1
+    }))
+    .unwrap();
+    let Err(err) = s
+        .record_ticks(Parameters(RecordTicksParams {
+            spec: no_pictures,
+            out: None,
+            shots_dir: None,
+            audio_out: Some(wav.to_string_lossy().into_owned()),
+        }))
+        .await
+    else {
+        panic!("a sound without every_frame pictures was accepted");
+    };
+    assert!(err.message.contains("every_frame"), "{err:?}");
+    let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_file(&path);
 }
 

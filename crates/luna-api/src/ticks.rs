@@ -180,15 +180,33 @@ pub struct TickZone {
     pub length: u32,
 }
 
-/// Pictures to write at some ticks.
+/// Pictures to write: at some ticks (`ticks`), or one per frame from an
+/// anchor tick (`every_frame`). The two are exclusive.
 #[derive(Debug, Clone, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TickShots {
-    /// The ticks.
+    /// The ticks that get a picture (`t000001.png`, ...). Give these or
+    /// `every_frame`.
+    #[serde(default)]
     pub ticks: Vec<u64>,
-    /// The 512-wide native capture instead of the 256-wide frame.
+    /// The 512-wide native capture (512 x 2·height, every mode) instead of
+    /// the 256-wide frame; no scaling, no cropping either way.
     #[serde(default)]
     pub native: bool,
+    /// One picture per frame, not per tick (`f000001.png`, ... numbered
+    /// from 1, ready for `ffmpeg -i f%06d.png`). Needs `from_tick` and
+    /// `count`. Image 1 is the frame in which tick `from_tick` falls (the
+    /// first frame to end at or after it); the images run on, one per frame,
+    /// to the `count`-th.
+    #[serde(default)]
+    pub every_frame: bool,
+    /// With `every_frame`: the anchor tick, counted from 1.
+    #[serde(default)]
+    pub from_tick: Option<u64>,
+    /// With `every_frame`: how many images (at least 1). The run goes on
+    /// past `ticks` until they are all written.
+    #[serde(default)]
+    pub count: Option<u64>,
 }
 
 /// Where [`Emulator::record_ticks`] finds and puts files.
@@ -198,6 +216,9 @@ pub struct TickRecordOptions<'a> {
     pub base_dir: &'a Path,
     /// Where the `[shots]` pictures go. Required with `shots`.
     pub shots_dir: Option<&'a Path>,
+    /// A WAV of the sound of the `every_frame` interval: the same frames as
+    /// its images, counted from the same anchor. Needs `every_frame`.
+    pub audio_out: Option<&'a Path>,
 }
 
 /// How a record ended.
@@ -356,6 +377,34 @@ struct End {
     ticks: u64,
     /// `limit`, `until_frame`, `frame_cap`, `halted` or `error`.
     reason: &'static str,
+    /// The `every_frame` pictures, when there were any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    images: Option<ImagesOut>,
+}
+
+/// What the `every_frame` run wrote.
+#[derive(serde::Serialize, schemars::JsonSchema)]
+struct ImagesOut {
+    /// How many pictures (`f000001.png` to `f<count>.png`).
+    count: u64,
+    /// The frame counter at the end of image 1.
+    first_frame: u64,
+    /// The WAV, when `--audio-out` asked for one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    audio: Option<AudioOut>,
+}
+
+/// The sound of the `every_frame` interval.
+#[derive(serde::Serialize, schemars::JsonSchema)]
+struct AudioOut {
+    /// The file's name.
+    file: String,
+    /// Stereo sample pairs written.
+    samples: u64,
+    /// The rate written in the WAV header: the samples of the run spread
+    /// over the time its pictures last (`count` / frame rate), the console's
+    /// sound clock being its own.
+    hz: u32,
 }
 
 /// The JSON Schema of each kind of line of a record, under `header`,
@@ -895,6 +944,26 @@ fn resolve_poke(em: &Emulator, p: &TickPoke) -> Result<Poke, String> {
 /// The pictures asked for: the ticks, native or not, the folder.
 type Shots = (Vec<u64>, bool, PathBuf);
 
+/// The `every_frame` pictures, and the sound beside them.
+struct Frames {
+    from_tick: u64,
+    count: u64,
+    native: bool,
+    dir: PathBuf,
+    /// The anchor tick was reached: the next frame end is image 1.
+    armed: bool,
+    taken: u64,
+    first_frame: u64,
+    /// The sound of the images, when a WAV was asked for.
+    audio: Option<Vec<(i16, i16)>>,
+}
+
+impl Frames {
+    const fn pending(&self) -> bool {
+        self.taken < self.count
+    }
+}
+
 /// What the watching run tracks.
 struct Recorder<'w> {
     tick_pc: u32,
@@ -908,6 +977,10 @@ struct Recorder<'w> {
     zones: Vec<(String, Space, u32)>,
     pokes: Vec<Poke>,
     shots: Option<Shots>,
+    /// The `every_frame` run.
+    frames: Option<Frames>,
+    /// The ticks were counted to their limit: later arrivals are not ticks.
+    ticks_done: bool,
     /// The ports the input scripts drive, with their last mask written.
     pads: Vec<(u8, Option<u16>)>,
     limit: Option<u64>,
@@ -962,6 +1035,7 @@ impl Recorder<'_> {
         }
         // The arrival that starts the record may itself be tick 1.
         let is_tick = self.started
+            && !self.ticks_done
             && pc == self.tick_pc
             && self
                 .tick_cond
@@ -979,11 +1053,68 @@ impl Recorder<'_> {
             self.ended_by_until = true;
             return true;
         }
-        self.limit == Some(self.t)
+        if self.limit == Some(self.t) {
+            self.ticks_done = true;
+            // The pictures of an `every_frame` run may outlast the ticks.
+            return !self.frames.as_ref().is_some_and(Frames::pending);
+        }
+        false
+    }
+
+    /// A frame ended. Returns `true` to end the run.
+    fn on_frame(&mut self, em: &mut Emulator) -> bool {
+        let Some(f) = &mut self.frames else {
+            return false;
+        };
+        // Drained at every frame, armed or not: the queue drops what does
+        // not fit, and what came before the anchor is not wanted.
+        let samples = if f.audio.is_some() {
+            match em.drain_audio(usize::MAX) {
+                Ok(s) => s,
+                Err(e) => {
+                    self.error = Some(e.to_string());
+                    return true;
+                }
+            }
+        } else {
+            Vec::new()
+        };
+        if !f.armed || !f.pending() {
+            return false;
+        }
+        let png = if f.native {
+            em.render_frame_png_native()
+        } else {
+            em.render_frame_png(false)
+        };
+        let n = f.taken + 1;
+        let path = f.dir.join(format!("f{n:06}.png"));
+        let written = png
+            .map_err(|e| format!("image {n}: picture: {e}"))
+            .and_then(|png| {
+                std::fs::write(&path, png).map_err(|e| format!("writing {}: {e}", path.display()))
+            });
+        if let Err(e) = written {
+            self.error = Some(e);
+            return true;
+        }
+        if n == 1 {
+            f.first_frame = em.frame_count().unwrap_or(0);
+        }
+        if let Some(a) = &mut f.audio {
+            a.extend(samples);
+        }
+        f.taken = n;
+        !f.pending() && self.limit.is_none_or(|_| self.ticks_done)
     }
 
     fn write_tick(&mut self, em: &mut Emulator) -> Result<(), String> {
         let t = self.t;
+        if let Some(f) = &mut self.frames
+            && f.from_tick == t
+        {
+            f.armed = true;
+        }
         for p in &mut self.pokes {
             if matches!(p.when, PokeWhen::Tick(n) if n == t) {
                 p.write(em)?;
@@ -1037,6 +1168,29 @@ impl Recorder<'_> {
     }
 }
 
+/// A 16-bit stereo PCM WAV at `hz`.
+fn write_wav(path: &Path, samples: &[(i16, i16)], hz: u32) -> std::io::Result<()> {
+    let data_size = (samples.len() * 4) as u32;
+    let mut b = Vec::with_capacity(44 + samples.len() * 4);
+    b.extend_from_slice(b"RIFF");
+    b.extend_from_slice(&(36 + data_size).to_le_bytes());
+    b.extend_from_slice(b"WAVEfmt ");
+    b.extend_from_slice(&16u32.to_le_bytes());
+    b.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    b.extend_from_slice(&2u16.to_le_bytes()); // channels
+    b.extend_from_slice(&hz.to_le_bytes());
+    b.extend_from_slice(&(hz * 4).to_le_bytes()); // byte rate
+    b.extend_from_slice(&4u16.to_le_bytes()); // block align
+    b.extend_from_slice(&16u16.to_le_bytes());
+    b.extend_from_slice(b"data");
+    b.extend_from_slice(&data_size.to_le_bytes());
+    for &(l, r) in samples {
+        b.extend_from_slice(&l.to_le_bytes());
+        b.extend_from_slice(&r.to_le_bytes());
+    }
+    std::fs::write(path, b)
+}
+
 fn write_line(out: &mut dyn Write, value: &impl serde::Serialize) -> Result<(), String> {
     let text = serde_json::to_string(value).map_err(|e| e.to_string())?;
     writeln!(out, "{text}").map_err(|e| format!("writing the record: {e}"))
@@ -1066,8 +1220,30 @@ fn check_spec(spec: &TickSpec) -> Result<(), String> {
         }
         names.push(&z.name);
     }
-    if spec.shots.as_ref().is_some_and(|s| s.ticks.contains(&0)) {
-        return Err("shots.ticks count from 1".to_string());
+    if let Some(s) = &spec.shots {
+        if s.ticks.contains(&0) {
+            return Err("shots.ticks count from 1".to_string());
+        }
+        if s.every_frame {
+            if !s.ticks.is_empty() {
+                return Err("shots: `ticks` and `every_frame` are exclusive".to_string());
+            }
+            if s.from_tick.is_none_or(|n| n == 0) {
+                return Err("shots.every_frame needs `from_tick` (counted from 1)".to_string());
+            }
+            if s.count.is_none_or(|n| n == 0) {
+                return Err("shots.every_frame needs `count` (at least 1)".to_string());
+            }
+        } else {
+            if s.from_tick.is_some() || s.count.is_some() {
+                return Err(
+                    "shots.from_tick and shots.count go with `every_frame = true`".to_string(),
+                );
+            }
+            if s.ticks.is_empty() {
+                return Err("shots: give `ticks` or `every_frame = true`".to_string());
+            }
+        }
     }
     Ok(())
 }
@@ -1157,16 +1333,36 @@ impl Emulator {
             self.load_sram(&data)
                 .map_err(|e| format!("srm_in `{}`: {e}", path.display()))?;
         }
-        let shots = match &spec.shots {
-            Some(s) => {
-                let dir = options
-                    .shots_dir
-                    .ok_or("[shots] needs a folder for its pictures")?;
-                std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-                Some((s.ticks.clone(), s.native, dir.to_path_buf()))
+        let every_frame = spec.shots.as_ref().is_some_and(|s| s.every_frame);
+        if options.audio_out.is_some() && !every_frame {
+            return Err(
+                "audio_out: the sound goes with the `every_frame` pictures; give `[shots]` \
+                 with `every_frame = true`"
+                    .to_string(),
+            );
+        }
+        let mut shots = None;
+        let mut frames = None;
+        if let Some(s) = &spec.shots {
+            let dir = options
+                .shots_dir
+                .ok_or("[shots] needs a folder for its pictures")?;
+            std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+            if s.every_frame {
+                frames = Some(Frames {
+                    from_tick: s.from_tick.unwrap_or(1),
+                    count: s.count.unwrap_or(1),
+                    native: s.native,
+                    dir: dir.to_path_buf(),
+                    armed: false,
+                    taken: 0,
+                    first_frame: 0,
+                    audio: options.audio_out.map(|_| Vec::new()),
+                });
+            } else {
+                shots = Some((s.ticks.clone(), s.native, dir.to_path_buf()));
             }
-            None => None,
-        };
+        }
 
         let (subject_sha256, subject_file) = match &self.rom_file {
             Some(path) => (
@@ -1218,7 +1414,9 @@ impl Emulator {
             inputs2,
             shots_dir: shots
                 .as_ref()
-                .map(|(_, _, d)| d.to_string_lossy().into_owned()),
+                .map(|(_, _, d)| d.as_path())
+                .or_else(|| frames.as_ref().map(|f| f.dir.as_path()))
+                .map(|d| d.to_string_lossy().into_owned()),
         };
         write_line(out, &header)?;
 
@@ -1228,8 +1426,8 @@ impl Emulator {
         let snes = self.snes.as_mut().expect("checked above");
         let was_skipping = snes.ppu.skip_pixels;
         let was_native = !snes.ppu.native_framebuffer.is_empty();
-        snes.ppu.skip_pixels = shots.is_none();
-        if shots.as_ref().is_some_and(|s| s.1) {
+        snes.ppu.skip_pixels = shots.is_none() && frames.is_none();
+        if shots.as_ref().is_some_and(|s| s.1) || frames.as_ref().is_some_and(|f| f.native) {
             snes.ppu.set_native_capture(true);
         }
 
@@ -1263,12 +1461,18 @@ impl Emulator {
             zones,
             pokes,
             shots,
+            frames,
+            ticks_done: false,
             pads,
             limit: spec.ticks,
             t: 0,
             out,
             error: None,
         };
+        if rec.frames.as_ref().is_some_and(|f| f.audio.is_some()) {
+            // What was queued before the call is not the interval's sound.
+            self.drain_audio(usize::MAX).map_err(|e| e.to_string())?;
+        }
         let frame_bound = spec
             .until_frame
             .unwrap_or_else(|| self.frame_count().unwrap_or(0) + FRAME_CAP);
@@ -1278,7 +1482,7 @@ impl Emulator {
             &pcs,
             |em, ev| match ev {
                 WatchEvent::Pc(i) => rec.on_pc(em, pcs[i]),
-                WatchEvent::Frame => false,
+                WatchEvent::Frame => rec.on_frame(em),
             },
         );
         if let Some(snes) = self.snes.as_mut() {
@@ -1287,7 +1491,7 @@ impl Emulator {
                 snes.ppu.set_native_capture(false);
             }
         }
-        self.finish_record(spec, &mut rec, &run, frame_bound, options.base_dir)
+        self.finish_record(spec, &mut rec, &run, frame_bound, options)
     }
 
     /// The input script (`input` and `input2` in one), and what the header
@@ -1385,8 +1589,9 @@ impl Emulator {
         rec: &mut Recorder<'_>,
         run: &Result<bool, crate::ApiError>,
         frame_bound: u64,
-        base_dir: &Path,
+        options: &TickRecordOptions<'_>,
     ) -> Result<TickOutcome, String> {
+        let base_dir = options.base_dir;
         let mut failures = Vec::new();
         let reason = match (run, &rec.error) {
             (_, Some(e)) => {
@@ -1411,10 +1616,59 @@ impl Emulator {
             }
         };
         let t = rec.t;
+        let images = if let Some(f) = &rec.frames {
+            let mut audio = None;
+            if let (Some(path), Some(samples)) = (options.audio_out, &f.audio)
+                && f.taken > 0
+            {
+                // The samples of the run, spread over the time its pictures
+                // last: the sound clock of the console is its own.
+                let hz =
+                    (samples.len() as f64 / (f.taken as f64 / self.frame_rate_hz())).round() as u32;
+                match write_wav(path, samples, hz) {
+                    Ok(()) => {
+                        audio = Some(AudioOut {
+                            file: path
+                                .file_name()
+                                .map(|n| n.to_string_lossy().into_owned())
+                                .unwrap_or_default(),
+                            samples: samples.len() as u64,
+                            hz,
+                        });
+                    }
+                    Err(e) => failures.push(format!("audio_out `{}`: {e}", path.display())),
+                }
+            }
+            if f.pending() {
+                failures.push(format!(
+                    "shots: {} of the {} images asked for ({}tick {} {})",
+                    f.taken,
+                    f.count,
+                    if f.armed { "" } else { "the anchor " },
+                    f.from_tick,
+                    if f.armed {
+                        "was reached, the run ended first"
+                    } else {
+                        "was not reached"
+                    },
+                ));
+            }
+            Some(ImagesOut {
+                count: f.taken,
+                first_frame: f.first_frame,
+                audio,
+            })
+        } else {
+            None
+        };
         write_line(
             rec.out,
             &EndLine {
-                end: End { ticks: t, reason },
+                end: End {
+                    ticks: t,
+                    reason,
+                    images,
+                },
             },
         )?;
         rec.out

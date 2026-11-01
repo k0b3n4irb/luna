@@ -7,6 +7,13 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ## [Unreleased]
 
+- `luna ticks`: `[shots] every_frame = true` with `from_tick` and `count`
+  writes one picture per frame (`f000001.png`, ...) instead of one per tick,
+  from the frame the anchor tick falls in; `native` gives 512x448 whatever
+  the mode. `--audio-out FILE.wav` (MCP `record_ticks`: `audio_out`) writes
+  the sound of the same frames, not from power-on, at a rate that makes it
+  last `count` / 60.0988 s. Incoherent combinations are refused (exit 2) and
+  `[shots]` needs `ticks` or `every_frame`. The end line gains `images`.
 - `luna ticks --compare A B` compares two `tick-record` files and reports the
   first tick where a zone differs (zone, byte offset, both bytes), with the
   ticks compared and diverging; ticks are paired by `t`, never by the clock.

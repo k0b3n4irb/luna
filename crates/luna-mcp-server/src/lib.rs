@@ -1947,6 +1947,10 @@ pub struct RecordTicksParams {
     /// Folder of the `shots` pictures (required with `shots`).
     #[serde(default)]
     pub shots_dir: Option<String>,
+    /// A WAV of the sound of the `shots.every_frame` interval (same frames
+    /// as its images, from the same anchor tick). Needs `every_frame`.
+    #[serde(default)]
+    pub audio_out: Option<String>,
 }
 
 /// `record_ticks` result.
@@ -3390,7 +3394,9 @@ impl LunaServer {
         description = "Record named memory zones at every tick of a game, as `tick-record` JSONL \
                                 (a header, one line per tick, an end line): the spec of `luna ticks`, \
                                 as JSON. Records from the current state: arrivals count from the call, \
-                                so load or reset the ROM first for a record from power-on. A doubtful \
+                                so load or reset the ROM first for a record from power-on. `shots` \
+                                may be `every_frame` (a PNG per frame from an anchor tick) and \
+                                `audio_out` the WAV of the same frames. A doubtful \
                                 spec is refused before anything runs."
     )]
     async fn record_ticks(
@@ -3401,6 +3407,7 @@ impl LunaServer {
         let options = luna_api::TickRecordOptions {
             base_dir: std::path::Path::new("."),
             shots_dir,
+            audio_out: params.audio_out.as_deref().map(std::path::Path::new),
         };
         let mut em = self.emulator.lock().await;
         let (outcome, record) = if let Some(path) = &params.out {

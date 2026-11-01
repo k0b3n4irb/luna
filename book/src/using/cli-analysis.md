@@ -726,6 +726,7 @@ divergence of the game's state.
 | `--spec <SPEC>` | — | The record's description (TOML, below). |
 | `--out <PATH>` | `-` | The record; `-` is stdout. |
 | `--shots-dir <DIR>` | `<OUT>.shots` | Where the `[shots]` pictures go. |
+| `--audio-out <FILE>` | — | A 16-bit stereo WAV of the sound of the `every_frame` pictures: the same frames, from the same anchor tick (see [a picture per frame](#a-picture-per-frame--every_frame)). Refused (exit 2) without `[shots] every_frame = true`. |
 | `--schema` | — | Print the JSON Schema of the three kinds of line, and exit (no ROM needed). |
 | `--sym <PATH>` | `<ROM>.sym` | WLA-DX symbol file. |
 | `--force-mapper <M>` | auto | As in `state`. |
@@ -766,9 +767,13 @@ name   = "ball"                   # the key a comparison pairs
 at     = "ball_x"                 # symbol, symbol+N, BANK:OFFSET, or APU:, VRAM:, CGRAM:, OAM:
 length = 6                        # bytes, decimal
 
-[shots]                           # optional: a picture at some ticks
+[shots]                           # optional: pictures, at some ticks...
 ticks  = [1, 100, 500]
 native = false                    # true: the 512-wide native capture
+# ...or one per frame from an anchor tick (not both, see below):
+# every_frame = true
+# from_tick   = 3
+# count       = 120
 ```
 
 - **The ticks.** `t` = N is the N-th arrival on `tick.symbol` where
@@ -868,6 +873,9 @@ has:
   in `inputs` and `inputs2`.
 - `screen`: at a `[shots]` tick, the FNV-1a 64 of the picture and its PNG
   file, in `shots_dir`.
+- `end.images`: with `every_frame`, `count` pictures written,
+  `first_frame` (the frame counter at the end of image 1) and, with
+  `--audio-out`, the WAV's `file`, `samples` (stereo pairs) and `hz`.
 - `end.reason`: `limit` (the ticks asked for), `until` (the record's
   closing arrival), `until_frame`,
   `frame_cap`, `halted` or `error`. A record without its end line was cut
@@ -875,6 +883,60 @@ has:
 - `version` goes up with any change that breaks reading; a field a reader
   may ignore can be added without it. `luna ticks --schema` prints the
   schema of each kind of line.
+
+### A picture per frame — `every_frame`
+
+`ticks = [...]` writes a picture *per tick*, and a tick spans several
+frames. A video of two builds side by side at the console's frame rate needs
+a picture *per frame* and the sound of the same frames: `every_frame`.
+
+```toml
+[shots]
+every_frame = true    # f000001.png, f000002.png, ... one per frame
+native      = true    # 512x448, nothing scaled or cropped (default: 256x224)
+from_tick   = 3       # the anchor: image 1 is the frame tick 3 falls in
+count       = 120     # how many images
+```
+
+- **The anchor.** Image 1 is the first frame to end at or after tick
+  `from_tick`; the images then run on, one per frame, to the `count`-th. The
+  files are numbered from 1 and carry no tick number, so
+  `ffmpeg -i f%06d.png` reads them. The run goes on past the spec's `ticks`
+  until they are all written; with no `ticks`, it ends on the last image.
+- **The sound.** `--audio-out` (MCP: `audio_out`) writes only the sound of
+  those frames: the sound of the frame of image 1 up to that of image
+  `count`, not from power-on. Its length is the frames' own, about 533 sample
+  pairs a frame. The WAV header's rate is those samples spread over the time
+  the pictures last (`count` / 60.0988 s on NTSC, 50.007 on PAL), about
+  32040 Hz, so the file lasts exactly as long as the video.
+- **Refused (exit 2, nothing runs).** `every_frame` without `from_tick`
+  (from 1) or `count` (at least 1); `every_frame` together with `ticks`;
+  `from_tick` or `count` without `every_frame`; `[shots]` with neither;
+  `--audio-out` without `every_frame`. If the run ends before the
+  `count`-th image (the anchor never reached, `until`, `until_frame`), the
+  record still ends, `end.images.count` says how many, and the exit is 1.
+- **`native`.** The native frame is always 512 wide and twice the frame's
+  height (512x448; 512x478 in overscan): hi-res (Mode 5/6, pseudo-512) rows
+  keep their two dots, and interlace its two fields, instead of the averaged
+  256x224.
+
+```
+$ luna ticks game.sfc --spec clip.toml --out clip.jsonl \
+    --shots-dir clip-png --audio-out clip.wav
+42 tick(s) recorded (limit)
+$ ls clip-png | wc -l
+120
+$ tail -1 clip.jsonl
+{"end":{"ticks":42,"reason":"limit","images":{"count":120,"first_frame":7,"audio":{"file":"clip.wav","samples":63975,"hz":32040}}}}
+```
+
+`clip.wav` lasts 63975 / 32040 = 1.9967 s, which is 120 / 60.0988. One
+`ffmpeg` line makes the clip (an encoder other than `mpeg4` is as good):
+
+```
+ffmpeg -framerate 60.0988 -i clip-png/f%06d.png -i clip.wav \
+    -c:v mpeg4 -q:v 3 -c:a aac -shortest clip.mp4
+```
 
 ### Comparing two records — `--compare`
 

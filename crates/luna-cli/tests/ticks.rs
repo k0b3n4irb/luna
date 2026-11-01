@@ -276,6 +276,214 @@ fn shots_are_files_beside_the_record() {
     assert!(shots_dir.join("t000003.png").is_file());
 }
 
+/// `(width, height)` from a PNG's IHDR.
+fn png_size(path: &Path) -> (u32, u32) {
+    let b = std::fs::read(path).expect("picture written");
+    let n = |o: usize| u32::from_be_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]]);
+    (n(16), n(20))
+}
+
+#[test]
+fn every_frame_writes_one_picture_per_frame_and_the_sound_of_the_same_frames() {
+    let dir = fresh_dir("every_frame");
+    let wav = dir.join("sound.wav");
+    let spec = format!("{BASE}[shots]\nevery_frame = true\nfrom_tick = 2\ncount = 7\n");
+    let (out, lines) = ticks(&dir, &spec, &["--audio-out", wav.to_str().unwrap()]);
+    assert!(out.status.success(), "{}", text(&out));
+    let shots_dir = PathBuf::from(lines[0]["shots_dir"].as_str().unwrap());
+    let mut pngs: Vec<_> = std::fs::read_dir(&shots_dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    pngs.sort();
+    let want: Vec<String> = (1..=7).map(|n| format!("f{n:06}.png")).collect();
+    assert_eq!(pngs, want, "one picture per frame, not per tick");
+    assert_eq!(png_size(&shots_dir.join("f000001.png")), (256, 224));
+    // The run stopped on its last image: the ticks had no limit.
+    let end = &lines.last().unwrap()["end"];
+    assert_eq!(end["images"]["count"], 7);
+    // Image 1 is the frame the anchor (tick 2) falls in, so it ends after
+    // the tick line's frame counter.
+    let tick2_frame = lines[2]["frame"].as_u64().unwrap();
+    assert!(end["images"]["first_frame"].as_u64().unwrap() >= tick2_frame);
+
+    // The WAV: stereo 16-bit PCM whose length is the seven frames' worth.
+    let b = std::fs::read(&wav).expect("WAV written");
+    assert_eq!(&b[..4], b"RIFF");
+    assert_eq!(&b[8..16], b"WAVEfmt ");
+    let rate = u32::from_le_bytes(b[24..28].try_into().unwrap());
+    let data = u32::from_le_bytes(b[40..44].try_into().unwrap()) as usize;
+    assert_eq!(b.len(), 44 + data);
+    let seconds = (data / 4) as f64 / f64::from(rate);
+    assert!(
+        (seconds - 7.0 / 60.0988).abs() < 0.001,
+        "{seconds} s for 7 frames"
+    );
+    assert_eq!(end["images"]["audio"]["hz"], rate);
+    assert_eq!(end["images"]["audio"]["samples"], (data / 4) as u64);
+    // The sound is the seven frames' own: about 32040 / 60.0988 = 533
+    // sample pairs a frame, not the run from power-on.
+    let pairs = (data / 4) as f64;
+    assert!(
+        (pairs / 7.0 - 533.1).abs() < 2.0,
+        "{pairs} pairs for 7 frames"
+    );
+    // 7 frames of the console's sound, roughly 32 kHz.
+    assert!((31_000..33_000).contains(&rate), "{rate} Hz");
+}
+
+#[test]
+fn every_frame_native_is_512_by_448() {
+    let dir = fresh_dir("every_frame_native");
+    let spec =
+        format!("{BASE}[shots]\nevery_frame = true\nnative = true\nfrom_tick = 1\ncount = 2\n");
+    let (out, lines) = ticks(&dir, &spec, &[]);
+    assert!(out.status.success(), "{}", text(&out));
+    let shots_dir = PathBuf::from(lines[0]["shots_dir"].as_str().unwrap());
+    for n in 1..=2 {
+        assert_eq!(
+            png_size(&shots_dir.join(format!("f{n:06}.png"))),
+            (512, 448)
+        );
+    }
+}
+
+/// A game that sets BG mode 5 (hi-res, 512 columns) and ticks once a frame.
+fn mode5_rom(dir: &Path) -> PathBuf {
+    let prog = [
+        0x78, // 8000 SEI
+        0xA9, 0x05, 0x8D, 0x05, 0x21, // 8001 BGMODE = 5
+        0xA9, 0x01, 0x8D, 0x2C, 0x21, // 8006 TM = BG1
+        0xA9, 0x0F, 0x8D, 0x00, 0x21, // 800B INIDISP = full brightness
+        0xA9, 0x80, 0x8D, 0x00, 0x42, // 8010 NMI on
+        0xCB, // 8015 WAI
+        0xE6, 0x10, // 8016 tick: INC $10
+        0x80, 0xFB, // 8018 BRA $8015
+        0x40, // 801A nmi: RTI
+    ];
+    let mut r = vec![0u8; 0x1_0000];
+    r[..prog.len()].copy_from_slice(&prog);
+    r[0x7FC0..0x7FD5].copy_from_slice(b"LUNA MODE FIVE       ".as_ref());
+    r[0x7FD5] = 0x20;
+    r[0x7FD7] = 0x07;
+    r[0x7FFC] = 0x00;
+    r[0x7FFD] = 0x80;
+    for off in [0x7FEA, 0x7FFA] {
+        r[off] = 0x1A;
+        r[off + 1] = 0x80;
+    }
+    let rom = dir.join("mode5.sfc");
+    std::fs::write(&rom, &r).expect("write rom");
+    std::fs::write(dir.join("mode5.sym"), "[labels]\n00:8016 tick\n").unwrap();
+    rom
+}
+
+#[test]
+fn native_shots_of_a_mode_5_game_are_512_by_448() {
+    let dir = fresh_dir("mode5");
+    let rom = mode5_rom(&dir);
+    let spec = dir.join("spec.toml");
+    std::fs::write(
+        &spec,
+        format!("{BASE}[shots]\nevery_frame = true\nnative = true\nfrom_tick = 2\ncount = 3\n"),
+    )
+    .unwrap();
+    let out_path = dir.join("record.jsonl");
+    let out = Command::new(luna_bin())
+        .arg("ticks")
+        .arg(&rom)
+        .args(["--force-mapper", "lorom", "--spec"])
+        .arg(&spec)
+        .arg("--out")
+        .arg(&out_path)
+        .output()
+        .expect("run luna");
+    assert!(out.status.success(), "{}", text(&out));
+    let shots = out_path.with_extension("shots");
+    for n in 1..=3 {
+        assert_eq!(
+            png_size(&shots.join(format!("f{n:06}.png"))),
+            (512, 448),
+            "Mode 5, native"
+        );
+    }
+}
+
+#[test]
+fn every_frame_needs_its_anchor_its_count_and_no_ticks() {
+    let dir = fresh_dir("every_frame_refused");
+    let wav = dir.join("sound.wav");
+    let cases = [
+        ("every_frame = true\ncount = 3\n", "needs `from_tick`"),
+        ("every_frame = true\nfrom_tick = 1\n", "needs `count`"),
+        (
+            "every_frame = true\nfrom_tick = 0\ncount = 3\n",
+            "needs `from_tick`",
+        ),
+        (
+            "every_frame = true\nfrom_tick = 1\ncount = 0\n",
+            "needs `count`",
+        ),
+        (
+            "every_frame = true\nfrom_tick = 1\ncount = 3\nticks = [1]\n",
+            "exclusive",
+        ),
+        ("ticks = [1]\ncount = 3\n", "go with `every_frame"),
+        ("ticks = [1]\nfrom_tick = 3\n", "go with `every_frame"),
+        ("native = true\n", "give `ticks` or `every_frame"),
+    ];
+    for (shots, why) in cases {
+        let spec = format!("{BASE}ticks = 3\n[shots]\n{shots}");
+        let (out, lines) = ticks(&dir, &spec, &[]);
+        assert_eq!(out.status.code(), Some(2), "{shots}\n{}", text(&out));
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains(why),
+            "{shots}\n{}",
+            text(&out)
+        );
+        assert!(lines.is_empty(), "nothing is written: {lines:?}");
+    }
+    // The sound goes with the every_frame pictures only.
+    let spec = format!("{BASE}ticks = 3\n[shots]\nticks = [1]\n");
+    let (out, lines) = ticks(&dir, &spec, &["--audio-out", wav.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("every_frame"));
+    assert!(lines.is_empty() && !wav.exists());
+    let (out, _) = ticks(
+        &dir,
+        &format!("{BASE}ticks = 3\n"),
+        &["--audio-out", wav.to_str().unwrap()],
+    );
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out));
+}
+
+#[test]
+fn every_frame_keeps_running_past_the_tick_limit_and_fails_when_the_run_ends_first() {
+    let dir = fresh_dir("every_frame_limit");
+    // Two ticks asked for, ten images: the run goes on for the images.
+    let spec = format!("{BASE}ticks = 2\n[shots]\nevery_frame = true\nfrom_tick = 1\ncount = 10\n");
+    let (out, lines) = ticks(&dir, &spec, &[]);
+    assert!(out.status.success(), "{}", text(&out));
+    let end = &lines.last().unwrap()["end"];
+    assert_eq!(
+        (end["ticks"].as_u64(), end["images"]["count"].as_u64()),
+        (Some(2), Some(10))
+    );
+    // The frame bound ends the run first: exit 1, and the end line says how
+    // many images there are.
+    let spec =
+        format!("{BASE}until_frame = 6\n[shots]\nevery_frame = true\nfrom_tick = 1\ncount = 50\n");
+    let (out, lines) = ticks(&dir, &spec, &[]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("images asked for"));
+    assert!(
+        lines.last().unwrap()["end"]["images"]["count"]
+            .as_u64()
+            .unwrap()
+            < 50
+    );
+}
+
 #[test]
 fn a_record_that_falls_short_still_ends_and_exits_1() {
     let dir = fresh_dir("short");

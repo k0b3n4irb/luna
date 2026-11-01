@@ -1316,7 +1316,7 @@ enum Command {
             long,
             num_args = 2,
             value_names = ["A", "B"],
-            conflicts_with_all = ["rom", "spec", "out", "shots_dir", "schema", "sym", "force_mapper", "force_region", "power_on"]
+            conflicts_with_all = ["rom", "spec", "out", "shots_dir", "audio_out", "schema", "sym", "force_mapper", "force_region", "power_on"]
         )]
         compare: Option<Vec<PathBuf>>,
         /// With `--compare`: write every differing zone of every tick as CSV
@@ -1334,6 +1334,11 @@ enum Command {
         /// Folder of the `[shots]` pictures (default: `<OUT>.shots`).
         #[arg(long = "shots-dir")]
         shots_dir: Option<PathBuf>,
+        /// A 16-bit stereo WAV of the sound of the `every_frame` pictures:
+        /// the same frames, counted from the same anchor tick, not from
+        /// power-on. Needs `[shots] every_frame = true`.
+        #[arg(long = "audio-out")]
+        audio_out: Option<PathBuf>,
         /// Print the JSON Schema of the three kinds of line and exit — no
         /// ROM needed.
         #[arg(long)]
@@ -2049,6 +2054,7 @@ fn main() -> ExitCode {
             zone,
             out,
             shots_dir,
+            audio_out,
             schema,
             sym,
             force_mapper,
@@ -2072,6 +2078,7 @@ fn main() -> ExitCode {
                     spec: &spec,
                     out: &out,
                     shots_dir: shots_dir.as_deref(),
+                    audio_out: audio_out.as_deref(),
                     sym: sym.as_deref(),
                     force_mapper: force_mapper.as_deref(),
                     force_region: force_region.as_deref(),
