@@ -54,9 +54,11 @@ fn peeks_land_in_the_out_json() {
         ])
         .output()
         .expect("run luna state");
-    assert!(
-        out.status.success(),
-        "luna state failed: {}",
+    // An unreadable peek fails the run (exit 1) but the JSON is still written.
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "stderr: {}",
         String::from_utf8_lossy(&out.stderr)
     );
     let json: serde_json::Value = serde_json::from_slice(&out.stdout).expect("state JSON");
