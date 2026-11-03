@@ -655,7 +655,9 @@ cgram: 96 colour(s) written, 192 byte(s) counting rewrites
 ```
 
 The totals count distinct words and entries, so a ring rewritten ten
-times counts once; the bytes "counting rewrites" are the traffic. Bound
+times counts once: that is the footprint, the figure for a memory
+budget. The bytes "counting rewrites" are the traffic, what the bus
+carried; do not read one for the other. Bound
 the window with `--vram-writers-from FRAME` and `--until-frame`. In the
 JSON: `vram_writers.totals` (`vram_words`, `vram_bytes`, `cgram_entries`,
 `cgram_bytes`) and `vram_writers.cgram_rows`.
