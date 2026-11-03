@@ -110,7 +110,10 @@ pub use ticks_compare::{
 pub use vocab::{
     dsp_register_index, dsp_register_name, dsp_register_table, force_mapper_names, parse_region,
 };
-pub use vram_writers::{VramOverlap, VramWriteKind, VramWriterRow, VramWriters, VramWritersReport};
+pub use vram_writers::{
+    CgramWriterRow, VramOverlap, VramWriteKind, VramWriterRow, VramWriters, VramWritersReport,
+    WriteTotals,
+};
 pub use workspace::{Workspace, breakpoint_memory, workspace_path};
 
 /// Parse a controller-device name — the CLI `--port1/--port2` and MCP

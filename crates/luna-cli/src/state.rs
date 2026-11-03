@@ -596,6 +596,31 @@ fn vram_writers_text(report: &luna_api::VramWritersReport) -> String {
             o.first_word, o.last_word, o.words, o.first, o.first_frame, o.then, o.then_frame
         );
     }
+    let t = &report.totals;
+    let _ = writeln!(
+        out,
+        "\nvram: {} word(s) = {} byte(s) written, {} byte(s) counting rewrites",
+        t.vram_words,
+        u64::from(t.vram_words) * 2,
+        t.vram_bytes
+    );
+    let _ = writeln!(
+        out,
+        "cgram: {} colour(s) written, {} byte(s) counting rewrites",
+        t.cgram_entries, t.cgram_bytes
+    );
+    for r in &report.cgram_rows {
+        let _ = writeln!(
+            out,
+            "#{:02X}-#{:02X}  {:>7}  {:<width$}  {}  {}",
+            r.first_entry,
+            r.last_entry,
+            r.bytes,
+            r.source,
+            how(r.how),
+            frames(r.first_frame, r.last_frame)
+        );
+    }
     out
 }
 

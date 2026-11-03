@@ -1,7 +1,8 @@
 //! Who wrote what into VRAM: every byte sent to `$2118/$2119` during a
 //! run, folded by source — the label a DMA read its bytes from, or the
 //! routine whose code wrote the port — into ranges of words, and the
-//! ranges two different sources both wrote.
+//! ranges two different sources both wrote. The same record holds the
+//! CGRAM entries written to `$2122`, and the totals a scene needs.
 
 use std::collections::BTreeMap;
 
@@ -11,6 +12,8 @@ use crate::{ApiError, Emulator};
 
 /// Words in VRAM.
 const WORDS: usize = 0x8000;
+/// Entries in CGRAM.
+const ENTRIES: usize = 0x100;
 /// What the DMA trace may hold between two drains: more than a frame of
 /// DMA can move.
 const DMA_EVENTS_CAP: usize = 1 << 20;
@@ -45,6 +48,40 @@ pub struct VramWriterRow {
     pub last_frame: u64,
 }
 
+/// One range of contiguous CGRAM entries written by one source.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+pub struct CgramWriterRow {
+    /// First entry of the range (`CGADD`).
+    pub first_entry: u8,
+    /// Last entry of the range, included.
+    pub last_entry: u8,
+    /// Bytes written into the range over the run (two per colour).
+    pub bytes: u64,
+    /// The label holding the DMA's source address or the writing code;
+    /// `$BB:AA00` (a 256-byte page) without one.
+    pub source: String,
+    /// DMA or CPU write.
+    pub how: VramWriteKind,
+    /// Frame of the first write into the range.
+    pub first_frame: u64,
+    /// Frame of the last write into the range.
+    pub last_frame: u64,
+}
+
+/// What a window wrote, every source together: distinct words, not
+/// bytes, so a ring rewritten ten times counts once.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+pub struct WriteTotals {
+    /// Distinct VRAM words written.
+    pub vram_words: u32,
+    /// VRAM bytes written, rewrites included.
+    pub vram_bytes: u64,
+    /// Distinct CGRAM entries (colours) written.
+    pub cgram_entries: u32,
+    /// CGRAM bytes written, rewrites included.
+    pub cgram_bytes: u64,
+}
+
 /// The words two different sources both wrote: one entry per pair.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 pub struct VramOverlap {
@@ -74,6 +111,10 @@ pub struct VramWritersReport {
     /// The pairs of different sources that wrote the same words, by
     /// address.
     pub overlaps: Vec<VramOverlap>,
+    /// One row per range of CGRAM entries and source, by entry.
+    pub cgram_rows: Vec<CgramWriterRow>,
+    /// What the window wrote in all.
+    pub totals: WriteTotals,
 }
 
 /// What one source did to each word.
@@ -85,11 +126,11 @@ struct PerWord {
 }
 
 impl PerWord {
-    fn new() -> Self {
+    fn new(len: usize) -> Self {
         Self {
-            first: vec![0; WORDS],
-            last: vec![0; WORDS],
-            bytes: vec![0; WORDS],
+            first: vec![0; len],
+            last: vec![0; len],
+            bytes: vec![0; len],
         }
     }
 }
@@ -100,6 +141,8 @@ pub struct VramWriters {
     from_frame: u64,
     /// Per source name: what it wrote by DMA, and by the port.
     sources: BTreeMap<String, [Option<PerWord>; 2]>,
+    /// The same, for CGRAM entries.
+    cgram_sources: BTreeMap<String, [Option<PerWord>; 2]>,
 }
 
 impl VramWriters {
@@ -109,23 +152,50 @@ impl VramWriters {
         Self {
             from_frame,
             sources: BTreeMap::new(),
+            cgram_sources: BTreeMap::new(),
         }
     }
 
     /// One byte written to `word` by `source` during `frame`.
     pub fn record(&mut self, source: &str, how: VramWriteKind, word: u16, frame: u64) {
-        if frame < self.from_frame {
-            return;
+        if frame >= self.from_frame {
+            Self::note(
+                &mut self.sources,
+                source,
+                how,
+                usize::from(word),
+                WORDS,
+                frame,
+            );
         }
-        if !self.sources.contains_key(source) {
-            self.sources.insert(source.to_string(), [None, None]);
+    }
+
+    /// One byte written to CGRAM `entry` by `source` during `frame`.
+    pub fn record_cgram(&mut self, source: &str, how: VramWriteKind, entry: u8, frame: u64) {
+        if frame >= self.from_frame {
+            Self::note(
+                &mut self.cgram_sources,
+                source,
+                how,
+                usize::from(entry),
+                ENTRIES,
+                frame,
+            );
         }
-        let Some(slots) = self.sources.get_mut(source) else {
-            return;
-        };
+    }
+
+    fn note(
+        map: &mut BTreeMap<String, [Option<PerWord>; 2]>,
+        source: &str,
+        how: VramWriteKind,
+        index: usize,
+        len: usize,
+        frame: u64,
+    ) {
+        let slots = map.entry(source.to_string()).or_insert([None, None]);
         let per_word =
-            slots[usize::from(how == VramWriteKind::Cpu)].get_or_insert_with(PerWord::new);
-        let w = usize::from(word) & (WORDS - 1);
+            slots[usize::from(how == VramWriteKind::Cpu)].get_or_insert_with(|| PerWord::new(len));
+        let w = index & (len - 1);
         let stamp = u32::try_from(frame).unwrap_or(u32::MAX - 1) + 1;
         if per_word.first[w] == 0 {
             per_word.first[w] = stamp;
@@ -138,8 +208,8 @@ impl VramWriters {
     #[must_use]
     pub fn report(&self) -> VramWritersReport {
         let mut rows = Vec::new();
-        for (source, how, per_word) in self.per_source() {
-            for (start, end) in runs(|w| per_word.first[w] != 0) {
+        for (source, how, per_word) in Self::per_source(&self.sources) {
+            for (start, end) in runs(WORDS, |w| per_word.first[w] != 0) {
                 rows.push(VramWriterRow {
                     first_word: start as u16,
                     last_word: end as u16,
@@ -159,7 +229,7 @@ impl VramWriters {
         rows.sort_by_key(|a| (a.first_word, a.first_frame));
 
         let mut overlaps = Vec::new();
-        let sources: Vec<_> = self.per_source().collect();
+        let sources: Vec<_> = Self::per_source(&self.sources).collect();
         for (i, (name_a, _, a)) in sources.iter().enumerate() {
             for (name_b, _, b) in &sources[i + 1..] {
                 if name_a == name_b {
@@ -192,23 +262,71 @@ impl VramWriters {
             }
         }
         overlaps.sort_by_key(|a| (a.first_word, a.first_frame));
+
+        let mut cgram_rows = Vec::new();
+        for (source, how, per_entry) in Self::per_source(&self.cgram_sources) {
+            for (start, end) in runs(ENTRIES, |w| per_entry.first[w] != 0) {
+                cgram_rows.push(CgramWriterRow {
+                    first_entry: start as u8,
+                    last_entry: end as u8,
+                    bytes: per_entry.bytes[start..=end]
+                        .iter()
+                        .map(|&b| u64::from(b))
+                        .sum(),
+                    source: source.clone(),
+                    how,
+                    first_frame: u64::from(min_stamp(&per_entry.first[start..=end]) - 1),
+                    last_frame: u64::from(
+                        per_entry.last[start..=end].iter().max().map_or(1, |&m| m) - 1,
+                    ),
+                });
+            }
+        }
+        cgram_rows.sort_by_key(|a| (a.first_entry, a.first_frame));
+
+        let (vram_words, vram_bytes) = Self::totals_of(&self.sources, WORDS);
+        let (cgram_entries, cgram_bytes) = Self::totals_of(&self.cgram_sources, ENTRIES);
         VramWritersReport {
             from_frame: self.from_frame,
             rows,
             overlaps,
+            cgram_rows,
+            totals: WriteTotals {
+                vram_words,
+                vram_bytes,
+                cgram_entries,
+                cgram_bytes,
+            },
         }
     }
 }
 
 impl VramWriters {
     /// Every `(source, how)` that wrote, by name.
-    fn per_source(&self) -> impl Iterator<Item = (&String, VramWriteKind, &PerWord)> {
-        self.sources.iter().flat_map(|(name, slots)| {
+    fn per_source(
+        map: &BTreeMap<String, [Option<PerWord>; 2]>,
+    ) -> impl Iterator<Item = (&String, VramWriteKind, &PerWord)> {
+        map.iter().flat_map(|(name, slots)| {
             [VramWriteKind::Dma, VramWriteKind::Cpu]
                 .into_iter()
                 .zip(slots)
                 .filter_map(move |(how, slot)| slot.as_ref().map(|p| (name, how, p)))
         })
+    }
+
+    /// Distinct indices written by any source, and bytes written in all.
+    fn totals_of(map: &BTreeMap<String, [Option<PerWord>; 2]>, len: usize) -> (u32, u64) {
+        let mut seen = vec![false; len];
+        let mut bytes = 0u64;
+        for (_, _, p) in Self::per_source(map) {
+            for w in 0..len {
+                if p.first[w] != 0 {
+                    seen[w] = true;
+                    bytes += u64::from(p.bytes[w]);
+                }
+            }
+        }
+        (seen.iter().filter(|&&b| b).count() as u32, bytes)
     }
 }
 
@@ -224,10 +342,10 @@ fn min_stamp(stamps: &[u32]) -> u32 {
 
 /// The maximal runs of consecutive words for which `written` holds, as
 /// `(first, last)`.
-fn runs(written: impl Fn(usize) -> bool) -> Vec<(usize, usize)> {
+fn runs(len: usize, written: impl Fn(usize) -> bool) -> Vec<(usize, usize)> {
     let mut out = Vec::new();
     let mut start = None;
-    for w in 0..WORDS {
+    for w in 0..len {
         match (written(w), start) {
             (true, None) => start = Some(w),
             (false, Some(s)) => {
@@ -238,14 +356,14 @@ fn runs(written: impl Fn(usize) -> bool) -> Vec<(usize, usize)> {
         }
     }
     if let Some(s) = start {
-        out.push((s, WORDS - 1));
+        out.push((s, len - 1));
     }
     out
 }
 
 impl Emulator {
-    /// Start recording every byte written to the VRAM data ports, by
-    /// DMA or by the CPU. Takes over the DMA trace: drain it through
+    /// Start recording every byte written to the VRAM data ports and to
+    /// `$2122` (CGRAM), by DMA or by the CPU. Takes over the DMA trace: drain it through
     /// [`Self::collect_vram_writes`] only, at least once a frame.
     pub fn enable_vram_writers(&mut self) -> Result<(), ApiError> {
         let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
@@ -266,19 +384,41 @@ impl Emulator {
             .map(std::mem::take)
             .unwrap_or_default();
         let symbols = self.symbols.as_ref();
-        let mut record = |addr: u32, how, word, frame| {
-            if let Some((label, _)) = symbols.and_then(|t| t.nearest_label(addr)) {
-                writers.record(label, how, word, frame);
+        let mut record = |addr: u32, how, word: u16, cgram: bool, frame| {
+            let page;
+            let source = if let Some((label, _)) = symbols.and_then(|t| t.nearest_label(addr)) {
+                label
             } else {
-                let page = format!("${:02X}:{:04X}", (addr >> 16) & 0xFF, addr & 0xFF00);
-                writers.record(&page, how, word, frame);
+                page = format!("${:02X}:{:04X}", (addr >> 16) & 0xFF, addr & 0xFF00);
+                &page
+            };
+            if cgram {
+                writers.record_cgram(source, how, word as u8, frame);
+            } else {
+                writers.record(source, how, word, frame);
             }
         };
-        for ev in dma.iter().filter(|ev| matches!(ev.b_offset, 0x18 | 0x19)) {
-            record(ev.src_full, VramWriteKind::Dma, ev.vram_word, ev.frame);
+        for ev in &dma {
+            match ev.b_offset {
+                0x18 | 0x19 => record(
+                    ev.src_full,
+                    VramWriteKind::Dma,
+                    ev.vram_word,
+                    false,
+                    ev.frame,
+                ),
+                0x22 => record(
+                    ev.src_full,
+                    VramWriteKind::Dma,
+                    u16::from(ev.cgram_entry),
+                    true,
+                    ev.frame,
+                ),
+                _ => {}
+            }
         }
         for ev in &cpu {
-            record(ev.pc_full, VramWriteKind::Cpu, ev.word, ev.frame);
+            record(ev.pc_full, VramWriteKind::Cpu, ev.word, ev.cgram, ev.frame);
         }
         Ok(())
     }

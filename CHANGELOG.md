@@ -7,6 +7,12 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ## [Unreleased]
 
+- `luna state --vram-writers` also records the colours written to CGRAM
+  (`$2122`, by DMA or by the port) and ends with the totals of the window:
+  distinct VRAM words and CGRAM entries written, and the bytes counting
+  rewrites. JSON: `vram_writers.cgram_rows` and `vram_writers.totals`. It
+  tells what a scene really loaded, over `--vram-writers-from` to
+  `--until-frame`.
 - `luna ticks`: `[shots] every_frame = true` with `from_tick` and `count`
   writes one picture per frame (`f000001.png`, ...) instead of one per tick,
   from the frame the anchor tick falls in; `native` gives 512x448 whatever

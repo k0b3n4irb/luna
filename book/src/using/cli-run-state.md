@@ -644,6 +644,22 @@ its own carries the name of the one before it. The JSON report carries
 the same table under `vram_writers`. The option takes the DMA trace for
 itself, so it does not combine with `--dma-trace`.
 
+**What a scene really loads.** The report ends with the totals of the
+window and the colours written to CGRAM (`$2122`, by DMA or by the port),
+one line per range of entries and source:
+
+```
+vram: 3840 word(s) = 7680 byte(s) written, 9216 byte(s) counting rewrites
+cgram: 96 colour(s) written, 192 byte(s) counting rewrites
+#00-#5F      192  PalettesLoad  dma  312
+```
+
+The totals count distinct words and entries, so a ring rewritten ten
+times counts once; the bytes "counting rewrites" are the traffic. Bound
+the window with `--vram-writers-from FRAME` and `--until-frame`. In the
+JSON: `vram_writers.totals` (`vram_words`, `vram_bytes`, `cgram_entries`,
+`cgram_bytes`) and `vram_writers.cgram_rows`.
+
 ### Tracing a window of CPU execution
 
 The CPU, memory and DMA traces **stop** once their `-max` cap is reached, so

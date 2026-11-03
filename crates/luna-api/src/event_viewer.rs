@@ -492,6 +492,7 @@ mod tests {
         DmaTraceEvent {
             src_full: 0x7E_0000,
             vram_word: 0,
+            cgram_entry: 0,
             b_offset,
             value: 0xAB,
             channel,

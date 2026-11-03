@@ -1464,7 +1464,12 @@ fn state_reports_who_wrote_vram_and_what_two_sources_share() {
             0xA9, 0x73, 0x8D, 0x17, 0x21, // 802D
             0xA9, 0x33, 0x8D, 0x18, 0x21, // 8032
             0xA9, 0x44, 0x8D, 0x19, 0x21, // 8037 word $7341 again
-            0x80, 0xFE, // 803C BRA $803C
+            0xA9, 0x05, 0x8D, 0x21, 0x21, // 803C CGADD = 5
+            0xA9, 0x1F, 0x8D, 0x22, 0x21, // 8041
+            0xA9, 0x00, 0x8D, 0x22, 0x21, // 8046 colour 5
+            0xA9, 0xFF, 0x8D, 0x22, 0x21, // 804B
+            0xA9, 0x7F, 0x8D, 0x22, 0x21, // 8050 colour 6
+            0x80, 0xFE, // 8055 BRA $8055
         ],
     );
     std::fs::write(
@@ -1500,12 +1505,24 @@ fn state_reports_who_wrote_vram_and_what_two_sources_share() {
     assert_eq!(overlaps[0]["then"], "second");
     assert_eq!(overlaps[0]["words"], 1);
     assert_eq!(overlaps[0]["first_word"], 0x7341);
+    let cgram = report["cgram_rows"].as_array().unwrap();
+    assert_eq!(cgram.len(), 1, "{report:#}");
+    assert_eq!(cgram[0]["source"], "second");
+    assert_eq!(cgram[0]["first_entry"], 5);
+    assert_eq!(cgram[0]["last_entry"], 6);
+    assert_eq!(cgram[0]["bytes"], 4);
+    assert_eq!(report["totals"]["vram_words"], 2);
+    assert_eq!(report["totals"]["vram_bytes"], 6);
+    assert_eq!(report["totals"]["cgram_entries"], 2);
+    assert_eq!(report["totals"]["cgram_bytes"], 4);
     let text = std::fs::read_to_string(dir.join("writers.txt")).unwrap();
     assert!(text.contains("$7340-$7341        4  first "), "{text}");
     assert!(
         text.contains("$7341-$7341      1 word(s)  first (frame 0)  then  second (frame 0)"),
         "{text}"
     );
+    assert!(text.contains("cgram: 2 colour(s)"), "{text}");
+    assert!(text.contains("#05-#06"), "{text}");
 
     // A window that starts after the writes holds nothing.
     let out = state(&["--vram-writers-from", "2"]);

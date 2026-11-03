@@ -460,8 +460,11 @@ pub struct GsuBusLog {
 /// One byte the CPU wrote to a VRAM data port (`$2118/$2119`).
 #[derive(Debug, Clone, Copy)]
 pub struct VramCpuWrite {
-    /// The VRAM word address (`VMADD`) the byte lands on.
+    /// The VRAM word address (`VMADD`) the byte lands on, or the CGRAM
+    /// entry (`CGADD`) when `cgram` is set.
     pub word: u16,
+    /// `true` for a `$2122` (CGRAM) write, `false` for `$2118/$2119`.
+    pub cgram: bool,
     /// 24-bit PC of the instruction that wrote it.
     pub pc_full: u32,
     /// Completed-frame counter at the write.
@@ -2594,6 +2597,7 @@ impl DmaBus for DmaBusView<'_> {
                 log.events.push(DmaTraceEvent {
                     src_full: self.last_a_addr,
                     vram_word: self.ppu.vram.address,
+                    cgram_entry: self.ppu.cgram.address,
                     b_offset,
                     value,
                     channel: self.dma_channel,
@@ -2696,12 +2700,18 @@ impl SnesBus<'_> {
         // Before the write: the high-byte port may step the address.
         if let Some(log) = self.vram_cpu_writes.as_mut()
             && matches!(kind, MemEventKind::Write)
-            && matches!(addr & 0xFFFF, 0x2118 | 0x2119)
+            && matches!(addr & 0xFFFF, 0x2118 | 0x2119 | 0x2122)
             && (addr >> 16) & 0x7F < 0x40
             && log.len() < VRAM_CPU_WRITES_CAP
         {
+            let cgram = addr & 0xFFFF == 0x2122;
             log.push(VramCpuWrite {
-                word: self.ppu.vram.address,
+                word: if cgram {
+                    u16::from(self.ppu.cgram.address)
+                } else {
+                    self.ppu.vram.address
+                },
+                cgram,
                 pc_full: self.cpu_pc_full,
                 frame: self.frame_count,
             });

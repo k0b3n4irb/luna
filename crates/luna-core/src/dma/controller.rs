@@ -18,6 +18,8 @@ pub struct DmaTraceEvent {
     pub src_full: u32,
     /// PPU VRAM word address (`$2116/7` VMADD) the byte targets.
     pub vram_word: u16,
+    /// CGRAM entry (`CGADD`) the byte targets; meaningful for `$2122`.
+    pub cgram_entry: u8,
     /// B-bus register offset: the byte targets `$2100 + b_offset` (e.g.
     /// `0x18`/`0x19` = `$2118`/`$2119` VRAM; `0x04` = `$2104` OAM).
     pub b_offset: u8,

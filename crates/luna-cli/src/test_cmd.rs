@@ -2819,6 +2819,7 @@ mod tests {
         let ev = |frame, b_offset, blank, force_blank| luna_api::DmaTraceEvent {
             src_full: 0x7E_0000,
             vram_word: 0x1000,
+            cgram_entry: 0,
             b_offset,
             value: 0,
             channel: 0,
