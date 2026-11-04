@@ -18,7 +18,7 @@
 //! ```
 //!
 //! Set `LUNA_TOM_HARTE_REQUIRE=1` to make the run a gate. It then fails on:
-//! a state mismatch; a cycle-count mismatch; a per-cycle bus-trace
+//! a state mismatch outside [`CONTESTED_STATE`]; a cycle-count mismatch; a per-cycle bus-trace
 //! divergence outside [`TRACE_RESIDUAL`] (or an entry of that list that no
 //! longer diverges); a core that panics; a missing dataset; a dataset with
 //! fewer files or cases than [`EXPECTED_FILES`] × [`CASES_PER_FILE`]. Without
@@ -121,6 +121,25 @@ const TRACE_RESIDUAL: [&str; 30] = [
     "04.e", "06.e", "0c.e", "0e.e", "14.e", "16.e", "1c.e", "1e.e", "26.e", "2e.e", "36.e", "3e.e",
     "42.e", "42.n", "46.e", "4e.e", "56.e", "5e.e", "66.e", "6e.e", "76.e", "7e.e", "c6.e", "ce.e",
     "d6.e", "de.e", "e6.e", "ee.e", "f6.e", "fe.e",
+];
+
+/// State failures and per-cycle trace divergences (`state`, `trace`) this run
+/// accepts, per file, exactly (2026-11-04, 246 and 264 of 5,080,000 cases): `(dp,X)` in emulation mode with `D.l != 0`, when the
+/// pointer's low byte sits at the end of a page. luna wraps the high byte
+/// within that page, as ares (`readDirectX`), Mesen2 and gilyon/snes-tests
+/// do; gilyon's cputest ROM (test 0027, passed on console) checks exactly
+/// this and fails on the linear read the dataset records (`61.e` 354:
+/// `$6FFF` then `$7000`). Under `LUNA_TOM_HARTE_REQUIRE` a full run must
+/// fail on these counts exactly; a sampled run on at most these counts.
+const CONTESTED_STATE: [(&str, u32, u32); 8] = [
+    ("01.e", 24, 30),
+    ("21.e", 34, 35),
+    ("41.e", 32, 32),
+    ("61.e", 45, 46),
+    ("81.e", 32, 32),
+    ("a1.e", 28, 28),
+    ("c1.e", 20, 30),
+    ("e1.e", 31, 31),
 ];
 
 /// Parse an opcode from a Tom Harte filename like `ea.n.json` or
@@ -565,9 +584,19 @@ fn enforce_baseline(stats: &BTreeMap<String, OpStats>, total_files: usize, cases
         panicked.is_empty(),
         "Tom Harte: the core panicked on: {panicked:?}"
     );
+    let contested = |name: &str| {
+        CONTESTED_STATE
+            .iter()
+            .find(|(n, ..)| *n == name)
+            .map(|&(_, c, _)| c)
+    };
     let regressions: Vec<&String> = stats
         .iter()
-        .filter(|(_, s)| s.failed > 0)
+        .filter(|(name, s)| match contested(name) {
+            Some(c) if cases == CASES_PER_FILE => s.failed != c,
+            Some(c) => s.failed > c,
+            None => s.failed > 0,
+        })
         .map(|(name, _)| name)
         .collect();
     assert!(
@@ -591,7 +620,13 @@ fn enforce_baseline(stats: &BTreeMap<String, OpStats>, total_files: usize, cases
     // Per-cycle bus trace: exactly the residual list, no more, no less.
     let trace_regressions: Vec<&String> = stats
         .iter()
-        .filter(|(name, s)| s.trace_failed > 0 && !TRACE_RESIDUAL.contains(&name.as_str()))
+        .filter(|(name, s)| {
+            let limit = CONTESTED_STATE
+                .iter()
+                .find(|(n, ..)| *n == name.as_str())
+                .map_or(0, |&(_, _, t)| t);
+            s.trace_failed > limit && !TRACE_RESIDUAL.contains(&name.as_str())
+        })
         .map(|(name, _)| name)
         .collect();
     assert!(

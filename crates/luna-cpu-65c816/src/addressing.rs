@@ -171,17 +171,22 @@ pub fn direct_page_indexed_indirect<B: Bus>(cpu: &mut Cpu, bus: &mut B) -> Addr2
 ///
 /// Each byte is read as a direct-page byte (ares `readDirect`): in emulation
 /// mode with `D.l == 0` it wraps within the direct page, otherwise it is a
-/// 16-bit add in bank 0. The `SingleStepTests/65816` suite, whose (dp,X)
-/// cases were verified and corrected upstream on 2026-10-15, wants exactly
-/// that: `e1.e 8669` (`D=$F400`, `dp+X=$FF`) reads `$F4FF` then `$F400`.
+/// 16-bit add in bank 0 (`SingleStepTests/65816` `e1.e 8669`: `D=$F400`,
+/// `dp+X=$FF` reads `$F4FF` then `$F400`).
 ///
-/// ares (`readDirectX`) and Mesen2 (`GetDirectAddressIndirectWordWithPageWrap`)
-/// both add a "CPU bug" for emulation mode with `D.l != 0`: the high byte
-/// wraps to the start of the low byte's page. The suite contradicts it
-/// (`61.e 354`: `$6FFF` then `$7000`), before and after its correction, and
-/// luna follows the suite here, as it did before.
+/// One undocumented case on top (ares `readDirectX`, Mesen2
+/// `GetDirectAddressIndirectWordWithPageWrap`, and gilyon/snes-tests cputest
+/// 0027, passed on console): in emulation mode with `D.l != 0` the *high*
+/// byte's `+1` wraps within the low byte's page (`D=$11A`, `X=$EE`,
+/// `($F7,X)`: low at `$2FF`, high at `$200`). The dataset disagrees on 246
+/// of its cases (`61.e 354` wants `$6FFF` then `$7000`); they are listed in
+/// the gate's `CONTESTED_STATE`.
 fn read_direct_x<B: Bus>(cpu: &Cpu, bus: &mut B, address: u32, offset: u32) -> u8 {
     let dp = u32::from(cpu.dp);
+    if cpu.e && (cpu.dp & 0x00FF) != 0 && offset == 1 {
+        let lo = dp.wrapping_add(address) & 0xFFFF;
+        return bus.read((lo & 0xFF00) | ((lo + 1) & 0xFF));
+    }
     let address = address.wrapping_add(offset);
     if cpu.e && (cpu.dp & 0x00FF) == 0 {
         return bus.read(dp | (address & 0xFF));

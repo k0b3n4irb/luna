@@ -7,6 +7,12 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ## [Unreleased]
 
+- `(direct,X)` in emulation mode with the low byte of `D` non-zero now wraps
+  the pointer's high byte within the low byte's page, as ares, Mesen2 and
+  the cputest ROM of gilyon/snes-tests (test 0027, passed on console) do:
+  luna passes all 1609 tests of that ROM, where it failed the first one.
+  The Tom Harte 65C816 dataset records a linear read on 246 of its
+  5,080,000 cases; the gate lists them exactly instead of hiding them.
 - `luna state --vram-writers` also records the colours written to CGRAM
   (`$2122`, by DMA or by the port) and ends with the totals of the window:
   distinct VRAM words and CGRAM entries written, and the bytes counting

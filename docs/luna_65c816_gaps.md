@@ -18,8 +18,9 @@ the BCD `ADC`/`SBC` pipeline, `REP`/`SEP`/`XCE`, every addressing mode
 (including the direct-page / stack bank-0 wrap and the `(dp,X)` base-wrap
 fixed in `091b8da`; since the suite corrected its `(dp,X)` cases in
 October 2026, each pointer byte is a direct-page read, ares `readDirect` —
-ares and Mesen2 add a page wrap with `E` and `D.l != 0` that the suite
-contradicts), stack push/pull (`JSR (a,x)`
+with `E` and `D.l != 0` the high byte wraps within the low byte's page, as
+ares, Mesen2 and gilyon's console-tested cputest ROM (test 0027) do, against
+246 cases of the suite, listed in the gate as `CONTESTED_STATE`, 2026-11-04), stack push/pull (`JSR (a,x)`
 pushes without the page-1 wrap in emulation mode, as ares, Mesen2 and the
 corrected suite do), and the `BRK`/`COP`/`RTI`
 single-step transitions. The only opcodes the suite skips are `MVN`
