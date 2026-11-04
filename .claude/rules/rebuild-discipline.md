@@ -46,6 +46,17 @@ When the work is purely refactoring a single crate's internals, you
 may still run a per-crate build first to iterate fast, but the
 workspace rebuild **must** pass before you commit.
 
+## Blocking gate before a commit (2026-11-04)
+
+The hook above is asynchronous (it only re-wakes) and fires only on
+`Edit`/`Write`/`MultiEdit` calls: an edit made through the shell, or a commit
+that does not wait for the verdict, goes through. A clippy lint thus reached
+`develop` and turned CI red for 16 hours. `tools/pre-commit-gate.sh` runs
+`cargo fmt --all --check` and the CI-form clippy (about 15 s warm) and refuses
+the commit; install it once with
+`ln -sf ../../tools/pre-commit-gate.sh .git/hooks/pre-commit`. After a push,
+follow the CI run to green (`gh run watch`).
+
 ## Lint discipline
 
 CI runs the following — they must pass clean before commit:
