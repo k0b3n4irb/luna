@@ -319,10 +319,10 @@ impl VramWriters {
         let mut seen = vec![false; len];
         let mut bytes = 0u64;
         for (_, _, p) in Self::per_source(map) {
-            for w in 0..len {
-                if p.first[w] != 0 {
-                    seen[w] = true;
-                    bytes += u64::from(p.bytes[w]);
+            for ((flag, &first), &n) in seen.iter_mut().zip(&p.first).zip(&p.bytes) {
+                if first != 0 {
+                    *flag = true;
+                    bytes += u64::from(n);
                 }
             }
         }
