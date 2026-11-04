@@ -2097,6 +2097,55 @@ fn an_interrupt_taken_as_an_irq_before_the_watched_instruction_is_not_an_arrival
     assert_eq!(e.cpu_state().unwrap().pc, 0x8001);
 }
 
+/// A frame boundary falling exactly on the watched instruction must
+/// neither lose nor double its arrival: the `Frame` stop pre-empts the
+/// `Pc` stop on the same boundary, and the arrival is reported by the next
+/// call. `INC $10` is watched; at the k-th arrival it has run k-1 times.
+#[test]
+fn a_frame_boundary_on_the_watched_instruction_neither_loses_nor_doubles_it() {
+    let mut coincided = 0u32;
+    for nops in 0u8..=4 {
+        let mut code = vec![0xE6, 0x10]; // 8000 INC $10     watched
+        code.extend(std::iter::repeat_n(0xEA, usize::from(nops)));
+        code.extend([0x80, 0xFC - nops]); // BRA $8000
+        let mut e = Emulator::new();
+        e.load_rom_bytes(demo_lorom_with(&code, None)).unwrap();
+        let (mut arrivals, mut frames) = (0u32, 0u32);
+        let mut failure = None;
+        e.run_script_watching(
+            &mut InputScript::new(),
+            ScriptBound::Frame(40),
+            &[0x00_8000],
+            |e, ev| {
+                match ev {
+                    WatchEvent::Pc(_) => {
+                        arrivals += 1;
+                        let seen = e.peek_memory(0x7E, 0x0010, 1).unwrap()[0];
+                        if u32::from(seen) != (arrivals - 1) % 256 && failure.is_none() {
+                            failure = Some(format!(
+                                "nops={nops}: arrival k={arrivals} saw $10={seen}, frame event {frames}"
+                            ));
+                        }
+                    }
+                    WatchEvent::Frame => {
+                        frames += 1;
+                        if e.cpu_state().unwrap().pc == 0x8000 {
+                            coincided += 1;
+                        }
+                    }
+                }
+                false
+            },
+        )
+        .unwrap();
+        assert_eq!(failure, None);
+        assert!(arrivals > 1000, "nops={nops}: the loop ran, {arrivals}");
+        assert!(frames >= 39, "nops={nops}: {frames} frame events");
+    }
+    assert!(coincided > 0, "no frame boundary fell on the watched PC");
+    eprintln!("frame boundaries on the watched PC: {coincided}");
+}
+
 #[test]
 fn a_watched_pc_is_reached_once_per_pass_and_frames_keep_the_script() {
     let run = |pc: u32| {
