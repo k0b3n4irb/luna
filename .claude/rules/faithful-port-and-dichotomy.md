@@ -1,4 +1,9 @@
-# Faithful Port + Step-by-Step Dichotomy (auto-loaded)
+---
+paths:
+  - "crates/**"
+  - "tools/**"
+---
+# Faithful Port + Step-by-Step Dichotomy
 
 IMPORTANT: This is **THE** method for luna. It supersedes ad-hoc debugging,
 heuristics, and trial-and-error. When it conflicts with a faster-looking

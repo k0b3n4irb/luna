@@ -145,7 +145,7 @@ jobs:
   # ---------------------------------------------------------------------
   # Lints (cargo clippy with -D warnings on top of workspace lints).
   # `--all-features` matches the local pre-commit gate
-  # (.claude/rules/rust-lint-discipline.md) so feature-gated code (today
+  # (.claude/rules/rebuild-discipline.md) so feature-gated code (today
   # the one feature of the workspace, luna-bus `test-utils`) is linted in
   # CI too.
   # ---------------------------------------------------------------------

@@ -1,73 +1,15 @@
-# Rebuild and Lint Discipline (auto-loaded)
+---
+paths:
+  - "crates/**"
+  - "Cargo.toml"
+  - "Cargo.lock"
+---
+# Rebuild and lint discipline (loaded when working on code)
 
-After *every* code change in this repo, before declaring a task done or
-committing, run the full workspace rebuild — **debug + release, all
-crates including `luna-gui` and the binaries** — so a stale binary is
-never the reason a feature appears broken at runtime.
+A stale binary or a lint left behind must never be why something looks
+broken, or why CI is red.
 
-## Enforced automatically (hook)
-
-A `PostToolUse` hook in `.claude/settings.json` runs the **full rebuild
-(debug + release, all targets) followed by clippy `--all-features`** after
-*every* `*.rs` edit, asynchronously, and re-wakes on failure. This makes
-"rebuild after each change" mechanical, not a thing to remember — a stale
-binary can never silently survive an edit. Do not remove or weaken it.
-
-On a machine shared with other heavy jobs, the hook first takes
-`$XDG_RUNTIME_DIR/heavy-jobs.lock` (when `flock` exists): one heavy job
-at a time. An edit made while a rebuild is still waiting for its turn is
-covered by that rebuild, so at most one waits. Run long test suites under
-the same lock (`flock "$XDG_RUNTIME_DIR/heavy-jobs.lock" <command>`).
-
-## Canonical rebuild command
-
-```
-cargo build --workspace --all-targets \
-  && cargo build --release --workspace --all-targets
-```
-
-Available as the `/rebuild` slash command.
-
-This catches:
-
-- conditional `#[cfg]` paths that only compile in release.
-- `luna-gui` regressions (it pulls many transitive crates; easy to
-  miss with per-crate builds).
-- example / test / benchmark targets that don't get hit by `cargo test`.
-
-Run `cargo test --workspace --lib --bins` separately when relevant — the
-rebuild above does not run tests, only compiles. `--bins` matters:
-`luna-cli` and `luna-gui` are binary crates, so `--lib` alone silently
-skips their unit tests. (CI runs the wider `cargo test --workspace
---all-features`, integration tests included; locally those pull the golden
-corpus through a debug build, hence the narrower pre-commit form.)
-
-When the work is purely refactoring a single crate's internals, you
-may still run a per-crate build first to iterate fast, but the
-workspace rebuild **must** pass before you commit.
-
-## Blocking gate before a commit (2026-11-04)
-
-The hook above is asynchronous (it only re-wakes) and fires only on
-`Edit`/`Write`/`MultiEdit` calls: an edit made through the shell, or a commit
-that does not wait for the verdict, goes through. A clippy lint thus reached
-`develop` and turned CI red for 16 hours. `tools/pre-commit-gate.sh` runs
-`cargo fmt --all --check` and the CI-form clippy (about 15 s warm) and refuses
-the commit; install it once with
-`ln -sf ../../tools/pre-commit-gate.sh .git/hooks/pre-commit`. After a push,
-follow the CI run to green (`gh run watch`).
-
-## Lint discipline
-
-CI runs the following — they must pass clean before commit:
-
-```
-cargo fmt --all --check
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-```
-
-Together with the rebuild + tests, this is the canonical pre-commit
-sequence:
+## The pre-commit sequence
 
 ```
 cargo build --workspace --all-targets \
@@ -77,24 +19,45 @@ cargo build --workspace --all-targets \
   && cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
+`/rebuild` runs the two builds. `--bins` matters: `luna-cli` and `luna-gui`
+are binary crates. CI runs `cargo check` and the wider `cargo test
+--workspace --all-features` (the golden corpus, a debug build locally).
+fmt and clippy are the exact CI commands. Never verify through a pipe
+(`| tail` zeroes the exit code). After a push, follow the CI run to green.
+
+## Two helpers, neither is a gate
+
+- The `PostToolUse` hook of `.claude/settings.json` rebuilds (debug +
+  release) and runs clippy after a `*.rs` edit, under the
+  `heavy-jobs.lock` flock. It is asynchronous (it only re-wakes on
+  failure) and sees only Edit/Write/MultiEdit: an edit through the shell
+  (sed, python, git checkout) bypasses it, and it never blocks a commit.
+  After a shell edit, `cargo build -p luna-gui` explicitly.
+- **The blocking gate** (2026-11-04, after a clippy lint kept CI red 16 h):
+  `tools/pre-commit-gate.sh` runs fmt and the CI-form clippy (about 15 s
+  warm) and refuses the commit. Install once:
+  `ln -sf ../../tools/pre-commit-gate.sh .git/hooks/pre-commit`.
+
+## Lint: the whole workspace stays clean
+
+1. Fix the code, not the lint.
+2. A lint wrong for our case gets a module-scoped `#![allow(...)]` at the
+   impl boundary with a one-line rationale, not scattered item-level
+   allows.
+3. Never `#[allow(warnings)]`, `#[allow(clippy::all)]` or
+   `#[allow(dead_code)]` to make it pass.
+4. `cargo clippy --fix` only for mechanical findings.
+5. `--all-features` is what reaches the conditional code (`test-utils`,
+   `atomic-oracle`).
+
+Clippy cannot see semantic errors (the `& 0x21F` OAM mask where `% 0x220`
+was needed): zero warnings only keeps the machine-detectable ones from
+burying them.
+
 ## After the tests: clean `/tmp`
 
-The integration tests, the smoke runs, `luna wram-trace`, the reference
-fetches and the agent's own scratch files all write to `/tmp`, and none of
-them clean up after themselves: a session of work leaves hundreds of
-entries there. Once the tests of a work session are over (and before
-handing the work back), run:
-
-```
-tools/clean-tmp.sh            # dry run: what would go
-tools/clean-tmp.sh --apply    # delete
-```
-
-Available as the `/clean-tmp` slash command. It deletes only luna's
-entries owned by the current user (`luna-*`, `luna_*`, `mesen_*`, and the
-scratchpads of the Claude Code sessions opened in this repository); other
-projects share `/tmp` and their files stay. So that the script finds
-everything, anything written to `/tmp` by hand goes under a `luna-` prefix
-(`/tmp/luna-smoke/`, `/tmp/luna-ref/`, `/tmp/luna-<topic>/`) or in the
-session's scratchpad, never at the top of `/tmp` under another name. Not
-while a test suite is still running: it would lose its fixtures.
+Tests, smoke runs and reference fetches leave hundreds of entries in
+`/tmp`. At the end of a test session, `tools/clean-tmp.sh` (dry run) then
+`--apply` (`/clean-tmp`) deletes luna's own (`luna-*`, `luna_*`,
+`mesen_*`, this repository's scratchpads). Write by hand only under a
+`luna-` prefix or in the scratchpad. Never while a suite is running.

@@ -38,26 +38,21 @@ A cycle-accurate-ish SNES emulator written in Rust. 12-crate workspace:
   cpal output stream (`src/audio.rs`, with 6-point cubic Hermite
   resampler, dynamic rate control + 5 Hz DC blocker).
 
-## Mandates (auto-loaded from `.claude/rules/`)
+## Rules (`.claude/rules/`)
 
-| Rule | Source | When it applies |
-|---|---|---|
-| **Faithful port + step-by-step dichotomy (THE method)** | `.claude/rules/faithful-port-and-dichotomy.md` | Any accuracy/timing bug; any subsystem that misbehaves vs hardware. Supersedes ad-hoc debugging. |
-| **HDMA / DMA faithful audit (PILLAR)** | `.claude/rules/hdma-dma-faithful-audit.md` | Edits to `luna-core/src/dma/`; any split/gradient/raster/status-bar layer bug. Drives `docs/hdma_ares_audit.md` (living audit vs ares). |
-| Reference-first implementation | `.claude/rules/reference-first.md` | Any SNES subsystem feature change |
-| Rebuild + lint discipline (+ `/tmp` cleanup after the tests) | `.claude/rules/rebuild-discipline.md` | Every code change before commit; end of a test session |
-| Rust lint discipline (clippy `--all-features`) | `.claude/rules/rust-lint-discipline.md` | Every code change before commit (extends rebuild) |
-| Coprocessor / DMA / PPU test sweep | `.claude/rules/coproc-testing.md` | Edits to `crates/luna-ppu/`, `crates/luna-core/src/dma/`, `crates/luna-core/src/coproc/`, `crates/luna-bus/src/sa1.rs` |
-| Test audible / visible fixes before commit | `.claude/rules/audible-fixes-test-first.md` | Any change to APU / PPU rendering / GUI audio or framebuffer |
-| API-first (CLI / MCP / GUI all drive `luna-api`, never `luna-core` directly) | `.claude/rules/api-first.md` | Any `luna-gui` change touching emulation / input / audio / framebuffer, or any front-end need for core state |
-| **One author: `~/.gitconfig`** — no `Co-authored-by` / tool trailers, never let GitHub commit (releases = fast-forward `develop:main`) | `.claude/rules/no-co-authored-by.md` | Every commit, merge, tag, PR or release |
-| No dependency bots (Dependabot, Renovate…) — permanently banned | `.claude/rules/no-dependency-bots.md` | Any dependency update, CI or repository-settings change |
-| GitHub housekeeping — five releases keep binaries, plus the one OpenSNES pins; Actions runs older than a month go (`tools/housekeeping.sh`) | `.claude/rules/housekeeping.md` | After every release; during ordinary work when the dry run lists something |
-| Documentation drift — the guide, `docs/` and the rules are checked against the tree (`tools/check-doc-drift.py`, CI job `docs`) | `.claude/rules/doc-drift.md` | Any change to `book/`, `docs/`, `.claude/`, the root `.md` files, a `luna` option or an MCP tool |
-| Direct exchanges with OpenSNES and the game — session to session, no GitHub issue between the three; the game tests with `target/stable/luna` | `.claude/rules/exchanges.md` | Start of a session; any request from or to a neighbour; any commit that lands on `develop` for one of them |
-| The agent house — each task to the agent whose model suffices (steward, watcher, scribe, craftsman, architect) | `.claude/rules/agents.md` | Every task: route it before doing it |
+Path-scoped rules load when you touch their files; read the matching one
+before the code, not after.
 
-Read the matching rule before touching the relevant code, not after.
+- **Always loaded**: `no-co-authored-by` (one author, GitHub never commits,
+  releases are a fast-forward `develop:main`), `exchanges` (neighbours, the
+  game tests `target/stable/luna`), `agents` (task → agent).
+- **Method, on `crates/**`**: `faithful-port-and-dichotomy` (THE method:
+  translate the reference's architecture, bisect), `reference-first` (ares
+  + Mesen2 before any subsystem change), `rebuild-discipline` (pre-commit
+  sequence, clippy `--all-features`, the blocking gate, `/tmp` cleanup).
+- **By area**: `api-first` (front-ends drive `luna-api` only),
+  `hdma-dma-faithful-audit`, `coproc-testing`, `audible-fixes-test-first`,
+  `doc-drift`, `housekeeping`, `no-dependency-bots` (permanently banned).
 
 ## Slash commands (`.claude/commands/`)
 
@@ -71,18 +66,10 @@ Read the matching rule before touching the relevant code, not after.
 
 ## Code style
 
-- Rust edition + toolchain version live in `rust-toolchain.toml` and
-  the workspace `Cargo.toml`. Don't pin elsewhere.
-- `cargo fmt` is the formatter; `cargo clippy --workspace --all-targets
-  --all-features -- -D warnings` is the lint gate (same form as CI).
-- Public items get a one-line doc comment minimum. Don't write
-  multi-paragraph docstrings for internal helpers — the code is the
-  contract.
-- Every commit, merge and tag is by the `~/.gitconfig` identity, with no
-  `Co-authored-by` or tool trailer (see the rule above).
-- Commit subjects follow `type(scope): description` —
-  `feat(ppu): ...`, `fix(core): ...`, `chore(ci): ...`. Backslash-
-  escape `$` in commit subjects (e.g. `\$4212`).
+Toolchain in `rust-toolchain.toml`; `cargo fmt` and clippy as in
+`rebuild-discipline`. Public items get a one-line doc comment. Commits:
+`type(scope): description`, `\$` escaped in subjects, author per
+`no-co-authored-by`.
 
 ## Reference docs (in `docs/`)
 
@@ -97,10 +84,5 @@ Read the matching rule before touching the relevant code, not after.
 
 ## What NOT to put here
 
-- Long workflows — use `.claude/commands/`.
-- Reference tables (key bindings, register maps, build matrices) —
-  use `docs/`.
-- Per-subsystem deep-dives — use `docs/` and link from the
-  matching rule file.
-- Anything Claude can derive from `git log`, `Cargo.toml`, or a
-  one-shot read of the source.
+Long workflows (`.claude/commands/`), reference tables (`docs/`), anything
+derivable from `git log`, `Cargo.toml` or the source.
