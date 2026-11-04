@@ -2009,6 +2009,94 @@ fn an_interrupt_taken_on_a_watched_instruction_is_not_an_arrival() {
     );
 }
 
+/// `NOP`s at `$8000..$8003` and a `BRA` back, an interrupt handler at
+/// `$8010` that counts itself in `$10` and returns. `cli` starts the
+/// program with `CLI` (the `IRQ` tests) instead of a `NOP`.
+fn demo_interrupt_loop(cli: bool) -> Emulator {
+    let mut code = vec![0xEA; 0x13];
+    code[0] = if cli { 0x58 } else { 0xEA }; // 8000 CLI / NOP
+    code[3] = 0x80; // 8003 BRA $8000
+    code[4] = 0xFB;
+    code[0x10..].copy_from_slice(&[0xE6, 0x10, 0x40]); // 8010 INC $10; 8012 RTI
+    let mut rom = demo_lorom_with(&code, Some(0x8010));
+    for off in [0x7FEE, 0x7FFE] {
+        rom[off] = 0x10;
+        rom[off + 1] = 0x80;
+    }
+    let mut e = Emulator::new();
+    e.load_rom_bytes(rom).unwrap();
+    // Park the PC on the watched instruction, nothing pending.
+    assert!(e.run_until_pc(0x00_8001, 10).unwrap());
+    e
+}
+
+fn handler_runs(e: &mut Emulator) -> u8 {
+    e.peek_memory(0x7E, 0x0010, 1).unwrap()[0]
+}
+
+/// The deterministic form of the guard in `run_to_pc_or_frame`: with an
+/// NMI latched, the PC standing on the watched instruction is not an
+/// arrival; the entry and the `RTI` run first.
+#[test]
+fn an_interrupt_taken_before_the_watched_instruction_is_not_an_arrival() {
+    let mut e = demo_interrupt_loop(false);
+    e.snes.as_mut().unwrap().cpu.trigger_nmi();
+    let stop = e.run_to_pc_or_frame(&[0x00_8001], 20, false).unwrap();
+    assert_eq!(stop, PcStop::Pc(0));
+    assert_eq!(
+        handler_runs(&mut e),
+        1,
+        "the handler ran before the arrival"
+    );
+    assert_eq!(e.cpu_state().unwrap().pc, 0x8001);
+}
+
+/// Control: nothing latched, the arrival is immediate.
+#[test]
+fn an_interrupt_taken_control_without_a_latch_stops_at_once() {
+    let mut e = demo_interrupt_loop(false);
+    let stop = e.run_to_pc_or_frame(&[0x00_8001], 20, false).unwrap();
+    assert_eq!(stop, PcStop::Pc(0));
+    assert_eq!(handler_runs(&mut e), 0);
+    assert_eq!(e.cpu_state().unwrap().pc, 0x8001);
+}
+
+/// Three laps with one NMI forced before the first call: three stops.
+#[test]
+fn an_interrupt_taken_does_not_add_an_arrival_over_three_laps() {
+    let mut e = demo_interrupt_loop(false);
+    e.snes.as_mut().unwrap().cpu.trigger_nmi();
+    let mut stops = 0;
+    let mut skip = false;
+    for _ in 0..3 {
+        let stop = e.run_to_pc_or_frame(&[0x00_8001], 20, skip).unwrap();
+        assert_eq!(stop, PcStop::Pc(0));
+        stops += 1;
+        if stops == 1 {
+            assert_eq!(handler_runs(&mut e), 1, "taken before the first arrival");
+        }
+        skip = true;
+    }
+    assert_eq!(stops, 3);
+    assert_eq!(handler_runs(&mut e), 1, "the one forced NMI, taken once");
+}
+
+/// The same for a latched IRQ (`I` clear, IRQ vector to the handler).
+#[test]
+fn an_interrupt_taken_as_an_irq_before_the_watched_instruction_is_not_an_arrival() {
+    let mut e = demo_interrupt_loop(true);
+    assert!(e.cpu_state().unwrap().p & 0x04 == 0, "I is clear");
+    e.snes.as_mut().unwrap().cpu.trigger_irq();
+    let stop = e.run_to_pc_or_frame(&[0x00_8001], 20, false).unwrap();
+    assert_eq!(stop, PcStop::Pc(0));
+    assert_eq!(
+        handler_runs(&mut e),
+        1,
+        "the handler ran before the arrival"
+    );
+    assert_eq!(e.cpu_state().unwrap().pc, 0x8001);
+}
+
 #[test]
 fn a_watched_pc_is_reached_once_per_pass_and_frames_keep_the_script() {
     let run = |pc: u32| {
