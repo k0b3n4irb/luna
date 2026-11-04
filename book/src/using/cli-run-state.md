@@ -469,6 +469,10 @@ With several `--poke-at`, a `--poke` in front of the first one, a
 `--poke-at` with no `--poke` after it and two `--poke-hit` for the same
 one are refused (exit 2).
 
+The writes happen in command-line order, one `--poke` after the other
+(and one `--poke-at` after the other when they share a routine and an
+arrival): where two of them overlap, the last one given wins.
+
 An arrival the run never reaches writes nothing, and that is an error
 (exit 1).
 
