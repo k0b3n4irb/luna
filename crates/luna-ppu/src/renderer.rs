@@ -890,14 +890,14 @@ fn compute_window_masks(ppu: &Ppu) -> WindowMasks {
 /// the tilemap (low byte) and pixel data (high byte) of the interleaved
 /// 64 KB tilemap / tileset.
 ///
-/// `M7SEL` bits 1:0 control the wrap / transparent behaviour outside
-/// the 128×128 field:
+/// `M7SEL` bits 7:6 (screen-over) control the wrap / transparent
+/// behaviour outside the 128×128 field:
 ///
 ///   * `00` / `01` — coordinates wrap (the 7-bit tile mask repeats)
 ///   * `10` — return transparent (force palette 0)
 ///   * `11` — use tile 0 outside the field
 ///
-/// Horizontal and vertical flips (`M7SEL` bits 6, 7) negate the
+/// Horizontal and vertical flips (`M7SEL` bits 0 and 1) negate the
 /// screen-space coordinate before the matrix multiply.
 #[must_use]
 pub(crate) fn render_mode7_scanline_indexed(
