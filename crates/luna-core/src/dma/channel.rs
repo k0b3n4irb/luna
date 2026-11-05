@@ -1,6 +1,7 @@
 //! Per-channel DMA state and transfer logic.
 
 use super::bus::DmaBus;
+use crate::hw_strict::HwRule;
 use luna_bus::{Addr24, make_addr};
 
 /// Can the DMA A-bus reach `addr`? It cannot touch the B-bus or CPU
@@ -33,7 +34,12 @@ const fn is_wram_a(addr: Addr24) -> bool {
 /// A-bus read with the `validA` gate (0 when blocked), latched into the
 /// MDR either way — ares `Channel::readA` (`dma.cpp:63-68`).
 fn read_a_valid<B: DmaBus>(bus: &mut B, addr: Addr24) -> u8 {
-    let v = if valid_a(addr) { bus.read_a(addr) } else { 0 };
+    let v = if valid_a(addr) {
+        bus.read_a(addr)
+    } else {
+        bus.hw_fault(HwRule::DmaForbiddenA, addr);
+        0
+    };
     bus.latch_mdr(v);
     v
 }
@@ -42,6 +48,8 @@ fn read_a_valid<B: DmaBus>(bus: &mut B, addr: Addr24) -> u8 {
 fn write_a_valid<B: DmaBus>(bus: &mut B, addr: Addr24, value: u8) {
     if valid_a(addr) {
         bus.write_a(addr, value);
+    } else {
+        bus.hw_fault(HwRule::DmaForbiddenA, addr);
     }
 }
 
@@ -52,6 +60,9 @@ fn write_a_valid<B: DmaBus>(bus: &mut B, addr: Addr24, value: u8) {
 /// suppressed and a B→A read returns 0.
 fn transfer_byte<B: DmaBus>(bus: &mut B, a_addr: Addr24, b_offset: u8, direction: Direction) {
     let b_valid = !(b_offset == 0x80 && is_wram_a(a_addr));
+    if !b_valid {
+        bus.hw_fault(HwRule::DmaWramPort, a_addr);
+    }
     match direction {
         Direction::AToB => {
             let v = read_a_valid(bus, a_addr);

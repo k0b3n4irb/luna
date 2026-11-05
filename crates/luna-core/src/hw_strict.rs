@@ -30,6 +30,15 @@ pub enum HwRule {
     /// R4 — a read of `$2138` / `$2139` / `$213A` / `$213B` under the
     /// conditions of R1-R3: the value is not the addressed byte.
     PpuRead,
+    /// R5 — a DMA / HDMA A-bus access in the forbidden zone (banks
+    /// `$00-$3F` / `$80-$BF`: `$2100-$21FF`, `$4000-$41FF`, `$4200-$421F`,
+    /// `$4300-$437F`): a read returns 0, a write is dropped (ares
+    /// `Channel::validA`, `dma.cpp:54-60`).
+    DmaForbiddenA,
+    /// R6 — a DMA transfer between WRAM and `$2180` (WMDATA): the B side is
+    /// suppressed and a B-to-A read returns 0 (ares `Channel::transfer`,
+    /// `dma.cpp:93-94`).
+    DmaWramPort,
 }
 
 impl HwRule {
@@ -41,6 +50,8 @@ impl HwRule {
             Self::OamWrite => "R2",
             Self::CgramWrite => "R3",
             Self::PpuRead => "R4",
+            Self::DmaForbiddenA => "R5",
+            Self::DmaWramPort => "R6",
         }
     }
 
@@ -54,6 +65,10 @@ impl HwRule {
             Self::PpuRead => {
                 "PPU memory read ($2138-$213B) while the picture is drawn: not the addressed byte"
             }
+            Self::DmaForbiddenA => {
+                "DMA A-bus access in $2100-$21FF / $4000-$41FF / $4200-$421F / $4300-$437F: read as 0 or dropped"
+            }
+            Self::DmaWramPort => "DMA between WRAM and $2180 (WMDATA): the B side does not happen",
         }
     }
 }

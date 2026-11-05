@@ -193,18 +193,63 @@ fn the_journal_is_off_by_default_and_never_changes_the_emulation() {
     assert_eq!(plain.wram[..], strict.wram[..]);
 }
 
-/// A one-byte DMA from `$00:8000` to B-bus register `$21<b>` on channel 0,
-/// started in a loop, with the screen on (`inidisp`).
-fn rom_dma_to(inidisp: u8, b: u8) -> Cartridge {
+/// A one-byte DMA on channel 0 between A-bus `src` and B-bus register
+/// `$21<b>` (`dmap` = `$00` A->B, `$80` B->A), started in a loop, with the
+/// screen on or off (`inidisp`).
+fn rom_dma(inidisp: u8, dmap: u8, b: u8, src: u32) -> Cartridge {
     let code = [
-        0xA9, inidisp, 0x8D, 0x00, 0x21, // LDA #inidisp ; STA $2100
-        0xA9, 0x00, 0x8D, 0x00, 0x43, // DMAP0 = A->B, mode 0
-        0xA9, b, 0x8D, 0x01, 0x43, // BBAD0
-        0xA9, 0x00, 0x8D, 0x02, 0x43, 0x8D, 0x03, 0x43, 0x8D, 0x04, 0x43, // A1T0, A1B0
-        0xA9, 0x01, 0x8D, 0x05, 0x43, 0xA9, 0x00, 0x8D, 0x06, 0x43, // DAS0 = 1
-        0xA9, 0x01, 0x8D, 0x0B, 0x42, // STA $420B
+        0xA9,
+        inidisp,
+        0x8D,
+        0x00,
+        0x21, // LDA #inidisp ; STA $2100
+        0xA9,
+        dmap,
+        0x8D,
+        0x00,
+        0x43, // DMAP0
+        0xA9,
+        b,
+        0x8D,
+        0x01,
+        0x43, // BBAD0
+        0xA9,
+        src as u8,
+        0x8D,
+        0x02,
+        0x43, // A1T0L
+        0xA9,
+        (src >> 8) as u8,
+        0x8D,
+        0x03,
+        0x43, // A1T0H
+        0xA9,
+        (src >> 16) as u8,
+        0x8D,
+        0x04,
+        0x43, // A1B0
+        0xA9,
+        0x01,
+        0x8D,
+        0x05,
+        0x43,
+        0xA9,
+        0x00,
+        0x8D,
+        0x06,
+        0x43, // DAS0 = 1
+        0xA9,
+        0x01,
+        0x8D,
+        0x0B,
+        0x42, // STA $420B
     ];
     rom_looping(&code, 5)
+}
+
+/// A one-byte DMA from `$00:8000` (ROM) to B-bus register `$21<b>`.
+fn rom_dma_to(inidisp: u8, b: u8) -> Cartridge {
+    rom_dma(inidisp, 0x00, b, 0x00_8000)
 }
 
 #[test]
@@ -226,4 +271,43 @@ fn a_dma_into_a_ppu_port_is_judged_like_a_cpu_write() {
     }
     // The same DMA in forced blank is clean.
     assert!(run_journal(rom_dma_to(0x80, 0x18), 2).is_empty());
+}
+
+#[test]
+fn r5_a_dma_through_the_forbidden_a_bus_zone_is_flagged() {
+    // Reads from each forbidden window, writes into one (B->A).
+    for src in [0x00_2100, 0x00_4000, 0x00_4210, 0x80_4300, 0x3F_437F] {
+        let faults = run_journal(rom_dma(0x80, 0x00, 0x18, src), 2);
+        assert!(!faults.is_empty(), "src {src:#08x}");
+        assert!(faults.iter().all(|f| f.rule == HwRule::DmaForbiddenA
+            && f.addr == src
+            && f.origin == MemOrigin::Dma(0)));
+    }
+    let faults = run_journal(rom_dma(0x80, 0x80, 0x39, 0x00_4300), 2);
+    assert!(faults.iter().any(|f| f.rule == HwRule::DmaForbiddenA));
+    // Healthy: ROM, WRAM, the open $4400 edge, a bank the rule does not
+    // cover (bank $40 reaches no I/O).
+    for src in [0x00_8000, 0x7E_0000, 0x00_4400, 0x40_2100] {
+        let faults = run_journal(rom_dma(0x80, 0x00, 0x18, src), 2);
+        assert!(
+            faults.iter().all(|f| f.rule != HwRule::DmaForbiddenA),
+            "src {src:#08x}"
+        );
+    }
+}
+
+#[test]
+fn r6_wram_to_the_wmdata_port_is_flagged_rom_to_it_is_not() {
+    for src in [0x7E_1000, 0x7F_0000, 0x00_0100, 0x80_1FFF] {
+        let faults = run_journal(rom_dma(0x80, 0x00, 0x80, src), 2);
+        assert!(!faults.is_empty(), "src {src:#08x}");
+        assert!(
+            faults
+                .iter()
+                .all(|f| f.rule == HwRule::DmaWramPort && f.addr == src)
+        );
+    }
+    // ROM -> WMDATA and WRAM -> VRAM data port (forced blank) are fine.
+    assert!(run_journal(rom_dma(0x80, 0x00, 0x80, 0x00_8000), 2).is_empty());
+    assert!(run_journal(rom_dma(0x80, 0x00, 0x18, 0x7E_0000), 2).is_empty());
 }

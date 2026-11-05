@@ -2543,6 +2543,18 @@ impl DmaBusView<'_> {
 }
 
 impl DmaBus for DmaBusView<'_> {
+    fn hw_fault(&mut self, rule: crate::hw_strict::HwRule, addr: u32) {
+        if let Some(log) = self.hw_faults.as_deref_mut() {
+            log.note(
+                rule,
+                self.cpu_pc,
+                addr,
+                MemOrigin::from_channel_tag(self.dma_channel),
+                (self.trace_frame, self.trace_line, self.trace_hclock),
+            );
+        }
+    }
+
     fn read_a(&mut self, addr: Addr24) -> u8 {
         // Remember this byte's source so the paired write_b (A→B runs
         // read-then-write per byte) can record where a VRAM byte came from.

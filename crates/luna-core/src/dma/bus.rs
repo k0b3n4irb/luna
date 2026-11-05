@@ -30,6 +30,11 @@ pub trait DmaBus {
     /// the test buses.
     fn latch_mdr(&mut self, _value: u8) {}
 
+    /// Hardware strict mode: the transfer just hit a rule the hardware
+    /// enforces silently (R5 / R6), at this A-bus `addr`. Observation only.
+    /// Default no-op for the test buses.
+    fn hw_fault(&mut self, _rule: crate::hw_strict::HwRule, _addr: u32) {}
+
     /// Per-byte cooperative tick — called by the DMA channel after
     /// every transferred byte so cartridge coprocessors (SA-1, Super
     /// FX, DSP-N, …) get a chance to run *during* the burst instead
