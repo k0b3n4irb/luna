@@ -311,3 +311,33 @@ fn r6_wram_to_the_wmdata_port_is_flagged_rom_to_it_is_not() {
     assert!(run_journal(rom_dma(0x80, 0x00, 0x80, 0x00_8000), 2).is_empty());
     assert!(run_journal(rom_dma(0x80, 0x00, 0x18, 0x7E_0000), 2).is_empty());
 }
+
+/// `LDA #nmitimen ; STA $4200 ; loop: LDA $40<port>`.
+fn rom_joy_read(nmitimen: u8, port: u8) -> (Cartridge, u32) {
+    let code = [0xA9, nmitimen, 0x8D, 0x00, 0x42, 0xAD, port, 0x40];
+    (rom_looping(&code, 5), 0x8005)
+}
+
+#[test]
+fn r8_a_manual_joypad_read_during_the_auto_read_is_flagged() {
+    for port in [0x16, 0x17] {
+        let (cart, pc) = rom_joy_read(0x01, port);
+        let faults = run_journal(cart, 3);
+        assert!(!faults.is_empty(), "port {port:#x}");
+        assert!(faults.iter().all(|f| f.rule == HwRule::AutoJoypadRead
+            && f.pc == pc
+            && f.addr == 0x4000 | u32::from(port)));
+        // Only in the few lines after VBlank starts, never on a picture line.
+        assert!(faults.iter().all(|f| f.line >= 225));
+    }
+}
+
+#[test]
+fn r8_stays_quiet_without_auto_joypad_and_outside_its_window() {
+    // Auto-read off: every read is a manual read.
+    let (cart, _) = rom_joy_read(0x00, 0x16);
+    assert!(run_journal(cart, 3).is_empty());
+    // Auto-read on but the reads are of an unrelated port.
+    let code = [0xA9, 0x01, 0x8D, 0x00, 0x42, 0xAD, 0x12, 0x42];
+    assert!(run_journal(rom_looping(&code, 5), 3).is_empty());
+}

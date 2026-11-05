@@ -39,6 +39,11 @@ pub enum HwRule {
     /// suppressed and a B-to-A read returns 0 (ares `Channel::transfer`,
     /// `dma.cpp:93-94`).
     DmaWramPort,
+    /// R8 — a manual read of `$4016` / `$4017` while the auto-joypad read is
+    /// running (`$4212` bit 0 set): the pad's shift register is being
+    /// clocked by the console, so the bit read is not the one the program
+    /// expects (ares `cpu/io.cpp` `$4212`, `$4016`).
+    AutoJoypadRead,
 }
 
 impl HwRule {
@@ -52,6 +57,7 @@ impl HwRule {
             Self::PpuRead => "R4",
             Self::DmaForbiddenA => "R5",
             Self::DmaWramPort => "R6",
+            Self::AutoJoypadRead => "R8",
         }
     }
 
@@ -69,6 +75,7 @@ impl HwRule {
                 "DMA A-bus access in $2100-$21FF / $4000-$41FF / $4200-$421F / $4300-$437F: read as 0 or dropped"
             }
             Self::DmaWramPort => "DMA between WRAM and $2180 (WMDATA): the B side does not happen",
+            Self::AutoJoypadRead => "manual $4016/$4017 read during the auto-joypad read",
         }
     }
 }

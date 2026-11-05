@@ -3768,6 +3768,18 @@ impl SnesBus<'_> {
         }
         if let Some(offset) = Self::is_joypad_serial(addr) {
             // $4016/$4017 manual serial read.
+            // Strict mode: the console is clocking the pads itself.
+            if self.cpu_regs.hvbjoy & 0x01 != 0
+                && let Some(log) = self.hw_faults.as_mut()
+            {
+                log.note(
+                    crate::hw_strict::HwRule::AutoJoypadRead,
+                    self.cpu_pc_full,
+                    u32::from(offset),
+                    MemOrigin::Cpu,
+                    (self.frame_count, self.ppu_line, self.mcycles_in_line as u16),
+                );
+            }
             //
             // Per Mesen2 (`BaseControlDevice.cpp::StrobeProcessRead`
             // + `SnesController.cpp::ReadRam`) and ares
