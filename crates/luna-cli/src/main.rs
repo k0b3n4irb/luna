@@ -26,6 +26,7 @@ mod record;
 mod rom;
 mod run;
 mod state;
+mod strict;
 mod test_cmd;
 mod ticks;
 mod wram_trace;
@@ -168,6 +169,12 @@ enum Command {
         /// shows on real hardware's garbage RAM shows here too.
         #[arg(long = "power-on")]
         power_on: Option<String>,
+        /// Hardware strict mode: also journal what a real console would
+        /// refuse or corrupt (see `luna strict`) and print it after the
+        /// state. Exit 1 if there is any fault. Observation only: the run
+        /// itself is unchanged.
+        #[arg(long = "strict-hw")]
+        strict_hw: bool,
     },
     /// Run manifest-driven homebrew tests: one TOML per
     /// test (rom, input, run bound, asserts), executed in-process
@@ -1436,6 +1443,36 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Hardware strict mode: run a ROM and list what a real console would
+    /// have refused or corrupted — a VRAM/OAM/CGRAM write or a PPU memory
+    /// read while the picture is drawn (R1-R4), a DMA through the blocked
+    /// A-bus zone (R5) or between WRAM and $2180 (R6), a manual joypad read
+    /// during the auto-read (R8). The journal only observes: the run is
+    /// identical to a plain one. One line per distinct (rule, pc, address).
+    ///
+    /// Exit 0 = no fault, 1 = at least one fault, 2 = the ROM cannot be
+    /// loaded.
+    Strict {
+        /// Path to the .sfc / .smc ROM file.
+        rom: PathBuf,
+        /// Number of PPU frames to run.
+        #[arg(long, default_value_t = 600)]
+        frames: u64,
+        /// Print the report as JSON instead of text.
+        #[arg(long)]
+        json: bool,
+        #[arg(
+            long = "force-mapper",
+            help = mapper_help("Force a cartridge mapper, bypassing header auto-detection.")
+        )]
+        force_mapper: Option<String>,
+        /// Force the video standard (ntsc, pal).
+        #[arg(long = "force-region")]
+        force_region: Option<String>,
+        /// What RAM holds before the ROM boots (zero, ones, random, random=<seed>).
+        #[arg(long = "power-on")]
+        power_on: Option<String>,
+    },
     /// Run a ROM until its music driver is playing, then export the APU
     /// state as a `.spc` sound file (SNES-SPC700 Sound File Data v0.30):
     /// SPC700 registers + 64 KB ARAM + DSP registers + IPL ROM, playable
@@ -1568,6 +1605,7 @@ fn main() -> ExitCode {
             force_mapper,
             force_region,
             power_on,
+            strict_hw,
         } => run(
             &rom,
             steps,
@@ -1583,6 +1621,7 @@ fn main() -> ExitCode {
             force_mapper.as_deref(),
             force_region.as_deref(),
             power_on.as_deref(),
+            strict_hw,
         ),
         Command::Test {
             paths,
@@ -2141,6 +2180,21 @@ fn main() -> ExitCode {
             bench::run_bench(&dir, &out, frames, script, jobs)
         }
         Command::CartCheck { rom, json } => cart_check::run_cart_check(&rom, json),
+        Command::Strict {
+            rom,
+            frames,
+            json,
+            force_mapper,
+            force_region,
+            power_on,
+        } => strict::run_strict(
+            &rom,
+            frames,
+            json,
+            force_mapper.as_deref(),
+            force_region.as_deref(),
+            power_on.as_deref(),
+        ),
         Command::SpcDump {
             rom,
             steps,

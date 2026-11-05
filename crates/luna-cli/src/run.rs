@@ -23,6 +23,7 @@ pub(crate) fn run(
     force_mapper: Option<&str>,
     force_region: Option<&str>,
     power_on: Option<&str>,
+    strict_hw: bool,
 ) -> ExitCode {
     let mut em = luna_api::Emulator::new();
     // Shared loader (issue #95): honours `--force-mapper` so a bad-checksum
@@ -52,6 +53,10 @@ pub(crate) fn run(
         && let Err(e) = em.enable_nocash_log()
     {
         eprintln!("error: enable_nocash_log: {e}");
+        return ExitCode::from(1);
+    }
+    if strict_hw && let Err(e) = em.enable_hw_strict() {
+        eprintln!("error: enable_hw_strict: {e}");
         return ExitCode::from(1);
     }
     if wdm_out.is_some()
@@ -225,7 +230,22 @@ pub(crate) fn run(
         eprintln!("\nerror: could not hash frame: {e}");
         return ExitCode::from(1);
     }
-    if core_panicked {
+    let mut strict_faults = false;
+    if strict_hw {
+        let frames = em.frame_count().unwrap_or(0);
+        match em.take_hw_faults() {
+            Ok(report) => {
+                println!("\n--- strict ---");
+                println!("{}", crate::strict::render_text(&report, frames));
+                strict_faults = !report.faults.is_empty() || report.overflow > 0;
+            }
+            Err(e) => {
+                eprintln!("\nerror: take_hw_faults: {e}");
+                return ExitCode::from(1);
+            }
+        }
+    }
+    if core_panicked || strict_faults {
         return ExitCode::from(1);
     }
     ExitCode::SUCCESS

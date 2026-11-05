@@ -44,6 +44,7 @@ pub use luna_ppu::TilemapImage;
 /// texture/window through `luna-api` rather than depending on `luna-ppu`.
 pub use luna_ppu::{FRAME_H, FRAME_H_MAX, FRAME_W};
 use serde::Serialize;
+pub use strict::{StrictFault, StrictReport, strict_rules};
 
 /// Faithful Mesen2 SNES Event Viewer data layer (categories, colors, register
 /// names, config). The GUI Event Viewer panel consumes this via the accessors
@@ -77,6 +78,7 @@ pub mod memory_search;
 pub mod memory_view;
 pub mod paths;
 mod power_on;
+pub mod strict;
 pub mod symbols;
 pub mod ticks;
 pub mod ticks_compare;

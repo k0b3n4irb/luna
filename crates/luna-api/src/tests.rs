@@ -4518,3 +4518,62 @@ fn the_trace_logger_window_rows_match_the_guide() {
         rows[0].text
     );
 }
+
+/// Backdrop turned red in forced blank, screen switched on, then `STA $2118`
+/// in a loop: a VRAM write while the picture is drawn (strict rule R1).
+fn strict_fault_rom() -> Vec<u8> {
+    demo_lorom_with(
+        &[
+            0xA9, 0x80, 0x8D, 0x00, 0x21, // forced blank
+            0x9C, 0x21, 0x21, // STZ $2121
+            0xA9, 0x1F, 0x8D, 0x22, 0x21, 0xA9, 0x00, 0x8D, 0x22, 0x21, // red
+            0xA9, 0x0F, 0x8D, 0x00, 0x21, // screen on
+            0x8D, 0x18, 0x21, 0x80, 0xFB, // loop: STA $2118
+        ],
+        None,
+    )
+}
+
+fn run_frames(e: &mut Emulator, frames: u64) {
+    while e.frame_count().unwrap() < frames {
+        e.step_until_frame(FRAME_STEP_BUDGET).unwrap();
+    }
+}
+
+#[test]
+fn strict_mode_reports_a_fault_and_leaves_the_frame_hash_untouched() {
+    let mut plain = Emulator::new();
+    plain.load_rom_bytes(strict_fault_rom()).unwrap();
+    assert!(!plain.hw_strict_enabled().unwrap());
+    let mut strict = Emulator::new();
+    strict.load_rom_bytes(strict_fault_rom()).unwrap();
+    strict.enable_hw_strict().unwrap();
+    assert!(strict.hw_strict_enabled().unwrap());
+
+    run_frames(&mut plain, 4);
+    run_frames(&mut strict, 4);
+    assert_eq!(
+        plain.frame_hash(false).unwrap(),
+        strict.frame_hash(false).unwrap(),
+        "the journal only observes"
+    );
+    assert_eq!(
+        plain.state().stats.total_mclk,
+        strict.state().stats.total_mclk
+    );
+
+    let report = strict.take_hw_faults().unwrap();
+    assert_eq!(report.overflow, 0);
+    assert_eq!(report.faults.len(), 1, "one site, folded: {report:?}");
+    let f = &report.faults[0];
+    assert_eq!(
+        (f.rule, f.pc.as_str(), f.addr.as_str()),
+        ("R1", "$00:8017", "$2118")
+    );
+    assert_eq!(f.origin, "cpu");
+    assert!(f.count > 100, "folded count {}", f.count);
+    assert_eq!(report.occurrences(), f.count);
+    // Drained: the next take is empty; a journal that is off reports none.
+    assert!(strict.take_hw_faults().unwrap().faults.is_empty());
+    assert!(plain.take_hw_faults().unwrap().faults.is_empty());
+}
