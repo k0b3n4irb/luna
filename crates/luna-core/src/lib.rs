@@ -14,6 +14,7 @@ pub mod controller;
 pub mod coproc;
 pub mod cpu_regs;
 pub mod dma;
+pub mod hw_strict;
 pub mod mclk;
 pub mod power;
 pub mod snes;
@@ -26,6 +27,7 @@ pub use breakpoints::{
 };
 pub use cpu_regs::CpuRegs;
 pub use dma::{DmaTraceEvent, DmaTraceLog};
+pub use hw_strict::{HW_FAULT_MAX_DISTINCT, HwFault, HwFaultLog, HwRule};
 pub use luna_apu::Spc700TraceEvent;
 pub use luna_bus::{
     ByteCounters, CartMemory, CoprocAccess, CoprocBreak, CoprocCondition, CoprocHit, CoprocRegs,

@@ -275,6 +275,12 @@ pub struct Snes {
     /// program's own log/assert output. Enable via [`Snes::enable_nocash_log`].
     #[serde(skip)]
     pub nocash_log: Option<Vec<u8>>,
+
+    /// Hardware strict mode journal ([`crate::hw_strict`]): accesses a real
+    /// console refuses or corrupts. `None` (the default) records nothing;
+    /// it only ever observes. Never in a save-state.
+    #[serde(skip)]
+    pub hw_faults: Option<crate::hw_strict::HwFaultLog>,
 }
 
 /// One CPU↔APU mailbox transfer, captured at `$2140-$2143`. luna-core
@@ -1201,6 +1207,7 @@ impl Snes {
             gsu_bus_log: None,
             breakpoints: None,
             nocash_log: None,
+            hw_faults: None,
         })
     }
 
@@ -1552,6 +1559,29 @@ impl Snes {
             Some(buf) => std::mem::take(buf),
             None => Vec::new(),
         }
+    }
+
+    /// Start journalling the accesses a real console refuses or corrupts
+    /// ([`crate::hw_strict`]). Read-only: emulation is unchanged.
+    pub fn enable_hw_strict(&mut self) {
+        if self.hw_faults.is_none() {
+            self.hw_faults = Some(crate::hw_strict::HwFaultLog::default());
+        }
+    }
+
+    /// Is the strict journal on?
+    #[must_use]
+    pub const fn hw_strict_enabled(&self) -> bool {
+        self.hw_faults.is_some()
+    }
+
+    /// Drain the strict journal: the distinct faults in order of first
+    /// occurrence, and how many new distinct ones were dropped for lack of
+    /// room.
+    pub fn take_hw_faults(&mut self) -> (Vec<crate::hw_strict::HwFault>, u64) {
+        self.hw_faults
+            .as_mut()
+            .map_or_else(|| (Vec::new(), 0), crate::hw_strict::HwFaultLog::take)
     }
 
     /// Cached scanlines-per-frame for the current region — propagates
@@ -2121,6 +2151,8 @@ struct SnesBus<'a> {
     breakpoints: &'a mut Option<Box<crate::breakpoints::BreakpointSet>>,
     /// `$21FC` Nocash-TTY capture (the SDK's `SNES_NOCASH`/`SNES_ASSERT`).
     nocash_log: &'a mut Option<Vec<u8>>,
+    /// Hardware strict journal; `None` = off.
+    hw_faults: &'a mut Option<crate::hw_strict::HwFaultLog>,
     /// The trace logger's mark, when armed (see [`Snes::opcode_fetch`]).
     opcode_fetch: Option<&'a mut Option<FetchPoint>>,
     /// [`Snes::cpu_cycles`].
@@ -2305,6 +2337,7 @@ impl Snes {
             gsu_bus_log,
             breakpoints,
             nocash_log,
+            hw_faults,
             opcode_fetch,
             cpu_cycles,
             step_accesses,
@@ -2344,6 +2377,7 @@ impl Snes {
             gsu_bus_log,
             breakpoints,
             nocash_log,
+            hw_faults,
             opcode_fetch: opcode_fetch.as_mut(),
             cpu_cycles,
             step_accesses,
@@ -2423,6 +2457,8 @@ struct DmaBusView<'a> {
     /// PC of the instruction whose bus access ran this burst / line —
     /// stamped as the event's `pc_full`.
     cpu_pc: u32,
+    /// Hardware strict journal; `None` = off.
+    hw_faults: Option<&'a mut crate::hw_strict::HwFaultLog>,
     /// Master clock at the burst / line start — stamped as `mclk_total`
     /// (byte-level advance within a burst is not modelled).
     trace_mclk: u64,
@@ -2453,6 +2489,31 @@ impl DmaBusView<'_> {
             }
         } else {
             log.clear();
+        }
+    }
+
+    /// Strict mode: journal a DMA / HDMA access to PPU register `offset`
+    /// when it breaks a rule at the burst's (or HDMA line's) beam position.
+    fn strict_ppu_access(&mut self, offset: u8, write: bool) {
+        let Some(log) = self.hw_faults.as_deref_mut() else {
+            return;
+        };
+        let overscan = self.ppu.setini & 0x04 != 0;
+        if let Some(rule) = crate::hw_strict::ppu_access_rule(
+            offset,
+            write,
+            self.trace_line,
+            self.trace_hclock,
+            vblank_start_line(overscan),
+            self.ppu.inidisp & 0x80 != 0,
+        ) {
+            log.note(
+                rule,
+                self.cpu_pc,
+                0x2100 | u32::from(offset),
+                MemOrigin::from_channel_tag(self.dma_channel),
+                (self.trace_frame, self.trace_line, self.trace_hclock),
+            );
         }
     }
 
@@ -2522,6 +2583,7 @@ impl DmaBus for DmaBusView<'_> {
         // address, cpu.r.mdr)`).
         self.count(0x2100 | u32::from(b_offset), Access::Read);
         if b_offset <= 0x3F {
+            self.strict_ppu_access(b_offset, false);
             let value = self.ppu.read(b_offset, *self.mdr);
             self.drain_ppu_accesses();
             value
@@ -2552,6 +2614,7 @@ impl DmaBus for DmaBusView<'_> {
         self.note_write(0x2100 | u32::from(b_offset), value);
         self.count(0x2100 | u32::from(b_offset), Access::Write);
         if b_offset <= 0x3F {
+            self.strict_ppu_access(b_offset, true);
             // Mirror of the CPU path's intra-line partial flush (gap G6,
             // `write_inner` $21xx): a DMA byte hitting a render-affecting
             // register mid-line must commit the in-progress dots with the
@@ -3017,6 +3080,7 @@ impl SnesBus<'_> {
                 frozen_writes: self.frozen_writes.as_deref(),
                 breakpoints: self.breakpoints.as_deref_mut(),
                 cpu_pc: self.cpu_pc_full,
+                hw_faults: self.hw_faults.as_mut(),
                 trace_mclk: line_start_mclk,
             };
             hdma_stall += self
@@ -3118,6 +3182,7 @@ impl SnesBus<'_> {
                 frozen_writes: self.frozen_writes.as_deref(),
                 breakpoints: self.breakpoints.as_deref_mut(),
                 cpu_pc: self.cpu_pc_full,
+                hw_faults: self.hw_faults.as_mut(),
                 trace_mclk: line_start_mclk,
             };
             hdma_stall += self.dma.hdma_init(&mut view, line_start_mclk, clock_count);
@@ -3220,6 +3285,33 @@ impl SnesBus<'_> {
     #[inline]
     const fn hv(&self) -> (u16, u16) {
         ((self.mcycles_in_line / 4) as u16, self.ppu_line)
+    }
+
+    /// Strict mode: journal a CPU access to a PPU register `offset` (from
+    /// `$2100`) when it breaks a rule at the beam's current position.
+    /// Read-only: emulation never looks at the journal.
+    fn strict_ppu_access(&mut self, offset: u8, write: bool) {
+        if self.hw_faults.is_none() {
+            return;
+        }
+        let (line, hclock) = (self.ppu_line, self.hclock());
+        if let Some(rule) = crate::hw_strict::ppu_access_rule(
+            offset,
+            write,
+            line,
+            hclock,
+            self.vblank_start_line(),
+            self.ppu.inidisp & 0x80 != 0,
+        ) && let Some(log) = self.hw_faults.as_mut()
+        {
+            log.note(
+                rule,
+                self.cpu_pc_full,
+                0x2100 | u32::from(offset),
+                MemOrigin::Cpu,
+                (self.frame_count, line, hclock),
+            );
+        }
     }
 
     /// The exact horizontal master-clock position within the current scanline
@@ -3421,6 +3513,7 @@ impl SnesBus<'_> {
                     frozen_writes: self.frozen_writes.as_deref(),
                     breakpoints: self.breakpoints.as_deref_mut(),
                     cpu_pc: self.cpu_pc_full,
+                    hw_faults: self.hw_faults.as_mut(),
                     trace_mclk: mclk_at_edge,
                 };
                 self.dma.run_mdma(&mut view, value)
@@ -3483,6 +3576,7 @@ impl SnesBus<'_> {
                     frozen_writes: self.frozen_writes.as_deref(),
                     breakpoints: self.breakpoints.as_deref_mut(),
                     cpu_pc: self.cpu_pc_full,
+                    hw_faults: self.hw_faults.as_mut(),
                     trace_mclk: *self.mclk_total,
                 };
                 self.dma.run_mdma_segment(&mut view, value, seg_bytes);
@@ -3620,6 +3714,7 @@ impl SnesBus<'_> {
                     );
                 }
             }
+            self.strict_ppu_access(off, false);
             let value = self.ppu.read(off, *self.mdr);
             self.drain_ppu_accesses();
             return value;
@@ -3889,6 +3984,7 @@ impl SnesBus<'_> {
                     self.ppu.oam.reload_address_from_latch();
                 }
             }
+            self.strict_ppu_access(off, true);
             self.ppu.write(off, value);
             self.drain_ppu_accesses();
             if off == 0x00 {
@@ -4073,3 +4169,6 @@ impl SnesBus<'_> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod hw_strict_tests;
