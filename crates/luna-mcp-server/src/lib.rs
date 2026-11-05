@@ -47,6 +47,8 @@
 //! - `set_mouse { dx, dy, buttons }` / `set_superscope { x, y, buttons }`
 //!   → pointer-device input.
 //! - `enable_profile` / `take_profile` → master cycles per symbol (issue #227).
+//! - `enable_hw_strict` / `take_hw_faults` → the hardware strict journal
+//!   (what a real console would refuse or corrupt, rules R1-R8).
 //! - `enable_nocash_log` / `take_nocash_log` and `enable_wdm_log` /
 //!   `take_wdm_log` → the SDK assert/log channels ($21FC Nocash TTY
 //!   text + WDM assert hits).
@@ -806,6 +808,43 @@ pub struct CartCheckResult {
     pub ok: bool,
     /// The findings, in rule order.
     pub findings: Vec<CartCheckFinding>,
+}
+
+/// One `take_hw_faults` fault: a rule broken by one instruction at one
+/// address.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct HwFaultEntry {
+    /// Rule code, `R1`..`R8`.
+    pub rule: String,
+    /// One-line statement of the rule.
+    pub what: String,
+    /// Address of the instruction behind the access (`$bb:aaaa`).
+    pub pc: String,
+    /// The address touched (`$2118`, an A-bus address, `$4016`).
+    pub addr: String,
+    /// `cpu`, `dma<n>` or `hdma<n>`.
+    pub origin: String,
+    /// Frame of the first occurrence.
+    pub frame: u64,
+    /// Scanline of the first occurrence.
+    pub line: u16,
+    /// Master-clock position in the line of the first occurrence.
+    pub hclock: u16,
+    /// How many times this (rule, pc, address) happened.
+    pub count: u64,
+}
+
+/// `take_hw_faults` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct HwFaultsResult {
+    /// `true` when there is no fault and nothing was dropped.
+    pub ok: bool,
+    /// Total occurrences, folded ones included.
+    pub occurrences: u64,
+    /// New distinct faults dropped because the journal was full.
+    pub overflow: u64,
+    /// The distinct faults, in order of first occurrence.
+    pub faults: Vec<HwFaultEntry>,
 }
 
 /// `capabilities` result (issue #90).
@@ -4887,6 +4926,56 @@ impl LunaServer {
     }
 
     // ------------- SDK assert/log channels (issue #168) -------------
+
+    #[rmcp::tool(
+        description = "Start the hardware strict journal: record what a real console \
+                                would refuse or corrupt — a VRAM/OAM/CGRAM write or a PPU \
+                                memory read while the picture is drawn (R1-R4), a DMA through \
+                                the blocked A-bus zone (R5) or between WRAM and $2180 (R6), a \
+                                manual joypad read during the auto-read (R8). Observation \
+                                only: frames are identical. Loading a ROM turns it off again. \
+                                Drain with `take_hw_faults`."
+    )]
+    async fn enable_hw_strict(&self) -> Result<rmcp::Json<EmptyOk>, ErrorData> {
+        {
+            let mut em = self.emulator.lock().await;
+            em.enable_hw_strict().map_err(|e| api_err_to_mcp(&e))?;
+        }
+        Ok(rmcp::Json(EmptyOk { ok: true }))
+    }
+
+    #[rmcp::tool(
+        description = "Drain the hardware strict journal: one entry per distinct (rule, pc, \
+                                address) with how many times it happened and where it first \
+                                did. Enable first with `enable_hw_strict`, then run/step. \
+                                `ok` is true when nothing was recorded."
+    )]
+    async fn take_hw_faults(&self) -> Result<rmcp::Json<HwFaultsResult>, ErrorData> {
+        let report = {
+            let mut em = self.emulator.lock().await;
+            em.take_hw_faults().map_err(|e| api_err_to_mcp(&e))?
+        };
+        Ok(rmcp::Json(HwFaultsResult {
+            ok: report.faults.is_empty() && report.overflow == 0,
+            occurrences: report.occurrences(),
+            overflow: report.overflow,
+            faults: report
+                .faults
+                .into_iter()
+                .map(|f| HwFaultEntry {
+                    rule: f.rule.to_string(),
+                    what: f.what.to_string(),
+                    pc: f.pc,
+                    addr: f.addr,
+                    origin: f.origin,
+                    frame: f.frame,
+                    line: f.line,
+                    hclock: f.hclock,
+                    count: f.count,
+                })
+                .collect(),
+        }))
+    }
 
     #[rmcp::tool(
         description = "Start capturing the $21FC Nocash TTY — the SDK debug text \

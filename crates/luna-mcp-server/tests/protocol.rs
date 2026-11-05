@@ -264,3 +264,62 @@ async fn tools_list_carries_the_cache_hints_its_protocol_version_requires() {
     assert!(legacy.get("ttlMs").is_none() && legacy.get("cacheScope").is_none());
     assert!(legacy["tools"].as_array().is_some_and(|t| !t.is_empty()));
 }
+
+fn args(v: &serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
+    v.as_object().expect("object").clone()
+}
+
+/// The hardware strict journal over the wire: a synthetic ROM that writes
+/// `$2118` with the screen on is reported as R1, and a drained journal is
+/// empty. Nothing of any game: the image is built here.
+#[tokio::test]
+async fn hw_strict_journal_round_trips_over_the_wire() {
+    use base64::Engine as _;
+    let mut rom = vec![0u8; 0x1_0000];
+    // LDA #$0F ; STA $2100 ; loop: STA $2118 ; BRA loop
+    rom[..10].copy_from_slice(&[0xA9, 0x0F, 0x8D, 0x00, 0x21, 0x8D, 0x18, 0x21, 0x80, 0xFB]);
+    rom[0x7FC0..0x7FD5].copy_from_slice(b"LUNA MCP STRICT      ");
+    rom[0x7FD5] = 0x20;
+    rom[0x7FD7] = 0x07;
+    rom[0x7FFC] = 0x00;
+    rom[0x7FFD] = 0x80;
+    let client = connect().await;
+    client
+        .call_tool(
+            CallToolRequestParams::new("load_rom_bytes").with_arguments(args(&serde_json::json!({
+                "rom_base64": base64::engine::general_purpose::STANDARD.encode(&rom),
+                "force_mapper": "lorom",
+            }))),
+        )
+        .await
+        .expect("load_rom_bytes");
+    client
+        .call_tool(CallToolRequestParams::new("enable_hw_strict"))
+        .await
+        .expect("enable_hw_strict");
+    for _ in 0..3 {
+        client
+            .call_tool(
+                CallToolRequestParams::new("step_until_frame")
+                    .with_arguments(args(&serde_json::json!({ "max_steps": 1_000_000 }))),
+            )
+            .await
+            .expect("step_until_frame");
+    }
+    let taken = client
+        .call_tool(CallToolRequestParams::new("take_hw_faults"))
+        .await
+        .expect("take_hw_faults");
+    let v = taken.structured_content.expect("structured result");
+    assert_eq!(v["ok"], false);
+    assert_eq!(v["faults"][0]["rule"], "R1");
+    assert_eq!(v["faults"][0]["pc"], "$00:8005");
+    assert_eq!(v["faults"][0]["addr"], "$2118");
+    assert!(v["occurrences"].as_u64().unwrap() > 100);
+    let again = client
+        .call_tool(CallToolRequestParams::new("take_hw_faults"))
+        .await
+        .expect("take_hw_faults again");
+    assert_eq!(again.structured_content.expect("structured")["ok"], true);
+    client.cancel().await.ok();
+}
