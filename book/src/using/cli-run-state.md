@@ -27,6 +27,7 @@ luna run [OPTIONS] <ROM>
 | `--wdm-out <PATH>` | — | Write captured `WDM $xx` executions (the `SNES_ASSERT` channel) — a non-empty file means an assertion fired. |
 | `--nocash-out <PATH>` | — | Write everything the ROM printed to the `$21FC` Nocash TTY (the SDK's `SNES_NOCASH` text channel), as raw bytes — the ROM's own log, readable with no debugger attached. |
 | `--print-fbhash` | off | Print `fbhash=<16-hex>`, a cross-arch-stable key for the displayed frame. |
+| `--strict-hw` | off | Also journal what a real console would refuse or corrupt and print it after the final state (exit 1 on a fault); the run itself is unchanged. See [`luna strict`](cli-analysis.md#luna-strict--what-a-real-console-would-have-refused). |
 
 ```bash
 luna run -n 12000000 --screenshot /tmp/title.png "game.sfc"

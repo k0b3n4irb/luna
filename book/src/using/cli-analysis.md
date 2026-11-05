@@ -1100,6 +1100,61 @@ luna cart-check "game.sfc"
 luna cart-check --json "game.sfc" | jq '.findings[] | select(.severity != "info")'
 ```
 
+## `luna strict` — what a real console would have refused
+
+```
+luna strict [--frames N] [--json] [--force-mapper M] [--force-region R] <ROM>
+```
+
+An emulator lets through accesses a console ignores: a byte written to VRAM
+while the picture is drawn simply vanishes on hardware, and so does a DMA
+that reads the I/O registers. A game that works in an emulator can break on a
+cartridge for that reason. `luna strict` runs the ROM for `--frames` frames
+(600 by default) with a **hardware strict journal** on and prints one line per
+distinct (rule, instruction address, address touched), with how many times it
+happened and where it first did.
+
+The journal only observes. It never changes what the machine does: the frame
+hash of a run is the same with and without it (`luna run --print-fbhash`
+proves it on any ROM).
+
+| Rule | Fault | Source |
+|---|---|---|
+| R1 | Write to `$2118` / `$2119` while the picture is drawn (not in `VBlank`, not in forced blank, line 0 included): the byte is dropped. | ares `ppu/io.cpp` `writeVRAM`; Mesen2 `CanAccessVram` |
+| R2 | Write to `$2104`, same condition: it lands on the sprite the PPU is evaluating. | ares `writeOAM` |
+| R3 | Write to `$2122` while the PPU fetches colours (line 1 to the last visible one, H clock 88 to 1095): it lands on the entry being fetched. | ares `writeCGRAM`; Mesen2 `CanAccessCgram` |
+| R4 | Read of `$2138` / `$2139` / `$213A` (conditions of R1, R2) or `$213B` (those of R3): not the addressed byte. | ares `readOAM`, `readVRAM`, `readCGRAM` |
+| R5 | DMA or HDMA access to the A-bus zone the hardware blocks in banks `$00-$3F` / `$80-$BF` (`$2100-$21FF`, `$4000-$41FF`, `$4200-$421F`, `$4300-$437F`): reads as 0, a write is dropped. | ares `cpu/dma.cpp` `validA` |
+| R6 | DMA between WRAM and `$2180`: the B side does not happen. | ares `cpu/dma.cpp` `transfer` |
+| R8 | Manual read of `$4016` / `$4017` while the auto-joypad read runs (`$4212` bit 0). | ares `cpu/io.cpp` |
+
+`VBlank` starts on line 225 (240 with overscan, `$2133` bit 2): a write on
+line 224 is a fault, on line 225 it is not. A DMA is judged at the position
+where its burst starts, so a burst that begins on the last picture lines is
+reported even if most of its bytes land in `VBlank`. Two rules were left out
+because no reference settles them: the effect of a DMA to a B-bus register
+with no device, and open-bus values.
+
+Exit code: `0` = no fault, `1` = at least one (or a core panic), `2` = the
+ROM cannot be loaded. `--json` prints `{rom, frames, ok, occurrences,
+overflow, faults: [{rule, what, pc, addr, origin, frame, line, hclock,
+count}]}`; `origin` is `cpu`, `dma<n>` or `hdma<n>`. At most 4096 distinct
+faults are kept; `overflow` counts the others. `luna run --strict-hw` prints the same list
+after the final state (exit 1 on a fault), and the MCP tools `enable_hw_strict` /
+`take_hw_faults` give it to a client (a `load_rom` turns the journal off).
+
+A ROM that is not written for the console's region can show faults only
+under `--force-region`: a test ROM that waits for `VBlank` by polling `$4210`
+reaches it late on a PAL frame (the flag stays set during the whole
+`VBlank`) and prints into the first picture lines.
+
+```bash
+luna strict "game.sfc" --frames 300
+# R1 pc=$00:8436 $2118 cpu x4 (first: frame 4 line 1 h 936)  VRAM write ($2118/$2119) outside VBlank and forced blank: dropped
+# strict: 1 fault site(s), 4 occurrence(s) in 300 frame(s)
+luna strict "game.sfc" --json | jq '.faults[] | select(.rule == "R5")'
+```
+
 ## `luna assets-dump` — export the loaded graphics as PNGs
 
 ```

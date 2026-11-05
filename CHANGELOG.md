@@ -7,6 +7,18 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ## [Unreleased]
 
+- Hardware strict mode: `luna strict [--frames N] [--json] ROM`, `luna run
+  --strict-hw` and the MCP tools `enable_hw_strict` / `take_hw_faults` list
+  what a real console would have refused or corrupted and an emulator lets
+  through. Rules: a VRAM, OAM or CGRAM write and a PPU memory read while the
+  picture is drawn (R1-R4; `VBlank` from line 225, 240 with overscan, line 0
+  still refused), a DMA or HDMA access in the blocked A-bus zone (R5) or
+  between WRAM and `$2180` (R6), a manual `$4016` / `$4017` read during the
+  auto-joypad read (R8). One line per distinct (rule, pc, address) with its
+  count. The journal only observes: frame hashes are identical with and
+  without it. Exit 0 = no fault, 1 = at least one, 2 = unreadable ROM. The
+  rules are in `luna_core::hw_strict`; `luna-api` has
+  `enable_hw_strict` / `take_hw_faults` / `strict_rules`.
 - `luna cart-check [--json] ROM` (MCP `cart_check`): audits a ROM's header
   for a physical cartridge (repro board, flash) without starting the
   emulator. One line per finding, `SEVERITY CODE: message`: a copier header
