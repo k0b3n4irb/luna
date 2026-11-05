@@ -1039,6 +1039,67 @@ music has started before the snapshot.
 luna spc-dump "game.sfc" -n 8000000 -o /tmp/song.spc
 ```
 
+## `luna cart-check` — is the header ready for a physical cartridge?
+
+```
+luna cart-check [--json] <ROM>
+```
+
+An emulator forgives what a repro board or a console does not: a copier
+header still on the file, a checksum that no longer matches, a size byte
+that disagrees with the image, vectors that point outside the ROM. The
+command reads the file only (it never starts the emulator) and prints one
+line per finding, `SEVERITY CODE: message`, each message saying what to fix.
+
+| Severity | Meaning |
+|---|---|
+| `ERROR` | The cartridge cannot boot or be built as it is. |
+| `WARN` | The header contradicts itself or the file. |
+| `INFO` | A fact worth knowing (a rule with no documented source is never more than this). |
+
+Exit code: `0` = no `ERROR`/`WARN` (`INFO` allowed), `1` = at least one,
+`2` = the file cannot be read. `--json` prints `{rom, errors, warnings,
+infos, ok, findings: [{severity, code, message}]}` instead. The MCP tool
+`cart_check` (`path`) returns the same findings.
+
+| Code | Severity | What it checks |
+|---|---|---|
+| `SMC_COPIER_HEADER` | error | The file carries a 512-byte copier header (size % 1024 == 512); a chip holds the bare ROM. |
+| `ROM_TOO_SMALL` | error | Under 32 KiB: no internal header. |
+| `HEADER_FOUND` | info | Where the internal header was read (LoROM, HiROM or ExHiROM position). |
+| `CHECKSUM_COMPLEMENT_INVALID` | error | Checksum and complement do not XOR to `$FFFF`. |
+| `CHECKSUM_MISMATCH` | warn | The declared checksum is not the ROM's sum (a non-power-of-two image counted with its tail mirrored). |
+| `SIZE_NOT_32K_MULTIPLE` | info | The image is not a multiple of 32 KiB. |
+| `SIZE_NOT_POWER_OF_TWO` | info / warn | A board takes power-of-two chips; says to which power to fill. Warn when the size is not even the sum of two powers of two. |
+| `ROM_SIZE_BYTE_MISMATCH` | warn | `$FFD7` is not the image size rounded up to a power of two. |
+| `MAP_MODE_MISMATCH` | warn | `$FFD5` (`001s mmmm`) does not fit the position the header was found at. |
+| `VECTOR_RESET_EMU` | error | The emulation RESET vector is `$0000`, `$FFFF` or below `$8000`. |
+| `VECTOR_NMI_EMU`, `VECTOR_IRQ_EMU`, `VECTOR_NMI_NATIVE`, `VECTOR_IRQ_NATIVE` | warn | Same test on the other vectors. |
+| `CHIPSET_UNKNOWN` | warn | `$FFD6` (or the `$FFBF` sub-type for `$Fx`) is not a documented code. |
+| `CHIPSET_NOT_EMULATED` | warn | The board names a chip luna does not emulate: it cannot be checked in luna. |
+| `CHIPSET_COPROCESSOR` | info | The board carries a coprocessor luna emulates; the cartridge must fit it. |
+| `SRAM_BATTERY_WITHOUT_SRAM` | warn | The chipset declares a battery but the SRAM size is 0 (Super FX boards excepted: their save is the GSU RAM). |
+| `SRAM_WITHOUT_RAM_CHIPSET` | warn | A SRAM size with a chipset that says no RAM. |
+| `SRAM_NOT_BATTERY_BACKED` | info | RAM with no battery: lost at power-off. |
+| `SRAM_SIZE_IMPLAUSIBLE` | info | SRAM size byte above 7 (over 128 KiB). |
+| `COUNTRY_UNKNOWN` | warn | Country byte above `$14`: no video standard can be derived. |
+| `COUNTRY_VIDEO_AMBIGUOUS` | info | Country `$0E` (Common) says neither NTSC nor PAL. |
+| `COUNTRY_GAMECODE_MISMATCH` | info | With an extended header, the game code's last letter disagrees with the country. |
+| `TITLE_NOT_PRINTABLE` | warn | A title byte outside `$20..$7E` (zero/`$FF` padding instead of spaces included). |
+| `TITLE_EMPTY` | info | The title is 21 spaces. |
+
+Sources: the header tables of fullsnes and the snesdev wiki (field layout,
+chipset and country codes, vectors in `$8000..$FFFE`, the "Header
+Verification" list) and ares `mia/medium/super-famicom.cpp` (`board()`,
+`scoreHeader`).
+
+```bash
+luna cart-check "game.sfc"
+# INFO HEADER_FOUND: internal header read at ROM offset $007FC0 (LoROM position, ...)
+# WARN CHECKSUM_MISMATCH: the header declares checksum $1234 but the ROM sums to $5678 ...
+luna cart-check --json "game.sfc" | jq '.findings[] | select(.severity != "info")'
+```
+
 ## `luna assets-dump` — export the loaded graphics as PNGs
 
 ```

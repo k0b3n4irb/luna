@@ -29,6 +29,7 @@ Commands:
   wram-trace  Per-frame vblank-aligned WRAM page hashes (cross-emulator differential).
   bench       Run a whole ROM directory headless and write a compatibility report.
   spc-dump    Export the live APU state as a playable .spc sound file.
+  cart-check  Audit a ROM header for a physical cartridge (repro board / flash).
   assets-dump Dump the loaded graphics (VRAM tiles, tilemaps, palette, sprites) as PNGs.
   record      Record a run as a video, a text timeline and contact sheets.
   test        Run manifest-driven homebrew tests (see "Developing homebrew with luna").
@@ -58,7 +59,7 @@ harness itself is broken".
 | Page | What it holds |
 |---|---|
 | [`luna run` and `luna state`](cli-run-state.md) | render a frame, dump the audio, snapshot the machine, peek and assert on memory, every trace |
-| [Compare, measure, export](cli-analysis.md) | `luna frames`, `luna record`, `luna diff`, `luna profile`, `luna wram-trace`, `luna bench`, `luna spc-dump`, `luna assets-dump`, `luna test` |
+| [Compare, measure, export](cli-analysis.md) | `luna frames`, `luna record`, `luna diff`, `luna profile`, `luna wram-trace`, `luna bench`, `luna spc-dump`, `luna cart-check`, `luna assets-dump`, `luna test` |
 | [The state JSON](state-json.md) | what `luna state --out` and the MCP `state` tool return, block by block |
 | [Scripted joypad input](input-scripts.md) | the `--input` grammar, the Mouse, the Super Scope, the Super Multitap |
 | [The MCP server](mcp.md) | `luna mcp` and the catalogue of its tools |

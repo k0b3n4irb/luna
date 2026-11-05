@@ -7,6 +7,16 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ## [Unreleased]
 
+- `luna cart-check [--json] ROM` (MCP `cart_check`): audits a ROM's header
+  for a physical cartridge (repro board, flash) without starting the
+  emulator. One line per finding, `SEVERITY CODE: message`: a copier header
+  still on the file, a complement or checksum that is wrong, a size byte or
+  image size a board cannot take (and to which power to fill), a map byte
+  that contradicts the header position, vectors outside `$8000..$FFFE`, a
+  battery with no SRAM (or the converse), an unknown or unemulated chipset,
+  a country byte with no video standard, an unprintable title. Exit 0 = no
+  Error/Warn, 1 = at least one, 2 = unreadable file. The rules are in
+  `luna_cartridge::audit` (re-exported by `luna-api`).
 - `(direct,X)` in emulation mode with the low byte of `D` non-zero now wraps
   the pointer's high byte within the low byte's page, as ares, Mesen2 and
   the cputest ROM of gilyon/snes-tests (test 0027, passed on console) do:

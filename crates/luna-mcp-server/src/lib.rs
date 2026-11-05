@@ -781,6 +781,33 @@ pub struct OamResult {
     pub bytes: Vec<u8>,
 }
 
+/// `cart_check` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct CartCheckParams {
+    /// Absolute path to a `.sfc` / `.smc` ROM file on the local filesystem.
+    pub path: String,
+}
+
+/// One `cart_check` finding.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct CartCheckFinding {
+    /// `error`, `warn` or `info`.
+    pub severity: String,
+    /// Stable rule code, e.g. `SMC_COPIER_HEADER`.
+    pub code: String,
+    /// What is wrong and what to do about it.
+    pub message: String,
+}
+
+/// `cart_check` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct CartCheckResult {
+    /// `true` when there is no `error` and no `warn` (`info` allowed).
+    pub ok: bool,
+    /// The findings, in rule order.
+    pub findings: Vec<CartCheckFinding>,
+}
+
 /// `capabilities` result (issue #90).
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct CapabilitiesResult {
@@ -2891,6 +2918,37 @@ impl LunaServer {
             em.peek_oam().map_err(|e| api_err_to_mcp(&e))?
         };
         Ok(rmcp::Json(OamResult { bytes }))
+    }
+
+    #[rmcp::tool(
+        description = "Audit a ROM file's header for a physical cartridge (repro board / \
+                                flash): copier header, checksum, sizes, map byte, vectors, SRAM \
+                                and chipset, country, title. Reads the file only; the loaded \
+                                ROM is untouched. `ok` is false when any finding is `error` or \
+                                `warn`."
+    )]
+    async fn cart_check(
+        &self,
+        Parameters(params): Parameters<CartCheckParams>,
+    ) -> Result<rmcp::Json<CartCheckResult>, ErrorData> {
+        let bytes = std::fs::read(&params.path).map_err(|e| {
+            ErrorData::invalid_params(format!("cannot read {}: {e}", params.path), None)
+        })?;
+        let findings = luna_api::audit_cartridge(&bytes);
+        let ok = findings
+            .iter()
+            .all(|f| f.severity == luna_api::Severity::Info);
+        Ok(rmcp::Json(CartCheckResult {
+            ok,
+            findings: findings
+                .into_iter()
+                .map(|f| CartCheckFinding {
+                    severity: f.severity.label().to_lowercase(),
+                    code: f.code.to_string(),
+                    message: f.message,
+                })
+                .collect(),
+        }))
     }
 
     #[rmcp::tool(

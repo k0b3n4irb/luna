@@ -7,6 +7,9 @@
 //!
 //! See `ARCHITECTURE.md` §5.
 
+mod audit;
+pub use audit::{Finding, Severity, audit};
+
 use luna_bus::MapperKind;
 use std::fs;
 use std::path::Path;

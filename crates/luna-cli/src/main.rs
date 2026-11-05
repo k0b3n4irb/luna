@@ -1,7 +1,7 @@
 //! Luna SNES emulator — command-line entry point.
 //!
 //! Dispatches the `luna` subcommands (run, test, mcp, state, frames,
-//! diff, profile, wram-trace, bench, spc-dump, assets-dump).
+//! diff, profile, wram-trace, bench, spc-dump, assets-dump, cart-check).
 //! See `ARCHITECTURE.md` §3.2.
 
 use std::path::PathBuf;
@@ -10,6 +10,7 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 
 mod bench;
+mod cart_check;
 mod csv;
 mod diff;
 mod diff_audio;
@@ -1422,6 +1423,19 @@ enum Command {
         #[arg(long, default_value_t = 1)]
         jobs: usize,
     },
+    /// Audit a ROM's header for a physical cartridge (repro board / flash):
+    /// copier header, checksum, sizes, map byte, vectors, SRAM and chipset,
+    /// country, title. One line per finding, `SEVERITY CODE: message`.
+    ///
+    /// Exit 0 = no Error/Warn (Info allowed), 1 = at least one Error/Warn,
+    /// 2 = the file cannot be read.
+    CartCheck {
+        /// Path to the .sfc / .smc ROM file.
+        rom: PathBuf,
+        /// Print the findings as JSON instead of text.
+        #[arg(long)]
+        json: bool,
+    },
     /// Run a ROM until its music driver is playing, then export the APU
     /// state as a `.spc` sound file (SNES-SPC700 Sound File Data v0.30):
     /// SPC700 registers + 64 KB ARAM + DSP registers + IPL ROM, playable
@@ -2126,6 +2140,7 @@ fn main() -> ExitCode {
             };
             bench::run_bench(&dir, &out, frames, script, jobs)
         }
+        Command::CartCheck { rom, json } => cart_check::run_cart_check(&rom, json),
         Command::SpcDump {
             rom,
             steps,

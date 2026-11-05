@@ -121,6 +121,7 @@ means that transport has no form of it.
 | I want to… | CLI | MCP | Shown in |
 |---|---|---|---|
 | the audio as a WAV | `--audio-out out.wav` | `drain_audio` | [`luna run`](using/cli-run-state.md#luna-run--quick-render--audio-dump) |
+| whether a ROM's header is ready for a physical cartridge | `luna cart-check` | `cart_check` | [`luna cart-check`](using/cli-analysis.md#luna-cart-check--is-the-header-ready-for-a-physical-cartridge) |
 | the music as a `.spc` file | `luna spc-dump` | `export_spc` | [`luna spc-dump`](using/cli-analysis.md#luna-spc-dump--export-a-spc-sound-file) |
 | the DSP voices and the driver's memory | `--peek APU:…`, `--dump-aram` | `dsp_registers`, `peek_aram` | [Audio-side visibility](using/cli-run-state.md#audio-side-visibility) |
 | the order of the key-on and key-off writes | `--dsp-trace` | `enable_dsp_trace` | [Audio-side visibility](using/cli-run-state.md#audio-side-visibility) |
