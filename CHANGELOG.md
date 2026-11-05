@@ -23,7 +23,7 @@ fast-forwarded to (binaries attached by CI). Format inspired by
   for a physical cartridge (repro board, flash) without starting the
   emulator. One line per finding, `SEVERITY CODE: message`: a copier header
   still on the file, a complement or checksum that is wrong, a size byte or
-  image size a board cannot take (and to which power to fill), a map byte
+  image size a board cannot take (a non-power-of-two image is now a warning that names the power to fill to and asks for the completed image, ABCDEEEE for 2.5 MB in 4 MB; a LoROM above 2 MiB gets a BigLoROM note: banks `$40-$7D` / `$C0-$FF`, bank bit BA6, size byte `$0C` for 4 MB), a map byte
   that contradicts the header position, vectors outside `$8000..$FFFE`, a
   battery with no SRAM (or the converse), an unknown or unemulated chipset,
   a country byte with no video standard, an unprintable title. Exit 0 = no

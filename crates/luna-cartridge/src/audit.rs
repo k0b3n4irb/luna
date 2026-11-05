@@ -180,30 +180,26 @@ pub fn audit(file: &[u8]) -> Vec<Finding> {
     if !len.is_power_of_two() {
         let up = len.next_power_of_two();
         let pieces = len.count_ones();
-        let how = format!(
-            "a repro board takes power-of-two chips: fill the image up to {} KiB (2^{} bytes) \
-             as the board maps it (smaller part mirrored) and recompute the checksum",
-            up / 1024,
-            up.ilog2()
-        );
-        if pieces == 2 {
-            out.add(
-                Severity::Info,
-                "SIZE_NOT_POWER_OF_TWO",
-                format!(
-                    "the ROM is {len} bytes, the sum of two powers of two (mirrored layout); {how}"
-                ),
-            );
+        let shape = if pieces == 2 {
+            "the sum of two powers of two (a mirrored layout)"
         } else {
-            out.add(
-                Severity::Warn,
-                "SIZE_NOT_POWER_OF_TWO",
-                format!(
-                    "the ROM is {len} bytes, neither a power of two nor the sum of two: \
-                     an emulator has to guess the padding; {how}"
-                ),
-            );
-        }
+            "neither a power of two nor the sum of two (an emulator has to guess the padding)"
+        };
+        // A burned chip is a power of two: the board needs the completed
+        // image, the smaller tail repeated as the board maps it (SFC dev
+        // wiki "Non-Power-of-Two ROM Size": 20 Mbit = ABCDEEEE).
+        out.add(
+            Severity::Warn,
+            "SIZE_NOT_POWER_OF_TWO",
+            format!(
+                "the ROM is {len} bytes ({} KiB), {shape}; the next power of two is {up} bytes                  ({} KiB, 2^{}): a repro board takes a power-of-two chip and requires the \
+                 completed image, the tail mirrored as the board maps it (ABCDEEEE for \
+                 2.5 MB in 4 MB), with the checksum recomputed on it",
+                len / 1024,
+                up / 1024,
+                up.ilog2()
+            ),
+        );
     }
     let size_byte = rom[off + 0x17];
     let expected = len.next_power_of_two();
@@ -225,6 +221,39 @@ pub fn audit(file: &[u8]) -> Vec<Finding> {
                 expected.ilog2() - 10
             ),
         );
+    }
+
+    // BigLoROM: a LoROM image above 2 MiB. Bank n contributes 32 KiB at
+    // $8000-$FFFF; fullsnes (Cartridge ROM Capacity): plain LoROM is
+    // "max 2MByte ROM (banks 00h-3Fh, with mirror at 80h-BFh)", larger games
+    // "map additional LoROM banks into HiROM area (BigLoROM)". Luna's mapper
+    // continues the linear 32 KiB banks through $40-$7D (verified in
+    // luna-bus lorom.rs); that the lower halves of those banks are ROM too on
+    // a real board (fullsnes: "mapped twice in the 64K hirom banks") is an
+    // hypothesis luna does not model.
+    if h.mapper_kind == MapperKind::LoRom && len > 0x20_0000 {
+        out.add(
+            Severity::Info,
+            "LOROM_BIGLOROM",
+            format!(
+                "a LoROM image of {} KiB: the data above 2 MiB sits in banks $40-$7D / $C0-$FF \
+                 (BigLoROM), never in $00-$3F, so the code must reach it there; the board must \
+                 wire bank bit BA6 to the ROM (a plain 2 MiB LoROM board does not) and its size \
+                 byte must read ${:02X}",
+                len / 1024,
+                len.next_power_of_two().ilog2() - 10
+            ),
+        );
+        if rom[off + 0x18] != 0 && len > 0x30_0000 {
+            out.add(
+                Severity::Info,
+                "LOROM_BIGLOROM_SRAM",
+                "above 3 MiB of LoROM the SRAM must sit in the lower 32 KiB of banks \
+                 $70-$7D only (fullsnes, LoROM with SRAM: newer boards free the upper halves \
+                 of those banks as ROM); an older board maps it over whole 64 KiB banks"
+                    .into(),
+            );
+        }
     }
 
     // Map mode.
@@ -563,14 +592,14 @@ mod tests {
 
     #[test]
     fn size_rules() {
-        // 48 KiB = 32 + 16: sum of two powers of two -> Info only.
+        // 48 KiB = 32 + 16: sum of two powers of two -> Warn as well (a
+        // chip is a power of two), with the size to fill up to.
         let mut rom = healthy();
         rom.extend(vec![0xEA; 0x4000]);
         let h = HEADER_OFFSET_LOROM;
         rom[h + 0x17] = 0x06; // 64 KiB
         fix_checksum(&mut rom, h);
-        assert!(bad(&rom).is_empty(), "{:#?}", audit(&rom));
-        assert!(codes(&rom).contains(&"SIZE_NOT_POWER_OF_TWO"));
+        assert_eq!(bad(&rom), vec!["SIZE_NOT_POWER_OF_TWO"]);
         assert!(codes(&rom).contains(&"SIZE_NOT_32K_MULTIPLE"));
         // 32 + 16 + 8 KiB: three bits -> Warn.
         let mut rom = healthy();
@@ -584,6 +613,93 @@ mod tests {
         fix_checksum(&mut rom, h);
         assert_eq!(bad(&rom), vec!["ROM_SIZE_BYTE_MISMATCH"]);
         only("ROM_SIZE_BYTE_MISMATCH", |r| r[h + 0x17] = 0x07);
+    }
+
+    /// A `LoROM` of `len` bytes (a multiple of 32 KiB) with the size byte
+    /// `size_byte`; the data past the first 2 MiB differs per bank so a
+    /// completed image can be told from its parts.
+    fn lorom_of(len: usize, size_byte: u8) -> Vec<u8> {
+        let mut rom = healthy();
+        let h = HEADER_OFFSET_LOROM;
+        rom.resize(len, 0xEA);
+        rom[h + 0x17] = size_byte;
+        fix_checksum(&mut rom, h);
+        rom
+    }
+
+    /// The image ABCDEEEE: 2.5 MB (A..D = 2 MiB, E = 512 KiB) completed to
+    /// 4 MiB by repeating the last 512 KiB four times.
+    fn completed_2_5_mb(size_byte: u8) -> Vec<u8> {
+        let mut rom = healthy();
+        rom.resize(0x28_0000, 0xEA);
+        let tail = rom[0x20_0000..].to_vec();
+        for _ in 0..3 {
+            rom.extend_from_slice(&tail);
+        }
+        assert_eq!(rom.len(), 0x40_0000);
+        rom[HEADER_OFFSET_LOROM + 0x17] = size_byte;
+        fix_checksum(&mut rom, HEADER_OFFSET_LOROM);
+        rom
+    }
+
+    #[test]
+    fn a_non_power_of_two_size_names_the_fill_and_asks_for_the_completed_image() {
+        let rom = lorom_of(0x28_0000, 0x0C); // 2.5 MB, the byte already says 4 MiB
+        assert_eq!(bad(&rom), vec!["SIZE_NOT_POWER_OF_TWO"]);
+        let f = audit(&rom)
+            .into_iter()
+            .find(|f| f.code == "SIZE_NOT_POWER_OF_TWO")
+            .unwrap();
+        assert_eq!(f.severity, Severity::Warn);
+        for needle in [
+            "2621440 bytes",
+            "4194304 bytes",
+            "4096 KiB",
+            "completed image",
+        ] {
+            assert!(f.message.contains(needle), "{needle}: {}", f.message);
+        }
+    }
+
+    #[test]
+    fn a_2_5_mb_lorom_completed_to_4_mb_has_no_size_alert() {
+        let rom = completed_2_5_mb(0x0C);
+        assert!(bad(&rom).is_empty(), "{:#?}", audit(&rom));
+        let c = codes(&rom);
+        assert!(!c.contains(&"SIZE_NOT_POWER_OF_TWO"));
+        assert!(c.contains(&"LOROM_BIGLOROM"));
+        // The size byte must follow the real size: 4 MiB = $0C.
+        let rom = completed_2_5_mb(0x0B); // says 2 MiB
+        assert_eq!(bad(&rom), vec!["ROM_SIZE_BYTE_MISMATCH"]);
+    }
+
+    #[test]
+    fn a_4_mb_lorom_is_biglorom_and_its_size_byte_is_checked() {
+        let rom = lorom_of(0x40_0000, 0x0C);
+        assert!(bad(&rom).is_empty(), "{:#?}", audit(&rom));
+        let f = audit(&rom)
+            .into_iter()
+            .find(|f| f.code == "LOROM_BIGLOROM")
+            .unwrap();
+        assert!(f.message.contains("$40-$7D") && f.message.contains("BA6"));
+        assert!(f.message.contains("$0C"), "{}", f.message);
+        assert_eq!(
+            bad(&lorom_of(0x40_0000, 0x0B)),
+            vec!["ROM_SIZE_BYTE_MISMATCH"]
+        );
+        // 2 MiB exactly is plain LoROM: no BigLoROM note.
+        assert!(!codes(&lorom_of(0x20_0000, 0x0B)).contains(&"LOROM_BIGLOROM"));
+    }
+
+    #[test]
+    fn biglorom_above_3_mb_with_sram_notes_the_bank_halves() {
+        let h = HEADER_OFFSET_LOROM;
+        let mut rom = lorom_of(0x40_0000, 0x0C);
+        rom[h + 0x16] = 0x02;
+        rom[h + 0x18] = 0x05;
+        fix_checksum(&mut rom, h);
+        assert!(bad(&rom).is_empty(), "{:#?}", audit(&rom));
+        assert!(codes(&rom).contains(&"LOROM_BIGLOROM_SRAM"));
     }
 
     #[test]

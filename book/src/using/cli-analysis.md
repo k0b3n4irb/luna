@@ -1070,8 +1070,10 @@ infos, ok, findings: [{severity, code, message}]}` instead. The MCP tool
 | `CHECKSUM_COMPLEMENT_INVALID` | error | Checksum and complement do not XOR to `$FFFF`. |
 | `CHECKSUM_MISMATCH` | warn | The declared checksum is not the ROM's sum (a non-power-of-two image counted with its tail mirrored). |
 | `SIZE_NOT_32K_MULTIPLE` | info | The image is not a multiple of 32 KiB. |
-| `SIZE_NOT_POWER_OF_TWO` | info / warn | A board takes power-of-two chips; says to which power to fill. Warn when the size is not even the sum of two powers of two. |
+| `SIZE_NOT_POWER_OF_TWO` | warn | The image is not a power of two (2.5 MB, say). A repro board takes a power-of-two chip and requires the completed image: the message gives the size, the next power of two, and says to mirror the tail as the board maps it (ABCDEEEE for 2.5 MB in 4 MB) and recompute the checksum. |
 | `ROM_SIZE_BYTE_MISMATCH` | warn | `$FFD7` is not the image size rounded up to a power of two. |
+| `LOROM_BIGLOROM` | info | A LoROM image above 2 MiB (BigLoROM): the data above 2 MiB is reachable only through banks `$40-$7D` / `$C0-$FF`, the board must wire bank bit BA6 to the ROM, and `$FFD7` must be the size rounded up (4 MB = `$0C`; a wrong byte is `ROM_SIZE_BYTE_MISMATCH`). |
+| `LOROM_BIGLOROM_SRAM` | info | Such an image above 3 MiB with SRAM: the SRAM must sit in the lower 32 KiB of banks `$70-$7D` only. |
 | `MAP_MODE_MISMATCH` | warn | `$FFD5` (`001s mmmm`) does not fit the position the header was found at. |
 | `VECTOR_RESET_EMU` | error | The emulation RESET vector is `$0000`, `$FFFF` or below `$8000`. |
 | `VECTOR_NMI_EMU`, `VECTOR_IRQ_EMU`, `VECTOR_NMI_NATIVE`, `VECTOR_IRQ_NATIVE` | warn | Same test on the other vectors. |
@@ -1091,7 +1093,10 @@ infos, ok, findings: [{severity, code, message}]}` instead. The MCP tool
 Sources: the header tables of fullsnes and the snesdev wiki (field layout,
 chipset and country codes, vectors in `$8000..$FFFE`, the "Header
 Verification" list) and ares `mia/medium/super-famicom.cpp` (`board()`,
-`scoreHeader`).
+`scoreHeader`). BigLoROM: fullsnes (Cartridge ROM Capacity, LoROM Mapping)
+and luna's own LoROM mapper, which continues the 32 KiB banks through
+`$40-$7D`. Hypothesis, not modelled: on a real board the lower halves of those
+banks may also map ROM ("mapped twice in the 64K hirom banks").
 
 ```bash
 luna cart-check "game.sfc"
