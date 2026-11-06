@@ -42,6 +42,9 @@
 //! "windows.0" = 0x20             # `.` indexes arrays and nested tables
 //! "bgs.1.h_scroll" = { le = 64 } # …so every printed field is reachable
 //!
+//! [asserts.dsp]                  # S-DSP registers (names V0_ENVX…, or hex);
+//!                                # also `[checkpoint.dsp]`, read at the checkpoint
+//!
 //! [[checkpoint]]                 # stop on a routine, not a frame (#269)
 //! at_symbol = "tickEnd"          # symbol, symbol+N or BANK:OFFSET
 //! hit = 120                      # its 120th arrival since power-on (default 1)
@@ -228,6 +231,10 @@ struct Checkpoint {
     /// Point-in-time Super FX asserts, same grammar as `[asserts.gsu]`.
     #[serde(default)]
     gsu: BTreeMap<String, ValueAssert>,
+    /// Point-in-time S-DSP register asserts, same names and grammar as
+    /// `[asserts.dsp]`, read at the instant of the checkpoint.
+    #[serde(default)]
+    dsp: BTreeMap<String, ValueAssert>,
     /// Directional asserts vs the previous checkpoint (or the run start
     /// for the first one): `increased | decreased | changed | unchanged`.
     #[serde(default)]
@@ -1415,6 +1422,9 @@ fn run_one(path: &Path) -> Result<TestOutcome, String> {
                 Err(e) => failures.push(format!("{label} values.{key}: {e}")),
             }
         }
+        if let Err(e) = check_dsp(&em, &cp.dsp, &format!("{label} "), &mut failures) {
+            failures.push(format!("{label} {e}"));
+        }
         if !cp.ppu.is_empty() || !cp.gsu.is_empty() {
             let (ppu, gsu) = state_blocks(&mut em);
             check_state_block(ppu, "ppu", &cp.ppu, &format!("{label} "), &mut failures);
@@ -1580,29 +1590,7 @@ fn run_one(path: &Path) -> Result<TestOutcome, String> {
         }
     }
     // [asserts.dsp] — the S-DSP register file (issue #212).
-    if !m.asserts.dsp.is_empty() {
-        let regs = em.dsp_registers().map_err(|e| e.to_string())?;
-        for (key, assert) in &m.asserts.dsp {
-            let Some(idx) = luna_api::dsp_register_index(key) else {
-                return Err(format!(
-                    "asserts.dsp.{key}: unknown S-DSP register (name like FLG/EDL/V0_GAIN/V0_ENVX, or a hex index < 80)"
-                ));
-            };
-            match normalize_assert(assert) {
-                Ok((cmp, _)) => {
-                    // Registers are bytes; any explicit width is moot.
-                    if let Some(msg) = eval_cmp(
-                        &format!("dsp.{key}"),
-                        i64::from(regs[usize::from(idx)]),
-                        &cmp,
-                    ) {
-                        failures.push(msg);
-                    }
-                }
-                Err(e) => return Err(format!("asserts.dsp.{key}: {e}")),
-            }
-        }
-    }
+    check_dsp(&em, &m.asserts.dsp, "", &mut failures)?;
     // [asserts.ppu] — the PPU registers, named as the state JSON prints
     // them (`OpenSNES` ask, 2026-09-17).
     if !m.asserts.ppu.is_empty() || !m.asserts.gsu.is_empty() {
@@ -2138,6 +2126,39 @@ fn check_state_block(
             Err(e) => failures.push(format!("{prefix}{label}.{key}: {e}")),
         }
     }
+}
+
+/// Evaluate a `[asserts.dsp]` / `[checkpoint.dsp]` table against the S-DSP
+/// register file as of now. `prefix` labels the failures (`""` at the end
+/// of the run, `"checkpoint@N "` on a leg). An unknown register name is an
+/// `Err`: the manifest is wrong, not the machine.
+fn check_dsp(
+    em: &luna_api::Emulator,
+    asserts: &BTreeMap<String, ValueAssert>,
+    prefix: &str,
+    failures: &mut Vec<String>,
+) -> Result<(), String> {
+    if asserts.is_empty() {
+        return Ok(());
+    }
+    let regs = em.dsp_registers().map_err(|e| e.to_string())?;
+    for (key, assert) in asserts {
+        let Some(idx) = luna_api::dsp_register_index(key) else {
+            return Err(format!(
+                "asserts.dsp.{key}: unknown S-DSP register (name like FLG/EDL/V0_GAIN/V0_ENVX, or a hex index < 80)"
+            ));
+        };
+        let (cmp, _) = normalize_assert(assert).map_err(|e| format!("asserts.dsp.{key}: {e}"))?;
+        // Registers are bytes; any explicit width is moot.
+        if let Some(msg) = eval_cmp(
+            &format!("{prefix}dsp.{key}"),
+            i64::from(regs[usize::from(idx)]),
+            &cmp,
+        ) {
+            failures.push(msg);
+        }
+    }
+    Ok(())
 }
 
 /// The `ppu` and `gsu` blocks of one state snapshot, as JSON. Taken

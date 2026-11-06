@@ -7,6 +7,11 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ## [Unreleased]
 
+- `luna test`: `[checkpoint.dsp]` reads the S-DSP registers at the instant of a checkpoint
+  (`at_frame` and `at_symbol`), with the names and the comparators of `[asserts.dsp]` (same code),
+  and the checkpoint failure lines (`` checkpoint@8 dsp.V3_SRCN: 0xA5 violates `eq 0x11` ``). The
+  guide says how fine the instant can be: a frame boundary or a CPU routine's arrival, no
+  millisecond offset in the manifest.
 - `luna ticks --intervals RECORD` (+ `--over N`, `--csv FILE`, `--frame-cycles X`, `--cycle-hz HZ`),
   MCP `tick_intervals`, `luna-api` `tick_intervals`: the duration of each tick of a `tick-record`
   file, from one arrival on the tick routine to the next, in frames and milliseconds, with the

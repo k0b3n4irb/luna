@@ -489,6 +489,35 @@ answer to "does this routine still start inside VBlank".
   `MVOL_L`), so a register can be copied from a trace. Asserts use the
   `[asserts.values]` comparator grammar (registers are bytes). ENVX is the voice's envelope, OUTX its last
   output — the pair that answers "is this voice actually sounding?".
+
+  The same table exists per leg, `[checkpoint.dsp]`: the register file is
+  read at the instant of the checkpoint, with the same names and the same
+  comparators, at an `at_frame` or at an `at_symbol` (the checkpoint's
+  usual failure line, `` checkpoint@… dsp.V3_ENVX: 0x4F violates `eq 0x0` ``).
+
+  ```toml
+  # "the voice is silent by the time the stop routine has been called again"
+  [[checkpoint]]
+  at_symbol = "audioUpdate"      # a CPU routine of the game's audio loop
+  hit = 40                       # arrivals count from power-on
+  [checkpoint.dsp]
+  V0_ENVX = 0
+  V0_OUTX = { le = 1 }
+  ```
+
+  **How fine can the instant be?** A checkpoint is taken at an `at_frame`
+  boundary (16.7 ms NTSC) or just before the first instruction of a
+  routine the CPU reaches (`at_symbol`, with `hit` / `until_if`): there is
+  no clock offset ("8 ms after the KOFF") in the manifest. The sub-frame
+  handle that exists is the routine's own period: put the checkpoint on a
+  routine the game calls at a known rate (an audio tick, a per-voice
+  update) and count arrivals with `hit`, or condition the arrival with
+  `until_if` (for instance on the RAM flag the KOFF routine sets). The
+  granularity is then the period of that routine, and the assertion
+  replays exactly. An `[[poke]]` on the same arrival writes before the
+  checkpoint reads. For an offset in milliseconds,
+  `luna state --dsp-events` and `luna diff --audio --window-ms` remain the
+  measuring tools; the manifest cannot express it yet.
 - **`[asserts.ppu]`** — the PPU registers, keyed by the field names
   `luna state --out -` prints under `ppu`: `inidisp`, `bgmode`, `tm`,
   `ts`, `tmw`, `tsw`, `w12sel`, `w34sel`, `wobjsel`, `wbglog`, `cgwsel`,

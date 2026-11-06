@@ -26,7 +26,7 @@ const SPC: [u8; 38] = [
 
 /// A tiny 65C816 uploader: waits for the IPL, sends `SPC` to `$0200` byte
 /// by byte, then asks it to execute.
-fn rom(path: &Path) {
+fn rom(path: &Path) -> u16 {
     let mut prog = vec![
         0xAD,
         0x40,
@@ -106,6 +106,7 @@ fn rom(path: &Path) {
         0xFE, // BRA self
     ];
     assert!(prog.len() < 0x100);
+    let spin = 0x8000 + u16::try_from(prog.len() - 2).unwrap(); // the final BRA self
     prog.resize(0x100, 0);
     prog.extend_from_slice(&SPC);
     let mut r = vec![0u8; 0x1_0000];
@@ -116,6 +117,7 @@ fn rom(path: &Path) {
     r[0x7FFC] = 0x00;
     r[0x7FFD] = 0x80;
     std::fs::write(path, &r).expect("write rom");
+    spin
 }
 
 #[test]
@@ -123,7 +125,7 @@ fn dsp_events_prints_one_json_line_per_key_on() {
     let dir = std::env::temp_dir().join("luna_dsp_events");
     let _ = std::fs::create_dir_all(&dir);
     let rom_path = dir.join("game.sfc");
-    rom(&rom_path);
+    let _ = rom(&rom_path);
     let jsonl = dir.join("notes.jsonl");
     let _ = std::fs::remove_file(&jsonl);
     let out = Command::new(luna_bin())
@@ -161,4 +163,93 @@ fn dsp_events_prints_one_json_line_per_key_on() {
     }
     assert!(l.starts_with("{\"frame\":"), "{l}");
     assert!(l.contains("\"spc_cycles\":"), "{l}");
+}
+
+fn luna_test(dir: &Path, manifest: &str) -> std::process::Output {
+    std::fs::write(dir.join("m.toml"), manifest).unwrap();
+    Command::new(luna_bin())
+        .arg("test")
+        .arg("m.toml")
+        .current_dir(dir)
+        .output()
+        .expect("run luna test")
+}
+
+/// `[checkpoint.dsp]`: the S-DSP register file at a frame and at a routine,
+/// with `[asserts.dsp]`'s names and comparators; a miss is labelled like
+/// the other checkpoint tables.
+#[test]
+fn checkpoint_dsp_reads_registers_at_a_frame_and_at_a_symbol() {
+    let dir = std::env::temp_dir().join("luna_dsp_checkpoint");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let spin = rom(&dir.join("game.sfc"));
+    std::fs::write(
+        dir.join("game.sym"),
+        format!("[labels]\n00:{spin:04X} spin\n"),
+    )
+    .unwrap();
+    let head = "rom = \"game.sfc\"\nforce_mapper = \"lorom\"\nframes = 12\n";
+
+    let ok = luna_test(
+        &dir,
+        &format!(
+            r#"{head}
+[[checkpoint]]
+at_symbol = "spin"
+hit = 100000                      # the spin loop: well after the upload
+[checkpoint.dsp]
+"31" = 0x80
+
+[[checkpoint]]
+at_frame = 8
+[checkpoint.dsp]
+V3_SRCN = 0xA5
+V3_VOLL = {{ ge = 100 }}
+V0_SRCN = 0
+"#
+        ),
+    );
+    let out = String::from_utf8_lossy(&ok.stdout);
+    assert!(
+        ok.status.success(),
+        "{out}{}",
+        String::from_utf8_lossy(&ok.stderr)
+    );
+
+    let bad = luna_test(
+        &dir,
+        &format!(
+            r#"{head}
+[[checkpoint]]
+at_symbol = "spin"
+hit = 100000
+[checkpoint.dsp]
+V3_VOLL = {{ le = 5 }}
+
+[[checkpoint]]
+at_frame = 8
+[checkpoint.dsp]
+V3_SRCN = 0x11
+"#
+        ),
+    );
+    let out = String::from_utf8_lossy(&bad.stdout);
+    assert_eq!(bad.status.code(), Some(1), "{out}");
+    assert!(
+        out.contains("checkpoint@8 dsp.V3_SRCN: 0xA5 violates `eq 0x11`"),
+        "{out}"
+    );
+    assert!(
+        out.contains("checkpoint@spin#100000") && out.contains("dsp.V3_VOLL"),
+        "{out}"
+    );
+
+    let unknown = luna_test(
+        &dir,
+        &format!("{head}\n[[checkpoint]]\nat_frame = 8\n[checkpoint.dsp]\nNOPE = 1\n"),
+    );
+    let out = String::from_utf8_lossy(&unknown.stdout);
+    assert_eq!(unknown.status.code(), Some(1), "{out}");
+    assert!(out.contains("unknown S-DSP register"), "{out}");
 }
