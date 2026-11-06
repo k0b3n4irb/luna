@@ -287,3 +287,19 @@ The IPL ROM at `$FFC0-$FFFF` is the SPC700's boot code. On reset:
 4. When the protocol is satisfied, the SPC jumps to wherever the main CPU's upload says.
 
 This handshake is **always** the first ~700 cycles after reset. luna's APU reaches this state cleanly (confirmed by mailbox tracer earlier: `$AA/$BB/$CC` ack at mclk 60656/60720/61824).
+
+## 12. Absolute output level
+
+luna adds no gain between the S-DSP and the 16-bit stream that `drain_audio`,
+`record` and `--audio-out` hand out (the same stream, unscaled). A full voice
+(VOL_L = VOL_R = 127, MVOL = 127, envelope at 0x7FF, a square BRR block of
+nybbles ±7 in range 12, filter 0, no echo, no noise) peaks at ±28 223 of
+32 768: **−1.30 dBFS peak, −1.99 dBFS RMS**. At VOL 64 the level drops by
+5.95 dB (64/127), so the response is linear. The formula is ares's and
+Mesen2's: voice = `output × VOL >> 7`, sum clamped to 16 bits, then
+`× MVOL >> 7`, no extra gain.
+
+Two cautions. The figure comes from the formula the references share, not from
+a measurement on a real console. And do not calibrate with the nybble −8: the
+16-bit cast of the Gaussian interpolation, faithful to the hardware, makes the
+sum overflow there and the signal turns asymmetric. Use ±7.
