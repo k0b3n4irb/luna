@@ -1063,6 +1063,8 @@ pub struct DmaTraceResult {
 /// One S-DSP register write (`take_dsp_trace`).
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct DspTraceLine {
+    /// PPU frame number at the write.
+    pub frame: u64,
     /// SPC700 cycles since `enable_dsp_trace`, the cycle of the write
     /// included. 32 of them make one output sample.
     pub spc_cycles: u64,
@@ -5282,6 +5284,7 @@ impl LunaServer {
         let events = events
             .into_iter()
             .map(|ev| DspTraceLine {
+                frame: ev.frame,
                 spc_cycles: ev.spc_cycles,
                 reg: ev.reg,
                 value: ev.value,

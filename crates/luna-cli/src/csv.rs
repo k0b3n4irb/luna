@@ -337,16 +337,40 @@ pub(crate) fn write_dsp_trace_csv(
     path: &std::path::Path,
     events: &[luna_api::DspWriteEvent],
 ) -> std::io::Result<()> {
-    write_csv(path, "spc_cycles,reg,name,value", events, |f, _, ev| {
+    write_csv(
+        path,
+        "spc_cycles,reg,name,value,frame",
+        events,
+        |f, _, ev| {
+            writeln!(
+                f,
+                "{},${:02X},{},${:02X},{}",
+                ev.spc_cycles,
+                ev.reg,
+                luna_api::dsp_register_name(ev.reg),
+                ev.value,
+                ev.frame
+            )
+        },
+    )
+}
+
+/// Write the DSP notes as JSON lines, one per voice keyed on by a `KON`
+/// write: `{"frame","spc_cycles","voice","srcn","pitch","vol_l","vol_r"}`.
+pub(crate) fn write_dsp_events_jsonl(
+    path: &std::path::Path,
+    notes: &[luna_api::DspNoteEvent],
+) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let mut f = std::io::BufWriter::new(std::fs::File::create(path)?);
+    for n in notes {
         writeln!(
             f,
-            "{},${:02X},{},${:02X}",
-            ev.spc_cycles,
-            ev.reg,
-            luna_api::dsp_register_name(ev.reg),
-            ev.value
-        )
-    })
+            "{{\"frame\":{},\"spc_cycles\":{},\"voice\":{},\"srcn\":{},\"pitch\":{},\"vol_l\":{},\"vol_r\":{}}}",
+            n.frame, n.spc_cycles, n.voice, n.srcn, n.pitch, n.vol_l, n.vol_r
+        )?;
+    }
+    f.flush()
 }
 
 /// Write the DSP-1 (`µPD77C25`) trace as CSV: `seq,kind,pc,opcode,value,

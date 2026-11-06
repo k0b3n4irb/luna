@@ -1841,6 +1841,46 @@ fn dsp_trace_timestamps_count_spc_cycles() {
     assert_eq!(ev[2].spc_cycles - ev[1].spc_cycles, 11);
 }
 
+/// A `KON` write yields one note per raised bit, with the voice registers
+/// read at the write and the PPU frame number on both the note and the
+/// raw write event.
+#[test]
+fn dsp_notes_capture_the_voice_at_key_on_with_the_frame() {
+    let cpu = [
+        0xA9, 0x00, 0x8D, 0x42, 0x21, // LDA #$00 ; STA $2142
+        0xA9, 0x02, 0x8D, 0x43, 0x21, // LDA #$02 ; STA $2143
+        0x9C, 0x41, 0x21, // STZ $2141 (0 = execute)
+        0xA9, 0xCC, 0x8D, 0x40, 0x21, // LDA #$CC ; STA $2140
+        0x80, 0xFE, // BRA self
+    ];
+    let spc = [
+        0x8F, 0x34, 0xF2, 0x8F, 0xA5, 0xF3, // voice 3 SRCN ($34) = $A5
+        0x8F, 0x32, 0xF2, 0x8F, 0x21, 0xF3, // PITCHL ($32) = $21
+        0x8F, 0x33, 0xF2, 0x8F, 0xFF, 0xF3, // PITCHH ($33) = $FF (14 bits kept)
+        0x8F, 0x30, 0xF2, 0x8F, 0x7F, 0xF3, // VOLL = 127
+        0x8F, 0x31, 0xF2, 0x8F, 0x80, 0xF3, // VOLR = -128
+        0x8F, 0x4C, 0xF2, 0x8F, 0x08, 0xF3, // KON voice 3
+        0x2F, 0xFE, // BRA self
+    ];
+    let mut e = Emulator::new();
+    e.load_rom_bytes(demo_lorom_with(&cpu, None)).unwrap();
+    e.poke_aram(0x0200, &spc).unwrap();
+    e.enable_dsp_trace(64).unwrap();
+    e.step(20_000).unwrap();
+
+    let notes = e.take_dsp_notes().unwrap();
+    assert_eq!(notes.len(), 1);
+    let n = notes[0];
+    assert_eq!(
+        (n.voice, n.srcn, n.pitch, n.vol_l, n.vol_r),
+        (3, 0xA5, 0x3F21, 127, -128)
+    );
+    let writes = e.take_dsp_trace().unwrap();
+    let kon = writes.iter().find(|w| w.reg == 0x4C).unwrap();
+    assert_eq!((kon.frame, kon.spc_cycles), (n.frame, n.spc_cycles));
+    assert!(e.take_dsp_notes().unwrap().is_empty(), "drained");
+}
+
 /// The state's DMAP of each channel, next to what the bus reads at `$43x0`.
 fn dmap_exported_and_read(e: &mut Emulator) -> ([u8; 8], [u8; 8]) {
     let exported = e.state().dma.channels.map(|c| c.params);

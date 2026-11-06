@@ -169,8 +169,10 @@ and is the hub for every headless diagnostic.
 | `--dsp1-trace-ports` | off | Restrict the above to the DR/SR transactions (the stock firmware idles in an RQM loop, so a full trace is mostly idle spin). |
 | `--dsp1-trace-commands <PATH>` | — | The DSP-1 port traffic grouped into one CSV row per command (implies `--dsp1-trace-ports`). See *Command transactions* below. |
 | `--dsp1-trace-max <N>` | `200000` | Cap on captured DSP-1 events. |
-| `--dsp-trace <PATH>` | — | CSV of every DSP register write: `spc_cycles,reg,name,value`, with `name` decoded (`V0_ADSR1`, `KON`, `FLG`, …). `spc_cycles` counts SPC700 cycles from the start of the run (1 024 000 per second; 32 per output sample). |
+| `--dsp-trace <PATH>` | — | CSV of every DSP register write: `spc_cycles,reg,name,value,frame`, with `name` decoded (`V0_ADSR1`, `KON`, `FLG`, …) and `frame` the PPU frame number of the write. `spc_cycles` counts SPC700 cycles from the start of the run (1 024 000 per second; 32 per output sample). |
 | `--dsp-trace-max <N>` | `100000` | Cap on captured DSP writes. |
+| `--dsp-events <PATH>` | — | JSON lines, one per note: every voice bit a `KON` (`$4C`) write raises, with the PPU `frame`, the `spc_cycles` of the write and that voice's `srcn`, `pitch` (14 bits, `$1000` = 32 kHz), `vol_l` and `vol_r` (signed) as they stood at the write. A whole piece of music is read from one command, to line up with another console's notes. |
+| `--dsp-events-max <N>` | `100000` | Cap on captured notes. |
 | `--sa1-log <PATH>` | — | CSV of every `$2200-$23FF` SA-1 MMIO access. |
 | `--sa1-side-log <PATH>` | — | The same registers seen from the **SA-1's** side: its own reads and writes of `$2200-$23FF`, plus its writes to I-RAM (`$3000-$37FF`), each with the SA-1 PC — `seq,sa1_pc,kind,reg,value`. Shows the handshake flags the two CPUs exchange, which the S-CPU-side `--sa1-log` cannot. |
 | `--cpu-trace <PATH>` | — | Per-instruction 65C816 register trace: `mclk_total,frame_ntsc,pc,a,x,y,sp,p,db,dp,e` (pre-opcode snapshot). The stream to diff against a Mesen2 trace when bisecting a divergence — see the example below. |
@@ -870,6 +872,12 @@ luna state game.sfc -n 2000000 --dsp-trace dsp.csv
 #
 # spc_cycles is the SPC700 cycle of the write, counted from the start of
 # the run: divide by 32 for the sample index in an --audio-out capture.
+# The last column, frame, is the PPU frame number of the write.
+
+# 4. Note events — one JSON line per note (a voice bit raised in KON),
+#    registers read at the write, frame = PPU frame number:
+luna state game.sfc --until-frame 3000 --dsp-events notes.jsonl
+# {"frame":212,"spc_cycles":7311204,"voice":3,"srcn":165,"pitch":16161,"vol_l":127,"vol_r":-128}
 ```
 
 **VRAM by word address.** `--peek VRAM:WORD:COUNT` reads the PPU's VRAM:

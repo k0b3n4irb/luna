@@ -19,7 +19,7 @@ use std::path::Path;
 /// and MCP consume it through `luna-api` rather than depending on
 /// `luna-apu` (`.claude/rules/api-first.md`).
 pub use luna_apu::SpcStepKind;
-pub use luna_apu::dsp::{DspWriteEvent, VOICE_TAP_DEFAULT_SECONDS};
+pub use luna_apu::dsp::{DspNoteEvent, DspWriteEvent, VOICE_TAP_DEFAULT_SECONDS};
 pub use luna_cartridge::Region;
 /// Header audit for a physical cartridge (`luna cart-check`), re-exported so
 /// the CLI and MCP reach it through `luna-api`.
@@ -5453,9 +5453,11 @@ impl Emulator {
         let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
         snes.apu_real.dsp.write_log = Some(luna_apu::dsp::DspWriteLog {
             events: Vec::new(),
+            notes: Vec::new(),
             max_events,
         });
         snes.apu_real.dsp.trace_cycles = 0;
+        snes.apu_real.dsp.trace_frame = snes.frame_count;
         Ok(())
     }
 
@@ -5464,6 +5466,18 @@ impl Emulator {
         let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
         Ok(match snes.apu_real.dsp.write_log.as_mut() {
             Some(log) => std::mem::take(&mut log.events),
+            None => Vec::new(),
+        })
+    }
+
+    /// Drain the notes the DSP trace saw: one per voice bit raised by a
+    /// `KON` (`$4C`) write, with that voice's `SRCN`, `PITCH` and volumes as
+    /// they stood at the write and the PPU frame number (empty if the
+    /// trace is disabled). Enabled by [`Self::enable_dsp_trace`].
+    pub fn take_dsp_notes(&mut self) -> Result<Vec<DspNoteEvent>, ApiError> {
+        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        Ok(match snes.apu_real.dsp.write_log.as_mut() {
+            Some(log) => std::mem::take(&mut log.notes),
             None => Vec::new(),
         })
     }

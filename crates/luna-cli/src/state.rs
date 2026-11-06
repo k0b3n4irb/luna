@@ -5,10 +5,10 @@ use std::fmt::Write as _;
 use std::process::ExitCode;
 
 use crate::csv::{
-    write_cpu_trace_csv, write_dma_trace_csv, write_dsp_trace_csv, write_dsp1_commands_csv,
-    write_dsp1_trace_csv, write_gsu_bus_trace_csv, write_mailbox_log_csv, write_mem_trace_csv,
-    write_sa1_log_csv, write_sa1_side_log_csv, write_sa1_trace_csv, write_spc_trace_csv,
-    write_superfx_trace_csv,
+    write_cpu_trace_csv, write_dma_trace_csv, write_dsp_events_jsonl, write_dsp_trace_csv,
+    write_dsp1_commands_csv, write_dsp1_trace_csv, write_gsu_bus_trace_csv, write_mailbox_log_csv,
+    write_mem_trace_csv, write_sa1_log_csv, write_sa1_side_log_csv, write_sa1_trace_csv,
+    write_spc_trace_csv, write_superfx_trace_csv,
 };
 use crate::fmt::hex_str;
 use crate::output::{print_hex_dump, write_wav};
@@ -687,6 +687,8 @@ pub(crate) fn run_state(
     apu_log_path: Option<&std::path::Path>,
     dsp_trace_path: Option<&std::path::Path>,
     dsp_trace_max: usize,
+    dsp_events_path: Option<&std::path::Path>,
+    dsp_events_max: usize,
     sa1_log_path: Option<&std::path::Path>,
     sa1_side_log_path: Option<&std::path::Path>,
     sa1_trace_path: Option<&std::path::Path>,
@@ -867,8 +869,12 @@ pub(crate) fn run_state(
         eprintln!("error: enable_mailbox_log: {e}");
         return ExitCode::from(1);
     }
-    if dsp_trace_path.is_some()
-        && let Err(e) = em.enable_dsp_trace(dsp_trace_max)
+    if (dsp_trace_path.is_some() || dsp_events_path.is_some())
+        && let Err(e) = em.enable_dsp_trace(match (dsp_trace_path, dsp_events_path) {
+            (Some(_), Some(_)) => dsp_trace_max.max(dsp_events_max),
+            (None, Some(_)) => dsp_events_max,
+            _ => dsp_trace_max,
+        })
     {
         eprintln!("error: enable_dsp_trace: {e}");
         return ExitCode::from(1);
@@ -1519,6 +1525,19 @@ pub(crate) fn run_state(
                 Err(e) => eprintln!("error: writing DSP trace: {e}"),
             },
             Err(e) => eprintln!("error: take_dsp_trace: {e}"),
+        }
+    }
+    if let Some(path) = dsp_events_path {
+        match em.take_dsp_notes() {
+            Ok(notes) => match write_dsp_events_jsonl(path, &notes) {
+                Ok(()) => eprintln!(
+                    "DSP note events written to {} ({} notes)",
+                    path.display(),
+                    notes.len()
+                ),
+                Err(e) => eprintln!("error: writing DSP events: {e}"),
+            },
+            Err(e) => eprintln!("error: take_dsp_notes: {e}"),
         }
     }
     if let Some(path) = apu_log_path {

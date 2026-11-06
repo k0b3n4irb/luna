@@ -304,6 +304,9 @@ pub fn gaussian_table() -> &'static [i16; 512] {
 /// the writes reached the chip in the intended order.
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct DspWriteEvent {
+    /// PPU frame number at the write (`Snes::frame_count`), so a whole
+    /// piece can be lined up with the picture without stepping frame by frame.
+    pub frame: u64,
     /// SPC700 cycles since the trace was enabled, the cycle of the write
     /// included. 32 of them make one output sample.
     pub spc_cycles: u64,
@@ -313,10 +316,32 @@ pub struct DspWriteEvent {
     pub value: u8,
 }
 
-/// Bounded ring for [`DspWriteEvent`]s.
+/// One note: a voice keyed on, with the voice registers as they stood at
+/// the `KON` (`$4C`) write that raised its bit.
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+pub struct DspNoteEvent {
+    /// PPU frame number at the write.
+    pub frame: u64,
+    /// SPC700 cycles since the trace was enabled, as in [`DspWriteEvent`].
+    pub spc_cycles: u64,
+    /// Voice `0-7`.
+    pub voice: u8,
+    /// `SRCN` (`$x4`), the sample directory entry.
+    pub srcn: u8,
+    /// `PITCH` (`$x2` low, `$x3` high 6 bits): 14 bits, `$1000` = 32 kHz.
+    pub pitch: u16,
+    /// `VOLL` (`$x0`), signed.
+    pub vol_l: i8,
+    /// `VOLR` (`$x1`), signed.
+    pub vol_r: i8,
+}
+
+/// Bounded ring for [`DspWriteEvent`]s (and the [`DspNoteEvent`]s, each
+/// capped at `max_events`).
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct DspWriteLog {
     pub events: Vec<DspWriteEvent>,
+    pub notes: Vec<DspNoteEvent>,
     pub max_events: usize,
 }
 
@@ -342,6 +367,10 @@ pub struct Dsp {
     /// ticked by the APU bridge while `write_log` is on.
     #[serde(skip)]
     pub trace_cycles: u64,
+    /// PPU frame number stamped on trace events; the system glue refreshes
+    /// it before each APU step while `write_log` is on.
+    #[serde(skip)]
+    pub trace_frame: u64,
     /// Optional per-voice capture: each voice's own output, one stereo
     /// sample per DSP sample. `None` = off (the voice path pays a single
     /// `Option` check). See [`VoiceTap`].
@@ -437,6 +466,7 @@ impl Dsp {
             last_sample: (0, 0),
             write_log: None,
             trace_cycles: 0,
+            trace_frame: 0,
             voice_tap: None,
         };
         // Trigger gaussian table init so the first sample isn't slow.
@@ -458,6 +488,7 @@ impl Dsp {
             && log.events.len() < log.max_events
         {
             log.events.push(DspWriteEvent {
+                frame: self.trace_frame,
                 spc_cycles: self.trace_cycles,
                 reg: addr,
                 value: data,
@@ -474,6 +505,23 @@ impl Dsp {
                 for n in 0..8 {
                     self.voices[n].keyon = bit(data, n as u8);
                     self.voices[n]._keylatch = bit(data, n as u8);
+                }
+                if let Some(log) = self.write_log.as_mut() {
+                    for n in (0..8usize).filter(|&n| bit(data, n as u8)) {
+                        if log.notes.len() >= log.max_events {
+                            break;
+                        }
+                        let r = &self.registers[n * 0x10..n * 0x10 + 5];
+                        log.notes.push(DspNoteEvent {
+                            frame: self.trace_frame,
+                            spc_cycles: self.trace_cycles,
+                            voice: n as u8,
+                            srcn: r[4],
+                            pitch: u16::from(r[2]) | (u16::from(r[3] & 0x3F) << 8),
+                            vol_l: r[0] as i8,
+                            vol_r: r[1] as i8,
+                        });
+                    }
                 }
             }
             0x5C => {

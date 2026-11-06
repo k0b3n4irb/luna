@@ -7,6 +7,12 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ## [Unreleased]
 
+- `luna state --dsp-events notes.jsonl` (+ `--dsp-events-max`): one JSON line per DSP note,
+  i.e. per voice bit a `KON` write raises, with the PPU `frame`, `spc_cycles`, `voice`,
+  `srcn`, `pitch` (14 bits), `vol_l` and `vol_r` read from the voice registers at the write.
+  The `--dsp-trace` CSV gains a last `frame` column, and the MCP `take_dsp_trace` events a
+  `frame` field. `luna-api`: `DspWriteEvent.frame`, `DspNoteEvent`, `take_dsp_notes`.
+  No save-state change (the trace is not part of the state).
 - `luna cart-check --no-sram` (MCP `cart_check` `no_sram`) refuses any declared save RAM
   (SRAM size byte or a RAM/battery chipset code): `ERROR SRAM_DECLARED`, for cartridges that
   save nothing. Without the flag nothing changes. Every check now also prints

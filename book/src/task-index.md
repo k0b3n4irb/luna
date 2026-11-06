@@ -126,6 +126,7 @@ means that transport has no form of it.
 | the music as a `.spc` file | `luna spc-dump` | `export_spc` | [`luna spc-dump`](using/cli-analysis.md#luna-spc-dump--export-a-spc-sound-file) |
 | the DSP voices and the driver's memory | `--peek APU:…`, `--dump-aram` | `dsp_registers`, `peek_aram` | [Audio-side visibility](using/cli-run-state.md#audio-side-visibility) |
 | the order of the key-on and key-off writes | `--dsp-trace` | `enable_dsp_trace` | [Audio-side visibility](using/cli-run-state.md#audio-side-visibility) |
+| the notes of a whole piece, with the frame of each | `--dsp-events` | `enable_dsp_trace` (`frame` on each write) | [Audio-side visibility](using/cli-run-state.md#audio-side-visibility) |
 | what the CPU and the sound chip said to each other | `--apu-log`, `--spc-trace` | `enable_mailbox_log`, `enable_spc_trace` | [Audio-side visibility](using/cli-run-state.md#audio-side-visibility) |
 
 ## Look inside a coprocessor

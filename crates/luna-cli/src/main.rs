@@ -672,6 +672,16 @@ enum Command {
         /// Cap on captured DSP register writes (see `--dsp-trace`).
         #[arg(long = "dsp-trace-max", default_value_t = 100_000)]
         dsp_trace_max: usize,
+        /// Optional DSP note events, JSON lines: one per voice keyed on
+        /// by a `KON` (`$4C`) write, with the PPU frame number, the SPC
+        /// cycle and that voice's `srcn`, `pitch` (14 bits), `vol_l` and
+        /// `vol_r` (signed) read at the write. A whole piece of music
+        /// lines up with the picture from one command.
+        #[arg(long = "dsp-events")]
+        dsp_events: Option<PathBuf>,
+        /// Cap on captured notes (see `--dsp-events`).
+        #[arg(long = "dsp-events-max", default_value_t = 100_000)]
+        dsp_events_max: usize,
         /// Optional SA-1 MMIO traffic log. When set, every CPU read/write
         /// of an SA-1 register `$2200-$23FF` during the run is captured and
         /// written to the given path as CSV with columns:
@@ -1731,6 +1741,8 @@ fn main() -> ExitCode {
             apu_log,
             dsp_trace,
             dsp_trace_max,
+            dsp_events,
+            dsp_events_max,
             sa1_log,
             sa1_side_log,
             sa1_trace,
@@ -1819,6 +1831,8 @@ fn main() -> ExitCode {
                 apu_log.as_deref(),
                 dsp_trace.as_deref(),
                 dsp_trace_max,
+                dsp_events.as_deref(),
+                dsp_events_max,
                 sa1_log.as_deref(),
                 sa1_side_log.as_deref(),
                 sa1_trace.as_deref(),

@@ -3385,6 +3385,9 @@ impl SnesBus<'_> {
             // executed `STOP` the APU is no longer stepped at all (open
             // row: `docs/luna_apu_gaps.md` #8).
             if !*self.apu_panicked {
+                if self.apu_real.dsp.write_log.is_some() {
+                    self.apu_real.dsp.trace_frame = self.frame_count;
+                }
                 self.apu_real.step(step as u32);
                 if self.apu_real.cpu.stopped {
                     *self.apu_panicked = true;
