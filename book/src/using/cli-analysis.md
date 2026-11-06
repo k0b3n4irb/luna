@@ -1108,7 +1108,9 @@ luna cart-check --json "game.sfc" | jq '.findings[] | select(.severity != "info"
 ## `luna strict` — what a real console would have refused
 
 ```
-luna strict [--frames N] [--json] [--force-mapper M] [--force-region R] <ROM>
+luna strict [--frames N] [--json] [--force-mapper M] [--force-region R]
+            [--input S] [--input2 S] [--input-at ROUTINE]
+            [--poke-at ROUTINE [--poke-hit N] --poke NAME=HEX]... [--sym FILE] <ROM>
 ```
 
 An emulator lets through accesses a console ignores: a byte written to VRAM
@@ -1147,6 +1149,21 @@ count}]}`; `origin` is `cpu`, `dma<n>` or `hdma<n>`. At most 4096 distinct
 faults are kept; `overflow` counts the others. `luna run --strict-hw` prints the same list
 after the final state (exit 1 on a fault), and the MCP tools `enable_hw_strict` /
 `take_hw_faults` give it to a client (a `load_rom` turns the journal off).
+
+**Playing a scenario.** A run with the pad at rest only sees the screens a
+game reaches by itself. `--input`, `--input2` and `--input-at` (the grammar of
+`luna state`: `frame:hex`, or `N+K:hex` counted from the N-th arrival on a
+routine) press buttons during the run, so the menus, a match, the victory and
+the GAME OVER can be played under the journal. `--poke-at ROUTINE` with
+`--poke NAME=HEX` (and `--poke-hit N`, repeatable) writes bytes when execution
+reaches a routine, to jump to a scene. A poke the run never reaches means the
+scenario was not played: the exit code is `2`, not a false "no fault".
+`--sym` names the symbols (default: the `.sym` beside the ROM).
+
+```bash
+luna strict "game.sfc" --frames 1800 --input "300:0x1000,310:0,400:0x0080,410:0"
+luna strict "game.sfc" --frames 600 --poke-at menu_ready --poke mode=03
+```
 
 A ROM that is not written for the console's region can show faults only
 under `--force-region`: a test ROM that waits for `VBlank` by polling `$4210`

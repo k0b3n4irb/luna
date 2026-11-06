@@ -5,7 +5,9 @@ use std::process::ExitCode;
 
 use luna_api::StrictReport;
 
+use crate::parsers::{InputFlags, apply_input_flags};
 use crate::rom::load_rom_into;
+use crate::state::{PokeAt, PokeGroup};
 
 /// The fault lines, one per distinct (rule, pc, address), and a summary.
 pub(crate) fn render_text(report: &StrictReport, frames: u64) -> String {
@@ -62,41 +64,116 @@ pub(crate) fn render(
     (text, code)
 }
 
-/// Run `rom` for `frames` frames with the journal on and print it. Exit
+/// What `luna strict` is told besides the ROM: the scripted input and the
+/// pokes of `state`, so a run can play a menu, a match, a GAME OVER.
+pub(crate) struct StrictOpts<'a> {
+    pub rom: &'a std::path::Path,
+    pub frames: u64,
+    pub json: bool,
+    pub force_mapper: Option<&'a str>,
+    pub force_region: Option<&'a str>,
+    pub power_on: Option<&'a str>,
+    pub input: Option<&'a str>,
+    pub input2: Option<&'a str>,
+    pub input_at: Option<&'a str>,
+    pub pokes: &'a [PokeGroup],
+    pub sym: Option<&'a std::path::Path>,
+}
+
+/// Run the ROM for `frames` frames with the journal on and print it. Exit
 /// `0` = no fault, `1` = at least one fault (or a core panic), `2` = the
-/// ROM cannot be loaded.
-pub(crate) fn run_strict(
-    rom: &std::path::Path,
-    frames: u64,
-    json: bool,
-    force_mapper: Option<&str>,
-    force_region: Option<&str>,
-    power_on: Option<&str>,
-) -> ExitCode {
+/// ROM cannot be loaded or a flag is malformed.
+pub(crate) fn run_strict(o: &StrictOpts<'_>) -> ExitCode {
+    use luna_api::{ScriptBound, WatchEvent};
     let mut em = luna_api::Emulator::new();
-    if let Err(e) = load_rom_into(&mut em, rom, force_mapper, force_region, None, power_on) {
+    if let Err(e) = load_rom_into(
+        &mut em,
+        o.rom,
+        o.force_mapper,
+        o.force_region,
+        None,
+        o.power_on,
+    ) {
         eprintln!("error: {e}");
         return ExitCode::from(2);
+    }
+    if let Some(sym) = o.sym.filter(|s| !crate::rom::is_auto_sym(o.rom, s)) {
+        match em.load_symbols(sym) {
+            Ok(n) => eprintln!("loaded {n} symbols from {}", sym.display()),
+            Err(e) => {
+                eprintln!("error: --sym {}: {e}", sym.display());
+                return ExitCode::from(2);
+            }
+        }
+    }
+    let extra_pads = [(1u8, o.input2)];
+    let flags = InputFlags {
+        extra_pads: &extra_pads,
+        clocked: o.input_at.is_some(),
+        ..InputFlags::pad1(o.input)
+    };
+    let mut script = match apply_input_flags(&mut em, &flags) {
+        Ok(s) => s,
+        Err(code) => return ExitCode::from(code),
+    };
+    if let Some(spec) = o.input_at {
+        match crate::test_cmd::resolve_key(&em, spec) {
+            Ok(pc) => script.set_clock_pc(pc),
+            Err(e) => {
+                eprintln!("error: --input-at `{spec}`: {e}");
+                return ExitCode::from(2);
+            }
+        }
+    }
+    let mut pokes = match PokeAt::resolve(&em, o.pokes) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let mut watched: Vec<u32> = Vec::new();
+    for p in &pokes {
+        if !watched.contains(&p.addr) {
+            watched.push(p.addr);
+        }
     }
     if let Err(e) = em.enable_hw_strict() {
         eprintln!("error: enable_hw_strict: {e}");
         return ExitCode::from(2);
     }
     let mut panicked = false;
-    while em.frame_count().unwrap_or(0) < frames {
-        match em.step_until_frame(luna_api::FRAME_STEP_BUDGET) {
-            Ok(0) => break, // STP: nothing more will happen
-            Ok(_) => {}
-            Err(luna_api::ApiError::Panic(msg)) => {
-                eprintln!("core panic: {msg}");
-                panicked = true;
-                break;
+    let run = em.run_script_watching(
+        &mut script,
+        ScriptBound::Frame(o.frames),
+        &watched,
+        |em, ev| {
+            if let WatchEvent::Pc(i) = ev {
+                for p in pokes.iter_mut().filter(|p| p.addr == watched[i]) {
+                    p.on_arrival(em);
+                }
             }
-            Err(e) => {
-                eprintln!("error: step_until_frame: {e}");
-                return ExitCode::from(2);
-            }
+            false
+        },
+    );
+    match run {
+        Ok(_) => {}
+        Err(luna_api::ApiError::Panic(msg)) => {
+            eprintln!("core panic: {msg}");
+            panicked = true;
         }
+        Err(e) => {
+            eprintln!("error: scripted input: {e}");
+            return ExitCode::from(2);
+        }
+    }
+    // A poke the run never reached wrote nothing: the scenario was not played.
+    if let Some(p) = pokes.iter().find(|p| !p.applied) {
+        eprintln!(
+            "error: --poke-at {} never reached arrival {} (seen {})",
+            p.spec, p.hit, p.hits_seen
+        );
+        return ExitCode::from(2);
     }
     let ran = em.frame_count().unwrap_or(0);
     let report = match em.take_hw_faults() {
@@ -106,7 +183,7 @@ pub(crate) fn run_strict(
             return ExitCode::from(2);
         }
     };
-    let (text, code) = render(rom, &report, ran, json);
+    let (text, code) = render(o.rom, &report, ran, o.json);
     println!("{text}");
     ExitCode::from(code.max(u8::from(panicked)))
 }

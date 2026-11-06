@@ -107,3 +107,64 @@ fn run_strict_hw_prints_the_journal_without_changing_the_picture() {
     assert_eq!(fbhash(&plain), fbhash(&strict), "the picture is identical");
     assert!(String::from_utf8_lossy(&strict.stdout).contains("R1 pc=$00:8005"));
 }
+
+/// Forced blank, wait for `$10` to turn non-zero, then screen on and
+/// `STA $2118` forever: the fault is reached only if something writes `$10`.
+const WAITS_FOR_A_POKE: [u8; 19] = [
+    0xA9, 0x80, 0x8D, 0x00, 0x21, // forced blank
+    0xA5, 0x10, 0xF0, 0xFC, // LDA $10 ; BEQ back
+    0xA9, 0x0F, 0x8D, 0x00, 0x21, // screen on
+    0x8D, 0x18, 0x21, 0x80, 0xFB, // STA $2118 forever
+];
+
+#[test]
+fn strict_plays_a_poke_to_reach_what_the_idle_run_never_does() {
+    let dir = setup("poke");
+    let rom = dir.join("waits.sfc");
+    write_rom(&rom, &WAITS_FOR_A_POKE);
+    let o = luna(&["strict", "--frames", "4"], &rom);
+    assert_eq!(o.status.code(), Some(0), "idle run is clean");
+    let o = luna(
+        &[
+            "strict",
+            "--frames",
+            "4",
+            "--poke-at",
+            "00:8005",
+            "--poke",
+            "7e:0010=01",
+        ],
+        &rom,
+    );
+    assert_eq!(
+        o.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+    let out = String::from_utf8_lossy(&o.stdout);
+    assert!(out.contains("R1 pc=$00:800E $2118"), "{out}");
+}
+
+#[test]
+fn strict_refuses_a_poke_the_run_never_reaches() {
+    let dir = setup("poke-never");
+    let rom = dir.join("waits.sfc");
+    write_rom(&rom, &WAITS_FOR_A_POKE);
+    let o = luna(
+        &[
+            "strict",
+            "--frames",
+            "4",
+            "--poke-at",
+            "00:8005",
+            "--poke-hit",
+            "999999",
+            "--poke",
+            "7e:0010=01",
+        ],
+        &rom,
+    );
+    assert_eq!(o.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&o.stderr).contains("never reached arrival"));
+}

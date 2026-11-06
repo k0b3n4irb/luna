@@ -1472,6 +1472,36 @@ enum Command {
         /// What RAM holds before the ROM boots (zero, ones, random, random=<seed>).
         #[arg(long = "power-on")]
         power_on: Option<String>,
+        /// Scripted joypad-1 input, `frame:hex` as in `state --input`:
+        /// play the menus, the match, the GAME OVER under the journal.
+        #[arg(long)]
+        input: Option<String>,
+        /// Scripted joypad-2 input (`state --input2` grammar).
+        #[arg(long)]
+        input2: Option<String>,
+        /// Number the input scripts by arrivals on this routine instead of
+        /// by frame (`state --input-at`; `N+K:` = K frames after arrival N).
+        #[arg(long = "input-at")]
+        input_at: Option<String>,
+        /// Write every `--poke` when execution reaches this routine, at its
+        /// `--poke-hit`-th arrival (`state --poke-at`). Repeatable. A poke
+        /// never reached is an error (exit 2): the scenario was not played.
+        #[arg(long = "poke-at", requires = "poke")]
+        poke_at: Vec<String>,
+        /// With `--poke-at`: the arrival the bytes are written at (default 1).
+        #[arg(
+            long = "poke-hit",
+            requires = "poke_at",
+            value_parser = clap::value_parser!(u64).range(1..)
+        )]
+        poke_hit: Vec<u64>,
+        /// Bytes to write at the `--poke-at`: `NAME=HEX` or `BANK:OFFSET=HEX`.
+        #[arg(long = "poke", requires = "poke_at")]
+        poke: Vec<String>,
+        /// Symbol file naming `--poke-at`, `--poke` and `--input-at`.
+        /// Default: the `.sym` beside the ROM.
+        #[arg(long)]
+        sym: Option<PathBuf>,
     },
     /// Run a ROM until its music driver is playing, then export the APU
     /// state as a `.spc` sound file (SNES-SPC700 Sound File Data v0.30):
@@ -1562,7 +1592,7 @@ fn indexed<T: Clone + Send + Sync + 'static>(
 ) -> Vec<(usize, T)> {
     let Some((_, sub)) = matches
         .subcommand()
-        .filter(|(name, _)| matches!(*name, "state" | "profile" | "record"))
+        .filter(|(name, _)| matches!(*name, "state" | "profile" | "record" | "strict"))
     else {
         return Vec::new();
     };
@@ -2187,14 +2217,24 @@ fn main() -> ExitCode {
             force_mapper,
             force_region,
             power_on,
-        } => strict::run_strict(
-            &rom,
+            input,
+            input2,
+            input_at,
+            sym,
+            ..
+        } => strict::run_strict(&strict::StrictOpts {
+            rom: &rom,
             frames,
             json,
-            force_mapper.as_deref(),
-            force_region.as_deref(),
-            power_on.as_deref(),
-        ),
+            force_mapper: force_mapper.as_deref(),
+            force_region: force_region.as_deref(),
+            power_on: power_on.as_deref(),
+            input: input.as_deref(),
+            input2: input2.as_deref(),
+            input_at: input_at.as_deref(),
+            pokes: &poke_groups,
+            sym: sym.as_deref(),
+        }),
         Command::SpcDump {
             rom,
             steps,

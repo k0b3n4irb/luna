@@ -7,6 +7,10 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ## [Unreleased]
 
+- `luna strict` takes the scripted input and pokes of `state`: `--input`, `--input2`,
+  `--input-at`, `--poke-at` / `--poke-hit` / `--poke`, `--sym`. Menus, matches and
+  GAME OVER screens can be played under the strict journal; a poke the run never
+  reaches exits 2 instead of reporting a clean run.
 - Hardware strict mode: `luna strict [--frames N] [--json] ROM`, `luna run
   --strict-hw` and the MCP tools `enable_hw_strict` / `take_hw_faults` list
   what a real console would have refused or corrupted and an emulator lets
