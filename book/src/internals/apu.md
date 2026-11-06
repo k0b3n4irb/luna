@@ -303,3 +303,7 @@ Two cautions. The figure comes from the formula the references share, not from
 a measurement on a real console. And do not calibrate with the nybble −8: the
 16-bit cast of the Gaussian interpolation, faithful to the hardware, makes the
 sum overflow there and the signal turns asymmetric. Use ±7.
+
+To read the notes a driver actually plays, rather than the level they reach,
+`luna state --dsp-events notes.jsonl` lists every key-on with its voice, SRCN,
+pitch, volumes and the PPU frame (see the run/state reference).
