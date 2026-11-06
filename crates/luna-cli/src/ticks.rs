@@ -166,3 +166,55 @@ fn compare(
     }
     Ok(c)
 }
+
+/// `luna ticks --intervals RECORD`: the duration of each tick. Exit 0 when
+/// measured, 2 when the record cannot be measured.
+pub(crate) fn run_intervals(
+    record: &Path,
+    frame_cycles: Option<u64>,
+    cycle_hz: Option<u64>,
+    over: Option<f64>,
+    csv: Option<&Path>,
+) -> ExitCode {
+    match intervals(record, frame_cycles, cycle_hz, over, csv) {
+        Ok(i) => {
+            println!("{}", i.summary());
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn intervals(
+    record: &Path,
+    frame_cycles: Option<u64>,
+    cycle_hz: Option<u64>,
+    over: Option<f64>,
+    csv: Option<&Path>,
+) -> Result<luna_api::TickIntervals, String> {
+    let i = luna_api::tick_intervals(
+        open(record)?,
+        &luna_api::IntervalOptions {
+            frame_cycles,
+            cycle_hz,
+            over,
+        },
+    )?;
+    if let Some(path) = csv {
+        // Beside the summary on stdout, `-` would mix the two: the CSV goes
+        // to a file.
+        if path == Path::new("-") {
+            return Err("--csv -: the summary is on stdout, give a file".to_string());
+        }
+        let mut out = std::io::BufWriter::new(
+            std::fs::File::create(path).map_err(|e| format!("{}: {e}", path.display()))?,
+        );
+        i.write_csv(&mut out)
+            .and_then(|()| out.flush())
+            .map_err(|e| format!("writing the CSV: {e}"))?;
+    }
+    Ok(i)
+}

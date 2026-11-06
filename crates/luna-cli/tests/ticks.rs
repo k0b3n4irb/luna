@@ -795,3 +795,64 @@ fn compare_excludes_a_rom_and_a_spec() {
         .expect("run luna");
     assert_eq!(out.status.code(), Some(2), "{}", text(&out));
 }
+
+fn intervals(dir: &Path, args: &[&str]) -> Output {
+    Command::new(luna_bin())
+        .current_dir(dir)
+        .args(["ticks", "--intervals"])
+        .args(args)
+        .output()
+        .expect("run luna")
+}
+
+#[test]
+fn intervals_measures_the_ticks_of_a_record() {
+    let dir = fresh_dir("intervals");
+    let (a, _) = two_records(&dir);
+    let sa = a.to_str().unwrap();
+
+    // The slow-tick game takes about three frames a tick: none is above 3.5,
+    // all are above 2.5.
+    let csv = dir.join("i.csv");
+    let out = intervals(&dir, &[sa, "--over", "2.5", "--csv", csv.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.starts_with("5 tick(s), 4 measured (arrival to arrival, NOT lag frames)"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("4 tick(s) over 2.5 frame(s):"), "{stdout}");
+    let rows = std::fs::read_to_string(&csv).unwrap();
+    let mut rows = rows.lines();
+    assert_eq!(rows.next(), Some("t,frame_delta,cycles,frames,ms,over"));
+    assert_eq!(rows.count(), 4);
+    let out = intervals(&dir, &[sa, "--over", "3.5"]);
+    assert!(String::from_utf8_lossy(&out.stdout).contains("0 tick(s) over 3.5 frame(s)"));
+
+    // A unit the header cannot convert is refused, and --frame-cycles lifts it.
+    let foreign = std::fs::read_to_string(&a)
+        .unwrap()
+        .replace("snes_master", "other_master");
+    let f = dir.join("f.jsonl");
+    std::fs::write(&f, foreign).unwrap();
+    let out = intervals(&dir, &[f.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("give --frame-cycles"));
+    let out = intervals(&dir, &[f.to_str().unwrap(), "--frame-cycles", "357366"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+
+    // Not a record, a missing file, a missing flag's partner: exit 2.
+    let junk = dir.join("junk.jsonl");
+    std::fs::write(&junk, "hello\n").unwrap();
+    assert_eq!(
+        intervals(&dir, &[junk.to_str().unwrap()]).status.code(),
+        Some(2)
+    );
+    assert_eq!(intervals(&dir, &["missing.jsonl"]).status.code(), Some(2));
+    let out = Command::new(luna_bin())
+        .current_dir(&dir)
+        .args(["ticks", "--over", "2"])
+        .output()
+        .expect("run luna");
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out));
+}

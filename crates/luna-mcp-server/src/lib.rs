@@ -2053,6 +2053,29 @@ pub struct CompareTicksParams {
     pub csv_out: Option<String>,
 }
 
+/// `tick_intervals` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct TickIntervalsParams {
+    /// The `tick-record` file (JSONL), written by luna or by any program
+    /// that writes the format.
+    pub record: String,
+    /// Cycles of one frame in the record's `clock.cycles` unit. Required
+    /// unless the record is luna's (`snes_master` at the NTSC or PAL rate).
+    #[serde(default)]
+    pub frame_cycles: Option<u64>,
+    /// Cycles per second of that unit, for the milliseconds (default: the
+    /// header's rate for a luna record; otherwise no milliseconds).
+    #[serde(default)]
+    pub cycle_hz: Option<u64>,
+    /// List the ticks lasting more than this many frames (fractional).
+    #[serde(default)]
+    pub over: Option<f64>,
+    /// Also write every measured tick as CSV
+    /// (`t,frame_delta,cycles,frames,ms,over`) to this file.
+    #[serde(default)]
+    pub csv_out: Option<String>,
+}
+
 /// The trace logger's CPU named `name`.
 fn trace_cpu(name: Option<&str>) -> Result<luna_api::TraceCpu, ErrorData> {
     match name.unwrap_or("snes") {
@@ -3578,6 +3601,44 @@ impl LunaServer {
                 .map_err(|e| ErrorData::invalid_params(format!("{path}: {e}"), None))?;
         }
         Ok(rmcp::Json(comparison))
+    }
+
+    #[rmcp::tool(
+        description = "How long each tick of a `tick-record` file lasted (as `luna ticks \
+                                --intervals`): from one arrival on the tick routine to the next, in \
+                                frames and milliseconds, with the mean, the longest tick and, with \
+                                `over`, the ticks lasting more than that many frames. This is NOT \
+                                `luna profile`'s lag (a full frame, whose NMI found the CPU running). \
+                                A luna record converts by its header; another `clock.cycles` unit \
+                                needs `frame_cycles`. Needs no ROM."
+    )]
+    async fn tick_intervals(
+        &self,
+        Parameters(params): Parameters<TickIntervalsParams>,
+    ) -> Result<rmcp::Json<luna_api::TickIntervals>, ErrorData> {
+        let file = std::fs::File::open(&params.record)
+            .map(std::io::BufReader::new)
+            .map_err(|e| ErrorData::invalid_params(format!("{}: {e}", params.record), None))?;
+        let intervals = luna_api::tick_intervals(
+            file,
+            &luna_api::IntervalOptions {
+                frame_cycles: params.frame_cycles,
+                cycle_hz: params.cycle_hz,
+                over: params.over,
+            },
+        )
+        .map_err(|e| ErrorData::invalid_params(e, None))?;
+        if let Some(path) = &params.csv_out {
+            let mut out = std::io::BufWriter::new(
+                std::fs::File::create(path)
+                    .map_err(|e| ErrorData::invalid_params(format!("{path}: {e}"), None))?,
+            );
+            intervals
+                .write_csv(&mut out)
+                .and_then(|()| std::io::Write::flush(&mut out))
+                .map_err(|e| ErrorData::invalid_params(format!("{path}: {e}"), None))?;
+        }
+        Ok(rmcp::Json(intervals))
     }
 
     #[rmcp::tool(

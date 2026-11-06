@@ -2358,3 +2358,60 @@ async fn server_compare_ticks_locates_the_divergence() {
     assert!(err.message.contains("not in both"), "{err:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `tick_intervals` measures a record by its header, lists the long ticks,
+/// writes the CSV, and refuses a unit it cannot convert.
+#[tokio::test]
+async fn server_tick_intervals_measures_the_ticks() {
+    let dir = std::env::temp_dir().join("luna_mcp_tick_intervals");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let rec = |unit: &str| {
+        format!(
+            "{{\"format\":\"tick-record\",\"version\":1,\"endian\":\"little\",\"clock\":{{\"frame\":\"frame_end\",\"cycles\":\"{unit}\",\"hz\":21477272,\"beam\":\"b\"}},\"zones\":[]}}\n\
+             {{\"t\":1,\"frame\":0,\"cycles\":0,\"z\":{{}}}}\n\
+             {{\"t\":2,\"frame\":2,\"cycles\":714732,\"z\":{{}}}}\n\
+             {{\"t\":3,\"frame\":5,\"cycles\":1787830,\"z\":{{}}}}\n\
+             {{\"end\":{{\"ticks\":3,\"reason\":\"limit\"}}}}\n"
+        )
+    };
+    let (path, csv) = (dir.join("r.jsonl"), dir.join("i.csv"));
+    std::fs::write(&path, rec("snes_master")).unwrap();
+    let s = LunaServer::new();
+    let params = |record: &std::path::Path, over, frame_cycles| TickIntervalsParams {
+        record: record.to_string_lossy().into_owned(),
+        frame_cycles,
+        cycle_hz: None,
+        over,
+        csv_out: Some(csv.to_string_lossy().into_owned()),
+    };
+    let r = s
+        .tick_intervals(Parameters(params(&path, Some(2.5), None)))
+        .await
+        .unwrap()
+        .0;
+    assert_eq!((r.ticks, r.measured, r.frame_cycles), (3, 2, 357_366));
+    let o = r.over.as_ref().unwrap();
+    assert_eq!((o.count, o.ticks[0].t), (1, 2));
+    assert!(
+        std::fs::read_to_string(&csv)
+            .unwrap()
+            .starts_with("t,frame_delta,cycles,frames,ms,over\n1,2,714732,2.0000,")
+    );
+    let other = dir.join("o.jsonl");
+    std::fs::write(&other, rec("amiga_master")).unwrap();
+    let Err(err) = s
+        .tick_intervals(Parameters(params(&other, None, None)))
+        .await
+    else {
+        panic!("a foreign unit was converted by a guess");
+    };
+    assert!(err.message.contains("frame-cycles"), "{err:?}");
+    let ok = s
+        .tick_intervals(Parameters(params(&other, None, Some(357_366))))
+        .await
+        .unwrap()
+        .0;
+    assert_eq!(ok.cycles_unit, "amiga_master");
+    let _ = std::fs::remove_dir_all(&dir);
+}

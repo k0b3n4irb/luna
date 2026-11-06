@@ -7,6 +7,17 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ## [Unreleased]
 
+- `luna ticks --intervals RECORD` (+ `--over N`, `--csv FILE`, `--frame-cycles X`, `--cycle-hz HZ`),
+  MCP `tick_intervals`, `luna-api` `tick_intervals`: the duration of each tick of a `tick-record`
+  file, from one arrival on the tick routine to the next, in frames and milliseconds, with the
+  mean, the longest tick and the ticks above N frames. A luna record converts by its header
+  (`snes_master`, NTSC or PAL rate); a record in another `clock.cycles` unit (any producer of the
+  format) is refused unless `--frame-cycles` gives the frame length, never guessed.
+- `luna profile`: the output no longer reads `lag` as a tick duration. `lag` is a full frame (the
+  NMI found the CPU running, not parked in `WAI`); the summary prints a `note:` saying so and
+  naming `luna ticks --intervals`, and the help of `--frames-out`, `--max-lag-frames`,
+  `--max-lag-run`, the `lag` field of the JSON and the guide say the same. No field, column or
+  gate is renamed. New section in the guide: "The trap: `lag` is not the duration of a tick".
 - `luna state --dsp-events notes.jsonl` (+ `--dsp-events-max`): one JSON line per DSP note,
   i.e. per voice bit a `KON` write raises, with the PPU `frame`, `spc_cycles`, `voice`,
   `srcn`, `pitch` (14 bits), `vol_l` and `vol_r` read from the voice registers at the write.

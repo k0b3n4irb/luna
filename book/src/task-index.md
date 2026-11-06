@@ -148,6 +148,7 @@ means that transport has no form of it.
 | the method behind that comparison | — | — | [The differential harness](method/differential.md) |
 | the game's state at every tick, to compare with another run | `luna ticks --spec record.toml` | `record_ticks` | [`luna ticks`](using/cli-analysis.md#luna-ticks--a-record-per-game-tick) |
 | find the first tick where two records of a game differ | `luna ticks --compare a.jsonl b.jsonl --csv diff.csv` | `compare_ticks` | [Comparing two records](using/cli-analysis.md#comparing-two-records----compare) |
+| how long each tick lasted, and which ticks ran over N frames (not `luna profile`'s `lag`, which flags full frames) | `luna ticks --intervals record.jsonl --over 2.5` | `tick_intervals` | [How long each tick lasted](using/cli-analysis.md#how-long-each-tick-lasted----intervals) |
 | a report over a folder of ROMs | `luna bench` | — | [`luna bench`](using/cli-analysis.md#luna-bench--whole-corpus-compatibility-report) |
 | know which outputs are stable across runs | — | — | [Determinism guarantees](method/determinism.md#the-table) |
 

@@ -84,6 +84,7 @@ pub mod strict;
 pub mod symbols;
 pub mod ticks;
 pub mod ticks_compare;
+pub mod ticks_intervals;
 pub mod trace_logger;
 pub mod video;
 mod vocab;
@@ -113,6 +114,9 @@ pub use ticks::{
 pub use ticks_compare::{
     CompareEnd, CompareOptions, CompareSide, FirstDivergence, TickComparison, UnpairedTick,
     ZoneDiff, compare_tick_records,
+};
+pub use ticks_intervals::{
+    IntervalOptions, IntervalsOver, TickInterval, TickIntervals, tick_intervals,
 };
 pub use vocab::{
     dsp_register_index, dsp_register_name, dsp_register_table, force_mapper_names, parse_region,
@@ -1155,8 +1159,10 @@ pub struct ProfileFrame {
     pub total_mclk: u64,
     /// The NMI was raised in this frame.
     pub nmi: bool,
-    /// A lag frame: the NMI came while the CPU was executing, not parked
-    /// in `WAI` — the main loop had not finished. Meaningful for a loop
+    /// A lag frame = a FULL frame: the NMI came while the CPU was
+    /// executing, not parked in `WAI` — the main loop had not finished. It
+    /// is NOT the duration of a game tick (a two-frame tick lags every
+    /// other frame by design; `tick_intervals` measures ticks). Meaningful for a loop
     /// that waits for `VBlank` with `WAI`; one that polls a flag is
     /// executing at every NMI.
     pub lag: bool,

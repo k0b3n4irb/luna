@@ -1264,8 +1264,10 @@ enum Command {
         /// Write the window frame by frame as CSV
         /// (`frame,active_mclk,idle_mclk,cpu_mclk,dma_mclk,hdma_mclk,refresh_mclk,total_mclk,nmi,lag`):
         /// `active` is what the program used (CPU + the DMA it started),
-        /// `idle` the time parked in `WAI`, `lag` a frame whose NMI found
-        /// the CPU still executing. The same rows are `frame_series` in
+        /// `idle` the time parked in `WAI`, `lag` = full frame: the NMI
+        /// found the CPU still executing (it is NOT the duration of a game
+        /// tick: a two-frame tick lags every other frame by design; see
+        /// `luna ticks --intervals`). The same rows are `frame_series` in
         /// `--out`. Finds WHICH frame overran, in one run.
         #[arg(long = "frames-out")]
         frames_out: Option<PathBuf>,
@@ -1279,11 +1281,13 @@ enum Command {
         #[arg(long = "max-frame-mclk")]
         max_frame_mclk: Option<u64>,
         /// Gate: at most N lag frames in the window, else exit 1. A lag
-        /// frame is one whose NMI came while the CPU was executing rather
-        /// than parked in `WAI`.
+        /// frame is a FULL frame: its NMI came while the CPU was executing
+        /// rather than parked in `WAI`. It does not measure how long a
+        /// game tick lasts (`luna ticks --intervals` does).
         #[arg(long = "max-lag-frames")]
         max_lag_frames: Option<u64>,
-        /// Gate: at most N lag frames IN A ROW, else exit 1. A game whose
+        /// Gate: at most N lag frames (full frames, not tick durations) IN A
+        /// ROW, else exit 1. A game whose
         /// tick takes two frames lags every other frame by design:
         /// `--max-lag-run 1` passes it and fails the tick that spills
         /// into a third.
@@ -1319,12 +1323,12 @@ enum Command {
     /// 1 = they diverge, 2 = they cannot be compared.
     Ticks {
         /// Path to the .sfc / .smc ROM file.
-        #[arg(required_unless_present_any = ["schema", "compare"])]
+        #[arg(required_unless_present_any = ["schema", "compare", "intervals"])]
         rom: Option<PathBuf>,
         /// The spec (TOML): the tick routine, the zones, and optionally a
         /// start point, a limit, an input script, pokes and pictures. See
         /// the guide for every key.
-        #[arg(long, required_unless_present_any = ["schema", "compare"])]
+        #[arg(long, required_unless_present_any = ["schema", "compare", "intervals"])]
         spec: Option<PathBuf>,
         /// Compare two records (JSONL files, `-` for one of them on stdin)
         /// and report the first tick where a zone differs. Pairs ticks by
@@ -1334,13 +1338,42 @@ enum Command {
             long,
             num_args = 2,
             value_names = ["A", "B"],
-            conflicts_with_all = ["rom", "spec", "out", "shots_dir", "audio_out", "schema", "sym", "force_mapper", "force_region", "power_on"]
+            conflicts_with_all = ["rom", "spec", "out", "shots_dir", "audio_out", "schema", "sym", "force_mapper", "force_region", "power_on", "intervals"]
         )]
         compare: Option<Vec<PathBuf>>,
+        /// The duration of each tick of a record already written (by luna
+        /// or by any program that writes the format; `-` for stdin): from
+        /// one arrival on the tick routine to the next, in frames and
+        /// milliseconds, with the longest tick. This is NOT `luna profile`'s
+        /// lag (a frame whose NMI found the CPU executing, which a
+        /// two-frame tick has every other frame by design). A luna record
+        /// converts by its header; any other `clock.cycles` unit needs
+        /// `--frame-cycles`. Exit 0 = measured, 2 = cannot be measured.
+        #[arg(
+            long,
+            value_name = "RECORD",
+            conflicts_with_all = ["rom", "spec", "out", "shots_dir", "audio_out", "schema", "sym", "force_mapper", "force_region", "power_on", "compare", "zone"]
+        )]
+        intervals: Option<PathBuf>,
+        /// With `--intervals`: cycles of one frame in the record's
+        /// `clock.cycles` unit. Required unless the record is luna's
+        /// (`snes_master` at the NTSC or PAL rate, from which it is known).
+        #[arg(long = "frame-cycles", requires = "intervals")]
+        frame_cycles: Option<u64>,
+        /// With `--intervals`: cycles per second of that unit, for the
+        /// milliseconds (default: the header's rate for a luna record;
+        /// otherwise no milliseconds).
+        #[arg(long = "cycle-hz", requires = "intervals")]
+        cycle_hz: Option<u64>,
+        /// With `--intervals`: list the ticks lasting more than N frames
+        /// (fractional: `2.5` lists the ticks that spilled into a third).
+        #[arg(long, requires = "intervals")]
+        over: Option<f64>,
         /// With `--compare`: write every differing zone of every tick as CSV
         /// (`t,zone,first_offset,a,b,differing_bytes`) to this file, `-` for
-        /// stdout.
-        #[arg(long, requires = "compare")]
+        /// stdout. With `--intervals`: one row per tick,
+        /// `t,frame_delta,cycles,frames,ms,over`.
+        #[arg(long)]
         csv: Option<PathBuf>,
         /// With `--compare`: compare only this zone (repeatable). Without
         /// it, both records must name the same zones.
@@ -2151,6 +2184,10 @@ fn main() -> ExitCode {
             rom,
             spec,
             compare,
+            intervals,
+            frame_cycles,
+            cycle_hz,
+            over,
             csv,
             zone,
             out,
@@ -2168,6 +2205,13 @@ fn main() -> ExitCode {
             }
             if let Some([a, b]) = compare.as_deref() {
                 return ticks::run_compare(a, b, csv.as_deref(), &zone);
+            }
+            if let Some(record) = intervals.as_deref() {
+                return ticks::run_intervals(record, frame_cycles, cycle_hz, over, csv.as_deref());
+            }
+            if csv.is_some() {
+                eprintln!("error: --csv needs --compare or --intervals");
+                return ExitCode::from(2);
             }
             let (Some(rom), Some(spec)) = (rom, spec) else {
                 eprintln!("error: <ROM> and --spec are required unless --schema is given");

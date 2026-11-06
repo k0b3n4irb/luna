@@ -467,7 +467,7 @@ row:
 | `hdma_mclk`, `refresh_mclk` | HDMA stalls, and the DRAM refresh (40 master clocks a line). |
 | `total_mclk` | The four above added up: the frame's length (357 368 on NTSC, give or take the short line). |
 | `nmi` | The NMI was raised in this frame. |
-| `lag` | A **lag frame**: the NMI came while the CPU was executing, not parked in `WAI` — the main loop had not finished its frame. |
+| `lag` | A **lag frame**, i.e. a **full frame**: the NMI came while the CPU was executing, not parked in `WAI` — the main loop had not finished its frame. It is a property of one frame, **not the duration of a game tick** (see the trap below). |
 
 A step that crosses the frame edge is split at the edge, a DMA burst
 included, so each row is the frame's own time. `lag` is meaningful for a
@@ -487,6 +487,23 @@ luna profile --from-frame 2 --until-frame 14 --top 3 \
 #  99.99%          357318  tick
 #   0.01%              44  nmi
 ```
+
+#### The trap: `lag` is not the duration of a tick
+
+`lag` says that the CPU had **no wait left** in that frame, nothing more.
+A game whose tick takes two frames, with 40 % of the second one idle, has
+one lag frame out of two (the first one, full) and every tick lasts
+exactly two frames; a tick that really took three frames shows the same
+two flags in a row plus a third full frame. Two consecutive lag frames
+are therefore not a "slow tick" or a "burst", and a count of flags is not
+a number of images. The names and columns (`lag`, `lag_frames`,
+`lag_run`, `--max-lag-*`) are unchanged for the readers downstream; the
+table now says it in a `note:` line next to the lag figures.
+
+To measure how long each tick lasted, from one arrival on the tick
+routine to the next, with the ticks above N frames listed, record the
+ticks and read the intervals:
+[`luna ticks --intervals`](#how-long-each-tick-lasted----intervals).
 
 Three gates, for CI:
 
@@ -980,6 +997,55 @@ t,zone,first_offset,a,b,differing_bytes
 - Exit 0: identical. Exit 1: they diverge. Exit 2: they cannot be compared
   (unreadable, not a version-1 `tick-record`, different zones, a tick line
   out of order).
+
+### How long each tick lasted — `--intervals`
+
+```
+luna ticks --intervals <RECORD|-> [--over N] [--csv FILE] [--frame-cycles X] [--cycle-hz HZ]
+```
+
+`luna profile`'s `lag` flags full frames, not the duration of a tick
+(see [the trap](#the-trap-lag-is-not-the-duration-of-a-tick)). The duration
+is the distance between two consecutive arrivals on the tick routine, and
+a record already holds it: the `cycles` of each tick line. `--intervals`
+reads a record written earlier, by luna (`luna ticks --spec`, or the
+`record_ticks` tool) or by any program that writes the format, and gives
+each tick's length from its arrival to the next one, in frames and
+milliseconds, the mean, the longest tick and, with `--over N`, the ticks
+lasting more than `N` frames (fractional: `--over 2.5` lists the ticks
+that spilled into a third frame).
+
+```
+$ luna ticks --intervals record.jsonl --over 3 --csv intervals.csv
+5 tick(s), 4 measured (arrival to arrival, NOT lag frames); frame = 357366 snes_master cycles
+mean 3.000 frame(s); longest: tick 1 with 3.000 frame(s) (49.92 ms)
+0 tick(s) over 3 frame(s)
+```
+
+- **The conversion to frames.** A record of luna says `snes_master` at
+  21 477 272 Hz (NTSC) or 21 281 370 Hz (PAL) in its header: a frame is
+  then 357 366 or 425 568 of those cycles and the milliseconds come from
+  the rate. A record of another machine counts `cycles` in its own unit
+  (a quarter of its master clock, for instance), which the header does
+  not turn into a frame length without ambiguity: give
+  `--frame-cycles X` (cycles of one frame in that unit), and `--cycle-hz`
+  for the milliseconds, which are left out otherwise. Without
+  `--frame-cycles` such a record is refused (exit 2), never guessed.
+- `frame_delta` in the CSV is the whole number of frame boundaries crossed
+  between the two arrivals (the `frame` fields), which the beam's phase
+  can put one off; `frames` is the exact length over the frame, the one
+  `--over` compares.
+- The last tick has no next arrival and no duration. A record without its
+  end line is measured as far as it goes and said to be cut short. A
+  tick missing in the record, or a clock that goes backwards, refuses the
+  measure.
+- `--csv` writes one row per measured tick,
+  `t,frame_delta,cycles,frames,ms,over`, to a file (the summary is on
+  stdout). Exit 0: measured; exit 2: it cannot be measured. The MCP tool
+  is `tick_intervals`.
+- Two records of the same game (a port and the program it reproduces)
+  compare tick by tick with `--intervals` on each, then
+  [`--compare`](#comparing-two-records----compare) for the zones.
 
 ## `luna bench` — whole-corpus compatibility report
 

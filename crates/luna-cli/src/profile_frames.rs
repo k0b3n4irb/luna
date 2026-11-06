@@ -173,6 +173,12 @@ pub(crate) fn print_summary(s: &FrameSummary) {
             s.active_max_frame.unwrap_or(0),
         );
     }
+    if s.lag_frames > 0 || s.gates.iter().any(|g| g.gate.starts_with("max-lag")) {
+        println!(
+            "note: lag = full frame (the NMI found the CPU running, not parked in WAI); it is \
+             NOT the duration of a game tick. Per-tick durations: `luna ticks --intervals`"
+        );
+    }
     if !s.lag_runs.is_empty() {
         let starts: Vec<String> = s
             .lag_runs
