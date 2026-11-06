@@ -1442,6 +1442,10 @@ enum Command {
         /// Print the findings as JSON instead of text.
         #[arg(long)]
         json: bool,
+        /// Refuse any declared save RAM (SRAM size byte or a RAM/battery
+        /// chipset): `ERROR SRAM_DECLARED`. For cartridges that save nothing.
+        #[arg(long)]
+        no_sram: bool,
     },
     /// Hardware strict mode: run a ROM and list what a real console would
     /// have refused or corrupted — a VRAM/OAM/CGRAM write or a PPU memory
@@ -2209,7 +2213,9 @@ fn main() -> ExitCode {
             };
             bench::run_bench(&dir, &out, frames, script, jobs)
         }
-        Command::CartCheck { rom, json } => cart_check::run_cart_check(&rom, json),
+        Command::CartCheck { rom, json, no_sram } => {
+            cart_check::run_cart_check(&rom, json, no_sram)
+        }
         Command::Strict {
             rom,
             frames,

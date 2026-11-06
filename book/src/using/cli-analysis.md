@@ -1042,7 +1042,7 @@ luna spc-dump "game.sfc" -n 8000000 -o /tmp/song.spc
 ## `luna cart-check` — is the header ready for a physical cartridge?
 
 ```
-luna cart-check [--json] <ROM>
+luna cart-check [--json] [--no-sram] <ROM>
 ```
 
 An emulator forgives what a repro board or a console does not: a copier
@@ -1083,6 +1083,8 @@ infos, ok, findings: [{severity, code, message}]}` instead. The MCP tool
 | `SRAM_BATTERY_WITHOUT_SRAM` | warn | The chipset declares a battery but the SRAM size is 0 (Super FX boards excepted: their save is the GSU RAM). |
 | `SRAM_WITHOUT_RAM_CHIPSET` | warn | A SRAM size with a chipset that says no RAM. |
 | `SRAM_NOT_BATTERY_BACKED` | info | RAM with no battery: lost at power-off. |
+| `SRAM_DECLARED` | error | Only with `--no-sram` (MCP `no_sram`): any declared save RAM, whether the size byte `$FFD8` or a RAM/battery chipset code. For a cartridge that saves nothing, as the original did. |
+| `REGION_DECLARED` | info | The video standard the country byte `$FFD9` declares: NTSC (60 Hz) or PAL (50 Hz). |
 | `SRAM_SIZE_IMPLAUSIBLE` | info | SRAM size byte above 7 (over 128 KiB). |
 | `COUNTRY_UNKNOWN` | warn | Country byte above `$14`: no video standard can be derived. |
 | `COUNTRY_VIDEO_AMBIGUOUS` | info | Country `$0E` (Common) says neither NTSC nor PAL. |
@@ -1102,6 +1104,8 @@ banks may also map ROM ("mapped twice in the 64K hirom banks").
 luna cart-check "game.sfc"
 # INFO HEADER_FOUND: internal header read at ROM offset $007FC0 (LoROM position, ...)
 # WARN CHECKSUM_MISMATCH: the header declares checksum $1234 but the ROM sums to $5678 ...
+luna cart-check --no-sram "game.sfc"
+# ERROR SRAM_DECLARED: the header declares save RAM (size byte $03 at $FFD8, chipset $02) but this cartridge must save nothing ...
 luna cart-check --json "game.sfc" | jq '.findings[] | select(.severity != "info")'
 ```
 

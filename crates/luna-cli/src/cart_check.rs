@@ -37,7 +37,7 @@ pub(crate) fn render(rom: &std::path::Path, findings: &[Finding], json: bool) ->
 
 /// Read `rom`, audit it, print the findings. Exit `2` when the file cannot
 /// be read.
-pub(crate) fn run_cart_check(rom: &std::path::Path, json: bool) -> ExitCode {
+pub(crate) fn run_cart_check(rom: &std::path::Path, json: bool, no_sram: bool) -> ExitCode {
     let bytes = match std::fs::read(rom) {
         Ok(b) => b,
         Err(e) => {
@@ -45,7 +45,7 @@ pub(crate) fn run_cart_check(rom: &std::path::Path, json: bool) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let findings = luna_api::audit_cartridge(&bytes);
+    let findings = luna_api::audit_cartridge_with(&bytes, luna_api::AuditOptions { no_sram });
     let (text, code) = render(rom, &findings, json);
     println!("{text}");
     ExitCode::from(code)

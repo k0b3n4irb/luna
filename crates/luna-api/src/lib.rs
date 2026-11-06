@@ -21,10 +21,12 @@ use std::path::Path;
 pub use luna_apu::SpcStepKind;
 pub use luna_apu::dsp::{DspWriteEvent, VOICE_TAP_DEFAULT_SECONDS};
 pub use luna_cartridge::Region;
-use luna_cartridge::{CartError, Cartridge};
 /// Header audit for a physical cartridge (`luna cart-check`), re-exported so
 /// the CLI and MCP reach it through `luna-api`.
-pub use luna_cartridge::{Finding, Severity, audit as audit_cartridge};
+pub use luna_cartridge::{
+    AuditOptions, Finding, Severity, audit as audit_cartridge, audit_with as audit_cartridge_with,
+};
+use luna_cartridge::{CartError, Cartridge};
 pub use luna_core::PowerOnState;
 use luna_core::Snes;
 /// Controller-port device kind (pad / mouse / super scope), re-exported so the

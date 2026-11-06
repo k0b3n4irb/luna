@@ -69,9 +69,23 @@ impl Out {
     }
 }
 
+/// Project policy applied on top of the header rules.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AuditOptions {
+    /// The cartridge must carry no save RAM: any declared SRAM (size byte
+    /// or a RAM/battery chipset code) is an [`Severity::Error`].
+    pub no_sram: bool,
+}
+
 /// Audit a ROM image (a file as read from disk, copier header included).
 #[must_use]
 pub fn audit(file: &[u8]) -> Vec<Finding> {
+    audit_with(file, AuditOptions::default())
+}
+
+/// [`audit`] with a project policy ([`AuditOptions`]).
+#[must_use]
+pub fn audit_with(file: &[u8], opts: AuditOptions) -> Vec<Finding> {
     let mut out = Out(Vec::new());
     let copier = file.len() % 1024 == 512;
     if copier {
@@ -408,6 +422,17 @@ pub fn audit(file: &[u8]) -> Vec<Finding> {
             );
         }
     }
+    if opts.no_sram && (sram_byte != 0 || ram_code) {
+        out.add(
+            Severity::Error,
+            "SRAM_DECLARED",
+            format!(
+                "the header declares save RAM (size byte ${sram_byte:02X} at $FFD8, chipset \
+                 ${chipset:02X}) but this cartridge must save nothing: set $FFD8 to 0 and use a \
+                 chipset byte without RAM or battery ($00)"
+            ),
+        );
+    }
     if sram_byte > 7 {
         out.add(
             Severity::Info,
@@ -418,6 +443,18 @@ pub fn audit(file: &[u8]) -> Vec<Finding> {
 
     // Country / video standard.
     let country = rom[off + 0x19];
+    if country <= 0x14 {
+        let video = match crate::Region::from_country(country) {
+            crate::Region::Ntsc => "NTSC (60 Hz)",
+            crate::Region::Pal => "PAL (50 Hz)",
+            crate::Region::Unknown => "no video standard",
+        };
+        out.add(
+            Severity::Info,
+            "REGION_DECLARED",
+            format!("country byte ${country:02X} at $FFD9: the cartridge declares {video}"),
+        );
+    }
     if country > 0x14 {
         out.add(
             Severity::Warn,
@@ -837,5 +874,40 @@ mod tests {
         rom[h + 0x15] = 0x20; // LoROM byte at the HiROM position
         fix_checksum(&mut rom, h);
         assert_eq!(bad(&rom), vec!["MAP_MODE_MISMATCH"]);
+    }
+
+    #[test]
+    fn no_sram_refuses_a_declared_sram_and_names_the_region() {
+        let h = HEADER_OFFSET_LOROM;
+        let strict = AuditOptions { no_sram: true };
+        // Healthy: no SRAM, so no error even under the policy.
+        assert!(
+            audit_with(&healthy(), strict)
+                .iter()
+                .all(|f| f.severity == Severity::Info)
+        );
+        // The region is always said.
+        let f = audit(&healthy());
+        let region = f.iter().find(|f| f.code == "REGION_DECLARED").unwrap();
+        assert!(region.message.contains("NTSC"), "{}", region.message);
+        let mut pal = healthy();
+        pal[h + 0x19] = 0x02;
+        fix_checksum(&mut pal, h);
+        let f = audit(&pal);
+        assert!(
+            f.iter()
+                .any(|f| f.code == "REGION_DECLARED" && f.message.contains("PAL"))
+        );
+        // SRAM declared: only an error under the policy.
+        let mut sram = healthy();
+        sram[h + 0x16] = 0x02;
+        sram[h + 0x18] = 0x03;
+        fix_checksum(&mut sram, h);
+        assert!(!audit(&sram).iter().any(|f| f.code == "SRAM_DECLARED"));
+        assert!(
+            audit_with(&sram, strict)
+                .iter()
+                .any(|f| f.code == "SRAM_DECLARED" && f.severity == Severity::Error)
+        );
     }
 }

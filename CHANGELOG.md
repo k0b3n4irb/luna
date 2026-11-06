@@ -7,6 +7,11 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ## [Unreleased]
 
+- `luna cart-check --no-sram` (MCP `cart_check` `no_sram`) refuses any declared save RAM
+  (SRAM size byte or a RAM/battery chipset code): `ERROR SRAM_DECLARED`, for cartridges that
+  save nothing. Without the flag nothing changes. Every check now also prints
+  `INFO REGION_DECLARED`, the video standard the country byte `$FFD9` declares (NTSC 60 Hz
+  or PAL 50 Hz).
 - `luna strict` takes the scripted input and pokes of `state`: `--input`, `--input2`,
   `--input-at`, `--poke-at` / `--poke-hit` / `--poke`, `--sym`. Menus, matches and
   GAME OVER screens can be played under the strict journal; a poke the run never

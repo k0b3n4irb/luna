@@ -788,6 +788,9 @@ pub struct OamResult {
 pub struct CartCheckParams {
     /// Absolute path to a `.sfc` / `.smc` ROM file on the local filesystem.
     pub path: String,
+    /// Refuse any declared save RAM (`SRAM_DECLARED`, an error). Default false.
+    #[serde(default)]
+    pub no_sram: bool,
 }
 
 /// One `cart_check` finding.
@@ -2973,7 +2976,12 @@ impl LunaServer {
         let bytes = std::fs::read(&params.path).map_err(|e| {
             ErrorData::invalid_params(format!("cannot read {}: {e}", params.path), None)
         })?;
-        let findings = luna_api::audit_cartridge(&bytes);
+        let findings = luna_api::audit_cartridge_with(
+            &bytes,
+            luna_api::AuditOptions {
+                no_sram: params.no_sram,
+            },
+        );
         let ok = findings
             .iter()
             .all(|f| f.severity == luna_api::Severity::Info);
