@@ -1169,6 +1169,11 @@ A ROM that is not written for the console's region can show faults only
 under `--force-region`: a test ROM that waits for `VBlank` by polling `$4210`
 reaches it late on a PAL frame (the flag stays set during the whole
 `VBlank`) and prints into the first picture lines.
+Measured on the 30 `CPUTest` ROMs of the pinned corpus (300 frames,
+`--force-mapper lorom`): none faults in NTSC, 23 fault under
+`--force-region pal`, all of them on R1 (425 occurrences). The 7 others
+stay clean. A ROM of your own that is
+clean in NTSC proves nothing for PAL: run both.
 
 ```bash
 luna strict "game.sfc" --frames 300
