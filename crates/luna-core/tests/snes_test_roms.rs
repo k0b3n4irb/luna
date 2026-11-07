@@ -1165,7 +1165,7 @@ fn write_wav(path: &Path, samples: &[(i16, i16)]) {
     let Ok(mut f) = std::fs::File::create(path) else {
         return;
     };
-    let rate: u32 = 32_000;
+    let rate: u32 = luna_apu::SAMPLE_RATE_HZ;
     let channels: u16 = 2;
     let bits: u16 = 16;
     let block = channels * bits / 8;

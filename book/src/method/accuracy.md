@@ -77,8 +77,8 @@ Luna does not claim it is. What remains is mostly **breadth of validation**,
 running the differential across more titles and more code paths, plus a short
 list of known divergences that the gap documents keep open by name:
 
-- the APU after `STOP`, and the 32 040 Hz output that consumers treat as 32 000
-  ([APU gaps](https://github.com/k0b3n4irb/luna/blob/main/docs/luna_apu_gaps.md) #8, #9);
+- the APU after `STOP`
+  ([APU gaps](https://github.com/k0b3n4irb/luna/blob/main/docs/luna_apu_gaps.md) #8);
 - the SA-1 `$2202` placeholder and the write-protection reset defaults
   ([SA-1 gaps](https://github.com/k0b3n4irb/luna/blob/main/docs/luna_sa1_gaps.md) #2-#4);
 - the open rows of the [HDMA audit](https://github.com/k0b3n4irb/luna/blob/main/docs/hdma_ares_audit.md);

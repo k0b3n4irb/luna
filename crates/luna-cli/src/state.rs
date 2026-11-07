@@ -1853,12 +1853,13 @@ pub(crate) fn run_state(
             eprintln!("error: writing WAV: {e}");
             return ExitCode::from(1);
         }
-        let secs = audio_accum.len() as f64 / 32_000.0;
+        let secs = audio_accum.len() as f64 / f64::from(luna_api::SAMPLE_RATE_HZ);
         eprintln!(
-            "Audio WAV written to {}  ({} samples = {:.2}s @ 32 kHz stereo)",
+            "Audio WAV written to {}  ({} samples = {:.2}s @ {} Hz stereo)",
             p.display(),
             audio_accum.len(),
-            secs
+            secs,
+            luna_api::SAMPLE_RATE_HZ
         );
     }
     if let Some(dir) = voice_wav_dir {
@@ -1916,10 +1917,11 @@ fn write_voice_wavs(
         write_wav(&path, &one).map_err(|e| format!("writing {}: {e}", path.display()))?;
     }
     eprintln!(
-        "Voice WAVs written to {}  (8 files, {} samples = {:.2}s @ 32 kHz stereo each)",
+        "Voice WAVs written to {}  (8 files, {} samples = {:.2}s @ {} Hz stereo each)",
         dir.display(),
         samples.len(),
-        samples.len() as f64 / 32_000.0
+        samples.len() as f64 / f64::from(luna_api::SAMPLE_RATE_HZ),
+        luna_api::SAMPLE_RATE_HZ
     );
     if dropped > 0 {
         eprintln!(

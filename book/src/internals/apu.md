@@ -9,7 +9,7 @@ S-DSP), describing the hardware-accurate behaviour each component models.
 | **In luna** | `crates/luna-apu/src/dsp.rs` (the S-DSP, a cycle-accurate port) and `crates/luna-apu/src/lib.rs` (the SPC700 bridge, the CPU ports `$2140-$2143`) |
 | **Proven by** | nine PCM goldens in `crates/luna-core/tests/snes_test_roms.rs`; the BRR decoder compared with an independent decoder over 200 000 random groups |
 | **Grade** | **A** (scorecard: *S-DSP (audio)*) |
-| **Open gaps** | [`docs/luna_apu_gaps.md`](https://github.com/k0b3n4irb/luna/blob/main/docs/luna_apu_gaps.md): the core produces 32 040 Hz where every consumer assumes 32 000 (#9); the S-DSP stops with the SPC700 after `STOP` (#8) |
+| **Open gaps** | [`docs/luna_apu_gaps.md`](https://github.com/k0b3n4irb/luna/blob/main/docs/luna_apu_gaps.md): the S-DSP stops with the SPC700 after `STOP` (#8) |
 | **Reference** | [`docs/apu_dsp_reference.md`](https://github.com/k0b3n4irb/luna/blob/main/docs/apu_dsp_reference.md); the SPC700 itself is on [The CPUs](cpus.md#spc700--the-audio-cpu) |
 
 The rest of this page is the hardware behaviour the port follows.
@@ -22,7 +22,7 @@ The rest of this page is the hardware behaviour the port follows.
 - **SPC700 clock**: 1.024 MHz nominal; ares and Mesen2 (and luna,
   `SPC_CLOCK_HZ`) use the measured 1 025 280 Hz. Each SPC cycle = ~21 master cycles.
 - **DSP sample rate**: SPC_clock / 32 = **32 040 Hz** (one output sample
-  emitted every 32 SPC cycles; the nominal figure is 32 000 Hz, see gap #9).
+  emitted every 32 SPC cycles; `luna_api::SAMPLE_RATE_HZ`, the rate every WAV header and duration uses).
 - The DSP runs a **32-cycle macro pipeline** that emits one stereo sample.
 
 ## 2. SPC700 opcode cycle counts — NOT FLAT

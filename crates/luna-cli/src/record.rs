@@ -332,7 +332,14 @@ fn mux(ffmpeg: &str, video: &Path, pcm: Option<(&Path, u32)>, to: &Path) -> Resu
     if let Some((pcm, hz)) = pcm {
         cmd.args(["-f", "s16le", "-ar", &hz.to_string(), "-ac", "2", "-i"])
             .arg(pcm)
-            .args(["-c:a", "aac", "-b:a", "64k", "-ar", "32000"]);
+            .args([
+                "-c:a",
+                "aac",
+                "-b:a",
+                "64k",
+                "-ar",
+                &luna_api::SAMPLE_RATE_HZ.to_string(),
+            ]);
     }
     let status = cmd
         .args(["-c:v", "copy", "-movflags", "+faststart"])

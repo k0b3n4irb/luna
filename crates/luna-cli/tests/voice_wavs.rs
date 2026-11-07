@@ -32,7 +32,7 @@ fn wav_samples(path: &std::path::Path) -> u32 {
     let bits = u16::from_le_bytes(b[34..36].try_into().unwrap());
     assert_eq!(
         (rate, channels, bits),
-        (32_000, 2, 16),
+        (luna_api::SAMPLE_RATE_HZ, 2, 16),
         "{}",
         path.display()
     );
@@ -108,7 +108,10 @@ fn the_length_kept_is_adjustable_and_a_short_one_says_what_is_missing() {
     let said = run("30", "1");
     assert!(!said.contains("warning"), "{said}");
     let whole = wav_samples(&voices.join("voice0.wav"));
-    assert!(whole > 10_000 && whole < 32_000, "{whole}");
+    assert!(
+        whole > 10_000 && whole < luna_api::SAMPLE_RATE_HZ,
+        "{whole}"
+    );
 
     // A second and a half of run, a second of room: the files hold one
     // second and the run says how many samples they lack.
@@ -119,7 +122,43 @@ fn the_length_kept_is_adjustable_and_a_short_one_says_what_is_missing() {
     );
     for v in 0..8 {
         let n = wav_samples(&voices.join(format!("voice{v}.wav")));
-        assert_eq!(n, 32_000, "voice {v}");
+        assert_eq!(n, luna_api::SAMPLE_RATE_HZ, "voice {v}");
     }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn state_audio_out_header_declares_the_s_dsp_rate_32040() {
+    let dir = std::env::temp_dir().join("luna_audio_out_rate");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let rom = dir.join("spin.sfc");
+    std::fs::write(&rom, spin_rom()).unwrap();
+    let mix = dir.join("mix.wav");
+    let out = Command::new(luna_bin())
+        .arg("state")
+        .arg(&rom)
+        .args([
+            "--force-mapper",
+            "lorom",
+            "--until-frame",
+            "30",
+            "--audio-out",
+        ])
+        .arg(&mix)
+        .args(["--out", "/dev/null"])
+        .output()
+        .expect("run luna");
+    assert!(out.status.success());
+    let b = std::fs::read(&mix).unwrap();
+    // Literal, so a change of the constant cannot hide a change of the header.
+    assert_eq!(u32::from_le_bytes(b[24..28].try_into().unwrap()), 32_040);
+    assert_eq!(
+        u32::from_le_bytes(b[28..32].try_into().unwrap()),
+        32_040 * 4,
+        "byte rate"
+    );
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(said.contains("32040 Hz"), "{said}");
     let _ = std::fs::remove_dir_all(&dir);
 }

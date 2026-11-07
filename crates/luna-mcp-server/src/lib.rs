@@ -709,7 +709,7 @@ pub struct ScreenshotResult {
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct DrainAudioResult {
     /// Interleaved stereo PCM samples: `[l0, r0, l1, r1, …]` as
-    /// signed 16-bit values produced at 32 kHz.
+    /// signed 16-bit values produced at 32 040 Hz (`luna_api::SAMPLE_RATE_HZ`).
     pub samples: Vec<i16>,
     /// Stereo sample count (= `samples.len() / 2`).
     pub frames: usize,
@@ -2635,7 +2635,7 @@ impl LunaServer {
     #[rmcp::tool(
         description = "Drain up to `max` stereo audio samples from the APU output \
                                 queue. Returns interleaved [l, r, l, r, …] signed-16-bit samples \
-                                at 32 kHz."
+                                at 32 040 Hz."
     )]
     async fn drain_audio(
         &self,

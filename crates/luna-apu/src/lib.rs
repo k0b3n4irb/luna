@@ -135,6 +135,16 @@ pub const SPC_2X_HZ: u64 = 2 * SPC_CLOCK_HZ;
 /// produce (the host audio backend resamples to the device rate).
 pub const SPC_CYCLES_PER_SAMPLE: u32 = 32;
 
+/// The S-DSP's output rate (Hz): [`SPC_CLOCK_HZ`] ÷ [`SPC_CYCLES_PER_SAMPLE`]
+/// = **32 040**, the measured rate ares (`apuFrequency = 32040·768`) and
+/// Mesen2 (`spcSampleRate`) use. Every consumer that labels or times the
+/// stream (WAV header, durations, diff windows, the GUI resampler's input
+/// rate) takes it from here rather than the nominal 32 000.
+pub const SAMPLE_RATE_HZ: u32 = 32_040;
+
+// The constant is derived, not independent: it cannot drift from the clock.
+const _: () = assert!(SPC_CLOCK_HZ == SAMPLE_RATE_HZ as u64 * SPC_CYCLES_PER_SAMPLE as u64);
+
 /// SPC700 wait-state dividers (ares `smp/timing.cpp`), indexed by the 2-bit
 /// wait-state field from `$F0` (external bits 4-5 / internal bits 6-7).
 /// Expressed in luna's calibrated ws=0 baseline (where one access advances

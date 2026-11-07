@@ -35,7 +35,7 @@ use crate::parsers::{InputFlags, input_script};
 use crate::rom::load_rom_into;
 
 /// The S-DSP's output rate, the rate of every sample luna drains.
-const SAMPLE_RATE: u64 = 32_000;
+const SAMPLE_RATE: u64 = luna_api::SAMPLE_RATE_HZ as u64;
 
 /// Options for the audio comparison.
 pub(crate) struct AudioDiffOptions<'a> {
@@ -464,7 +464,7 @@ mod tests {
         );
         assert_eq!(w.len(), 9);
         assert!(w.iter().all(|w| w.delta_pct < 1e-9), "{w:?}");
-        assert_eq!(w[8].start_ms, 4000);
+        assert_eq!(w[8].start_ms, 8 * 16_000 * 1000 / SAMPLE_RATE);
         // Exactly ten windows on both sides: ten are compared.
         let w = compare(
             &square(8000, 160_007),

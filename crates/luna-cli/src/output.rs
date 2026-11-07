@@ -16,13 +16,13 @@ pub(crate) fn print_hex_dump(bank: u8, base: u16, bytes: &[u8]) {
     }
 }
 
-/// Minimal RIFF/WAVE writer for 16-bit signed PCM stereo at 32 kHz.
+/// Minimal RIFF/WAVE writer for 16-bit signed PCM stereo at the S-DSP rate (`luna_api::SAMPLE_RATE_HZ`, 32 040 Hz).
 /// We hand-roll instead of pulling a `hound` dependency just for
 /// one diagnostic path.
 pub(crate) fn write_wav(path: &std::path::Path, samples: &[(i16, i16)]) -> std::io::Result<()> {
     use std::io::Write;
     let mut f = std::fs::File::create(path)?;
-    let sample_rate: u32 = 32_000;
+    let sample_rate: u32 = luna_api::SAMPLE_RATE_HZ;
     let channels: u16 = 2;
     let bits_per_sample: u16 = 16;
     let byte_rate = sample_rate * u32::from(channels) * u32::from(bits_per_sample) / 8;
@@ -329,4 +329,30 @@ pub(crate) fn save_screenshot(
     };
     std::fs::write(path, png)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod wav_tests {
+    use super::write_wav;
+
+    /// The sample VALUES are untouched by the rate: the data chunk is the
+    /// samples' little-endian bytes, and only the header carries 32 040.
+    #[test]
+    fn wav_keeps_the_pcm_bytes_and_declares_32040() {
+        let samples: Vec<(i16, i16)> = (0..100i16).map(|i| (i * 300 - 9000, -i * 77)).collect();
+        let p = std::env::temp_dir().join("luna-wav-unit-32040.wav");
+        write_wav(&p, &samples).unwrap();
+        let b = std::fs::read(&p).unwrap();
+        let _ = std::fs::remove_file(&p);
+        assert_eq!(u32::from_le_bytes(b[24..28].try_into().unwrap()), 32_040);
+        assert_eq!(
+            u32::from_le_bytes(b[28..32].try_into().unwrap()),
+            32_040 * 4
+        );
+        let want: Vec<u8> = samples
+            .iter()
+            .flat_map(|(l, r)| l.to_le_bytes().into_iter().chain(r.to_le_bytes()))
+            .collect();
+        assert_eq!(&b[44..], &want[..]);
+    }
 }

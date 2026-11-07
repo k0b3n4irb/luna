@@ -194,10 +194,11 @@ pub(crate) fn run(
     if let Some(out_path) = audio_out {
         match write_wav(out_path, &audio_samples) {
             Ok(()) => println!(
-                "Audio WAV written to {}  ({} samples @ 32 kHz stereo, {} s)",
+                "Audio WAV written to {}  ({} samples @ {} Hz stereo, {} s)",
                 out_path.display(),
                 audio_samples.len(),
-                audio_samples.len() as f64 / 32_000.0,
+                luna_api::SAMPLE_RATE_HZ,
+                audio_samples.len() as f64 / f64::from(luna_api::SAMPLE_RATE_HZ),
             ),
             Err(e) => {
                 eprintln!("\nerror: could not write audio WAV: {e}");

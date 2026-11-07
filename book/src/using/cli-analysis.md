@@ -137,7 +137,7 @@ before the run and says so when there is none. Everything else is
 written by luna itself.
 
 **The sound.** The console's audio clock is its own, a little faster
-than the 32000 Hz a `.wav` from `--audio-out` declares. `record` plays
+than the 32000 Hz of the nominal figure; a `.wav` from `--audio-out` declares the console's own 32040 Hz. `record` plays
 the samples of the run at the rate that makes them last exactly as long
 as its pictures (the line it prints gives that rate), so the two do not
 drift.

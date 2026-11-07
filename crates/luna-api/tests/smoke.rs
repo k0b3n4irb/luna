@@ -351,7 +351,7 @@ fn smoke() {
             }
         };
         let stats = AudioStats::from_samples(&audio);
-        let duration_s = audio.len() as f64 / 32_000.0;
+        let duration_s = audio.len() as f64 / f64::from(luna_api::SAMPLE_RATE_HZ);
 
         if update {
             write_audio_golden(case, &stats, duration_s);

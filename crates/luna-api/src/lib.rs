@@ -18,6 +18,7 @@ use std::path::Path;
 /// DSP register-write trace event (issue #122), re-exported so the CLI
 /// and MCP consume it through `luna-api` rather than depending on
 /// `luna-apu` (`.claude/rules/api-first.md`).
+pub use luna_apu::SAMPLE_RATE_HZ;
 pub use luna_apu::SpcStepKind;
 pub use luna_apu::dsp::{DspNoteEvent, DspWriteEvent, VOICE_TAP_DEFAULT_SECONDS};
 pub use luna_cartridge::Region;

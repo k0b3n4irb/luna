@@ -380,7 +380,7 @@ pub struct Dsp {
 
 /// Seconds a [`VoiceTap`] keeps by default. Past its capacity the capture
 /// stops growing and says so (`dropped`), instead of eating the machine:
-/// each second is 32 000 samples of 32 bytes, about a megabyte.
+/// each second is 32 040 samples of 32 bytes, about a megabyte.
 pub const VOICE_TAP_DEFAULT_SECONDS: u32 = 60;
 
 /// Each voice's own output, as the DSP mixes it: the voice's sample after
@@ -407,12 +407,12 @@ impl Default for VoiceTap {
 }
 
 impl VoiceTap {
-    /// A capture that keeps up to `seconds` of audio (32 kHz).
+    /// A capture that keeps up to `seconds` of audio (32 040 Hz).
     #[must_use]
     pub const fn with_seconds(seconds: u32) -> Self {
         Self {
             acc: [[0; 2]; 8],
-            capacity: 32_000 * seconds as usize,
+            capacity: crate::SAMPLE_RATE_HZ as usize * seconds as usize,
             samples: Vec::new(),
             dropped: 0,
         }

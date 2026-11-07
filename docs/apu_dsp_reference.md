@@ -19,7 +19,7 @@ Per CLAUDE.md, every claim below has agreement from both refs unless flagged "DI
 
 - **SNES master clock**: 21.477 272 MHz NTSC (21.281 370 MHz PAL).
 - **SPC700 clock**: 1.024 MHz = master / ~21. Each SPC cycle = ~21 master cycles.
-- **DSP sample rate**: SPC_clock / 32 = **32 000 Hz** (one output sample emitted every 32 SPC cycles).
+- **DSP sample rate**: SPC_clock / 32 = **32 040 Hz** with luna's measured 1 025 280 Hz SPC clock (nominal 32 000; one output sample emitted every 32 SPC cycles).
 - The DSP runs a **32-cycle macro pipeline** that emits one stereo sample.
 
 ## 2. SPC700 opcode cycle counts — NOT FLAT

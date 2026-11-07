@@ -7,6 +7,14 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ## [Unreleased]
 
+- Audio rate: the S-DSP produces 32 040 Hz (`SPC_CLOCK_HZ / 32`, as ares and Mesen2), and every
+  consumer now says so. One constant, `luna_apu::SAMPLE_RATE_HZ` (re-exported by `luna-api`), feeds the
+  WAV header of `--audio-out` / `--voice-wav-dir` (was 32000), the printed durations, the
+  `luna diff --audio` window clock, `record`'s ffmpeg `-ar` and the
+  test WAV writer. The sample values are unchanged; durations and diff windows change by 0.125 %,
+  and a WAV plays about 2 cents higher than before. Partners that calibrated on 32000 (window
+  timestamps, durations, a pitch measured on a luna WAV) must recalibrate. The GUI resampler's input rate
+  follows once the owner has listened to it (it moves the pitch by 2 cents). `docs/luna_apu_gaps.md` #9 closed.
 - `luna strict` and `luna run --strict-hw`: VRAM provenance, two rules on the sprite tiles the picture
   draws. S1: the tile holds a non-zero pixel and no write ever touched it since power-on (its content
   is whatever the VRAM chips held, which a console does not define). S4: the tile was last written
