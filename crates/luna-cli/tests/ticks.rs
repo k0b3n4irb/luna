@@ -496,6 +496,20 @@ fn a_record_that_falls_short_still_ends_and_exits_1() {
 }
 
 #[test]
+fn the_hardware_oam_and_the_ppu_registers_are_zones() {
+    let dir = fresh_dir("oam_ppu");
+    let spec = format!(
+        "{BASE}ticks = 2\n\
+         [[zone]]\nname = \"oam\"\nat = \"OAM:21C\"\nlength = 4\n\
+         [[zone]]\nname = \"regs\"\nat = \"PPU:2100\"\nlength = 2\n"
+    );
+    let (out, lines) = ticks(&dir, &spec, &[]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert_eq!(lines[1]["z"]["oam"].as_str().unwrap().len(), 8);
+    assert_eq!(lines[1]["z"]["regs"].as_str().unwrap().len(), 4);
+}
+
+#[test]
 fn a_bad_spec_is_refused_before_anything_runs() {
     let dir = fresh_dir("strict");
     let zone = |at: &str, len: u32| {
@@ -507,6 +521,8 @@ fn a_bad_spec_is_refused_before_anything_runs() {
         (zone("40:0000", 4), "unmapped"),
         (zone("half_a", 0), "length is 0"),
         (zone("CGRAM:FF", 4), "run past the end"),
+        (zone("PPU:2104", 1), "not one the PPU keeps"),
+        (zone("PPU:2133", 2), "$2134"),
         (
             "format = 1\ntick = { symbol = \"tick\", if = \"[half_a] & 1 == 0\" }\n".to_string(),
             "expected",

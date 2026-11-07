@@ -781,7 +781,7 @@ bytes = "01"
 
 [[zone]]
 name   = "ball"                   # the key a comparison pairs
-at     = "ball_x"                 # symbol, symbol+N, BANK:OFFSET, or APU:, VRAM:, CGRAM:, OAM:
+at     = "ball_x"                 # symbol, symbol+N, BANK:OFFSET, or APU:, VRAM:, CGRAM:, OAM:, PPU:
 length = 6                        # bytes, decimal
 
 [shots]                           # optional: pictures, at some ticks...
@@ -814,7 +814,11 @@ native = false                    # true: the 512-wide native capture
 - **The zones** are read without touching the bus: WRAM, cartridge RAM
   and ROM through the CPU's addresses, and `APU:OFFSET` (SPC700 RAM),
   `VRAM:WORD` (a word address, as `VMADD` takes it), `CGRAM:COLOR` (a
-  colour index) and `OAM:OFFSET`, all in hex. A zone that reaches the I/O
+  colour index), `OAM:OFFSET` (the PPU's own 544 bytes, not the WRAM
+  copy) and `PPU:REGISTER` (write-only registers as the PPU holds them,
+  one byte each: `PPU:2101` is OBSEL; the list is under `--peek` in
+  [`luna state`](cli-run-state.md), any other register refuses the spec),
+  all in hex. A zone that reaches the I/O
   registers (`$2000-$5FFF` of the system banks), that nothing maps, or
   that runs past the end of its memory, refuses the spec. Lengths are
   always decimal.

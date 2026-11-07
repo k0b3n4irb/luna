@@ -27,7 +27,8 @@ struct PeekOut {
     /// The `--peek` spec verbatim.
     spec: String,
     /// `"cpu"` (24-bit bus), `"aram"` (16-bit SPC700 offset), `"vram"`
-    /// (word address) or `"cgram"` (colour index).
+    /// (word address), `"cgram"` (colour index), `"oam"` (byte offset) or
+    /// `"ppu"` (register address).
     space: &'static str,
     /// Resolved start address (`bank << 16 | offset` for cpu).
     addr: u32,
@@ -2015,6 +2016,58 @@ fn read_peeks(em: &mut luna_api::Emulator, peek_specs: &[String], verbose: bool)
                 Err(e) => {
                     say!("error: --peek `{spec}`: {e}");
                     peek_outs.push(PeekOut::err(spec, "cgram", e));
+                }
+            }
+            continue;
+        }
+        // `OAM:OFFSET:COUNT` reads the PPU's own OAM (the 544 bytes the
+        // picture is drawn from, not the WRAM mirror); the read stops at
+        // the end of the high table.
+        if let Some(oam) = crate::parsers::parse_oam_peek_spec(spec) {
+            match oam.and_then(|(offset, count)| {
+                em.peek_oam()
+                    .map(|oam| {
+                        let bytes = oam[usize::from(offset)..]
+                            .iter()
+                            .copied()
+                            .take(count as usize)
+                            .collect::<Vec<u8>>();
+                        (offset, bytes)
+                    })
+                    .map_err(|e| e.to_string())
+            }) {
+                Ok((offset, bytes)) => {
+                    say!("peek OAM:{:03X} +{:04X}:", offset, bytes.len());
+                    if verbose {
+                        print_hex_dump(0, offset, &bytes);
+                    }
+                    peek_outs.push(PeekOut::ok(spec, "oam", u32::from(offset), &bytes));
+                }
+                Err(e) => {
+                    say!("error: --peek `{spec}`: {e}");
+                    peek_outs.push(PeekOut::err(spec, "oam", e));
+                }
+            }
+            continue;
+        }
+        // `PPU:REGISTER:COUNT` reads write-only PPU registers as the PPU
+        // holds them (no side effect); an unsupported one is refused.
+        if let Some(ppu) = crate::parsers::parse_ppu_peek_spec(spec) {
+            match ppu.and_then(|(reg, count)| {
+                em.peek_ppu_registers(reg, count)
+                    .map(|bytes| (reg, bytes))
+                    .map_err(|e| e.to_string())
+            }) {
+                Ok((reg, bytes)) => {
+                    say!("peek PPU:{:04X} +{:04X}:", reg, bytes.len());
+                    if verbose {
+                        print_hex_dump(0, reg, &bytes);
+                    }
+                    peek_outs.push(PeekOut::ok(spec, "ppu", u32::from(reg), &bytes));
+                }
+                Err(e) => {
+                    say!("error: --peek `{spec}`: {e}");
+                    peek_outs.push(PeekOut::err(spec, "ppu", e));
                 }
             }
             continue;

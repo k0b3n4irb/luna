@@ -906,3 +906,37 @@ luna state game.sfc --until-frame 600 --peek CGRAM:10:#32
 
 The read stops at colour `$FF`. In the JSON the entry's `space` is
 `cgram` and its `addr` the colour index.
+
+**The PPU's own OAM.** `--peek OAM:OFFSET:COUNT` reads the 544 bytes the
+picture is drawn from (the 512-byte low table, then the 32-byte high
+table), `COUNT` bytes from the byte offset `OFFSET` in hex. It is not the
+copy a game keeps in WRAM: a game whose OAM DMA failed, or ran outside
+VBlank, leaves a sane copy in WRAM and a wrong screen, and only this read
+shows the difference.
+
+```bash
+# The first four sprites as the PPU holds them, beside the game's copy.
+luna state game.sfc --until-frame 600 --peek OAM:0:#16 --peek 7E:0200:#16
+```
+
+The read stops at byte `$21F`. In the JSON the entry's `space` is `oam`
+and its `addr` the byte offset.
+
+**The write-only PPU registers.** `--peek PPU:REGISTER:COUNT` reads
+`COUNT` consecutive registers from the address `REGISTER` in hex, one
+byte each, as the PPU holds the value the game wrote (no side effect, no
+open bus). `PPU:2101:1` is OBSEL, `PPU:2100:1` INIDISP, `PPU:212C:1` TM.
+
+```bash
+luna state game.sfc --until-frame 600 --peek PPU:2101:1 --peek PPU:212C:2
+```
+
+Supported: `$2100` INIDISP, `$2101` OBSEL, `$2105` BGMODE, `$2106` MOSAIC,
+`$211A` M7SEL, `$2123`-`$212B` (W12SEL, W34SEL, WOBJSEL, WH0-WH3, WBGLOG,
+WOBJLOG), `$212C`-`$212F` (TM, TS, TMW, TSW), `$2130` CGWSEL, `$2131`
+CGADSUB, `$2133` SETINI. The others are refused with that list, since the
+PPU does not keep their byte: the VRAM, OAM and CGRAM ports, the
+background bases and scrolls (`$2107`-`$2110`, stored decoded), the Mode-7
+pairs, `$2132` COLDATA (kept per channel), and the read-only registers.
+The JSON entry's `space` is `ppu` and its `addr` the register address.
+All three work in `--peek-at` too.

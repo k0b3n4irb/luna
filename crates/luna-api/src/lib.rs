@@ -184,6 +184,11 @@ pub enum ApiError {
     Io(#[from] std::io::Error),
 }
 
+/// The write-only PPU registers [`Emulator::peek_ppu_register`] reads.
+pub const PPU_REGISTERS_SUPPORTED: &str = "$2100 INIDISP, $2101 OBSEL, $2105 BGMODE, \
+$2106 MOSAIC, $211A M7SEL, $2123-$212B (W12SEL W34SEL WOBJSEL WH0-WH3 WBGLOG WOBJLOG), \
+$212C-$212F (TM TS TMW TSW), $2130 CGWSEL, $2131 CGADSUB, $2133 SETINI";
+
 /// Save-state format version. Bump on any breaking change to the
 /// serialized layout so [`Emulator::load_state`] rejects stale blobs.
 /// v2: dropped the always-`None` `Spc700::unimplemented_opcode` field
@@ -6086,6 +6091,64 @@ impl Emulator {
     pub fn peek_oam(&self) -> Result<Vec<u8>, ApiError> {
         let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
         Ok((0..0x220u16).map(|i| snes.ppu.oam.peek(i)).collect())
+    }
+
+    /// The byte the PPU holds of the write-only register `reg` (`$2100`-
+    /// `$2133`), as the game last wrote it: no side effect, no open bus.
+    ///
+    /// Supported: `$2100` INIDISP, `$2101` OBSEL, `$2105` BGMODE, `$2106`
+    /// MOSAIC, `$211A` M7SEL, `$2123`-`$212B` (W12SEL, W34SEL, WOBJSEL,
+    /// WH0-WH3, WBGLOG, WOBJLOG), `$212C`-`$212F` (TM, TS, TMW, TSW),
+    /// `$2130` CGWSEL, `$2131` CGADSUB, `$2133` SETINI. The others are
+    /// refused: the PPU does not keep their byte (VRAM/OAM/CGRAM ports,
+    /// `$2107`-`$2110` decoded into bases and scrolls, the Mode-7 pairs,
+    /// `$2132` COLDATA split per channel), or it is read-only.
+    pub fn peek_ppu_register(&self, reg: u16) -> Result<u8, ApiError> {
+        let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
+        let p = &snes.ppu;
+        Ok(match reg {
+            0x2100 => p.inidisp,
+            0x2101 => p.obsel,
+            0x2105 => p.bgmode,
+            0x2106 => p.mosaic,
+            0x211A => p.m7sel,
+            0x2123 => p.w12sel,
+            0x2124 => p.w34sel,
+            0x2125 => p.wobjsel,
+            0x2126 => p.wh0,
+            0x2127 => p.wh1,
+            0x2128 => p.wh2,
+            0x2129 => p.wh3,
+            0x212A => p.wbglog,
+            0x212B => p.wobjlog,
+            0x212C => p.tm,
+            0x212D => p.ts,
+            0x212E => p.tmw,
+            0x212F => p.tsw,
+            0x2130 => p.cgwsel,
+            0x2131 => p.cgadsub,
+            0x2133 => p.setini,
+            _ => {
+                return Err(ApiError::BadArg(format!(
+                    "PPU register ${reg:04X} is not one the PPU keeps as a byte; \
+                     supported: {PPU_REGISTERS_SUPPORTED}"
+                )));
+            }
+        })
+    }
+
+    /// `count` consecutive write-only PPU registers from `first`, one byte
+    /// each ([`Emulator::peek_ppu_register`]); the first one the PPU does
+    /// not keep as a byte refuses the whole read.
+    pub fn peek_ppu_registers(&self, first: u16, count: u32) -> Result<Vec<u8>, ApiError> {
+        (0..count)
+            .map(|i| {
+                let reg = u16::try_from(u32::from(first) + i).map_err(|_| {
+                    ApiError::BadArg(format!("PPU register ${first:04X}+{count} runs past $FFFF"))
+                })?;
+                self.peek_ppu_register(reg)
+            })
+            .collect()
     }
 
     /// Render BG `bg_idx` (0..3)'s full tilemap to an RGBA image for the

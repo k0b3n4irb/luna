@@ -4710,3 +4710,28 @@ fn vram_provenance_flags_unwritten_content_and_a_cpu_upload_is_clean() {
     assert!(c.take_vram_provenance().unwrap().entries.is_empty());
     assert_eq!(c.peek_vram(0, 4).unwrap(), vec![0xFF; 4]);
 }
+
+#[test]
+fn peek_ppu_register_reads_what_the_game_wrote_and_refuses_the_rest() {
+    let mut e = Emulator::new();
+    assert!(matches!(e.peek_ppu_register(0x2101), Err(ApiError::NoRom)));
+    // LDA #$63; STA $2101; LDA #$11; STA $212C; BRA -2.
+    let code = [
+        0xA9, 0x63, 0x8D, 0x01, 0x21, 0xA9, 0x11, 0x8D, 0x2C, 0x21, 0x80, 0xFE,
+    ];
+    e.load_rom_bytes(demo_lorom_with(&code, None)).unwrap();
+    e.step_until_frame(1_000_000).unwrap();
+    assert_eq!(e.peek_ppu_register(0x2101).unwrap(), 0x63);
+    assert_eq!(e.peek_ppu_register(0x212C).unwrap(), 0x11);
+    assert_eq!(
+        e.peek_ppu_registers(0x212C, 2).unwrap(),
+        vec![0x11, e.state().ppu.ts]
+    );
+    assert_eq!(e.peek_ppu_register(0x2100).unwrap(), e.state().ppu.inidisp);
+    for reg in [0x2102, 0x2104, 0x2107, 0x2132, 0x2134, 0x4200] {
+        let err = e.peek_ppu_register(reg).unwrap_err().to_string();
+        assert!(err.contains(&format!("${reg:04X}")), "{err}");
+        assert!(err.contains("supported"), "{err}");
+    }
+    assert!(e.peek_ppu_registers(0x2133, 2).is_err());
+}

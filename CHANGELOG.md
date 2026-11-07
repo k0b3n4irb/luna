@@ -7,6 +7,12 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ## [Unreleased]
 
+- Reading what the PPU holds: `luna state --peek OAM:OFFSET:COUNT` reads the PPU's own 544-byte OAM
+  (not the WRAM copy: a missed or out-of-VBlank OAM DMA leaves a sane copy and a wrong screen), and
+  `--peek PPU:REGISTER:COUNT` reads write-only registers as the PPU keeps them (INIDISP, OBSEL, BGMODE,
+  MOSAIC, M7SEL, `$2123`-`$212F`, CGWSEL, CGADSUB, SETINI; any other is refused with the list). Both
+  work in `--peek-at` (and its CSV) and the JSON `peeks`; `PPU:` is also a `luna ticks` / `record_ticks`
+  zone (`OAM:` already was). New `Emulator::peek_ppu_register(s)` in `luna-api`.
 - Audio rate: the S-DSP produces 32 040 Hz (`SPC_CLOCK_HZ / 32`, as ares and Mesen2), and every
   consumer now says so. One constant, `luna_apu::SAMPLE_RATE_HZ` (re-exported by `luna-api`), feeds the
   WAV header of `--audio-out` / `--voice-wav-dir` (was 32000), the printed durations, the

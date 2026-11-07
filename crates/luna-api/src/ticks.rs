@@ -174,7 +174,8 @@ pub struct TickZone {
     /// The key a comparison pairs.
     pub name: String,
     /// A symbol, `symbol+N`, `BANK:OFFSET`, or `APU:`, `VRAM:` (word),
-    /// `CGRAM:` (colour), `OAM:` followed by a hex offset.
+    /// `CGRAM:` (colour), `OAM:` (byte) followed by a hex offset, or
+    /// `PPU:` followed by a write-only register address (`PPU:2101`).
     pub at: String,
     /// Bytes, in decimal.
     pub length: u32,
@@ -702,12 +703,14 @@ enum Space {
     Cgram(u16),
     /// OAM, by byte offset.
     Oam(u16),
+    /// The write-only PPU registers, by address (`$2100`...).
+    Ppu(u16),
 }
 
 /// A memory's `PREFIX:HEX` form, or `None` for a CPU-bus key.
 fn prefixed(at: &str) -> Option<(&'static str, Result<u32, String>)> {
     let (prefix, rest) = at.split_once(':')?;
-    let kind = ["APU", "VRAM", "CGRAM", "OAM"]
+    let kind = ["APU", "VRAM", "CGRAM", "OAM", "PPU"]
         .into_iter()
         .find(|k| k.eq_ignore_ascii_case(prefix.trim()))?;
     let digits = rest.trim();
@@ -768,6 +771,13 @@ fn resolve_zone(em: &mut Emulator, z: &TickZone) -> Result<Space, String> {
                 fits(u32::from(c) * 2, 0x200)?;
                 Space::Cgram(c)
             }
+            "PPU" => {
+                let r = small(0x1_0000)?;
+                // Refuse an unsupported register now, with the list.
+                em.peek_ppu_registers(r, len)
+                    .map_err(|e| format!("{}: {e}", what()))?;
+                Space::Ppu(r)
+            }
             _ => {
                 let o = small(0x220)?;
                 fits(u32::from(o), 0x220)?;
@@ -825,6 +835,7 @@ fn read_zone(em: &mut Emulator, space: Space, len: u32) -> Result<Vec<u8>, Strin
                 .take(n)
                 .collect()
         }),
+        Space::Ppu(r) => em.peek_ppu_registers(r, len),
         Space::Oam(o) => em
             .peek_oam()
             .map(|oam| oam[usize::from(o)..usize::from(o) + n].to_vec()),

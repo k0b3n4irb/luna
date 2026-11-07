@@ -514,7 +514,12 @@ enum Command {
         /// `VMADD` takes it): `--peek VRAM:7340:6` is three tilemap entries.
         /// `CGRAM:COLOR:COUNT` reads `COUNT` bytes of the palette from a
         /// colour index (as `CGADD` takes it): `--peek CGRAM:10:#32` is
-        /// the sixteen colours of palette 1.
+        /// the sixteen colours of palette 1. `OAM:OFFSET:COUNT` reads the
+        /// PPU's own OAM (544 bytes, offset in hex; not the WRAM mirror):
+        /// `--peek OAM:0:#16` is the first four sprites. `PPU:REGISTER:COUNT`
+        /// reads `COUNT` write-only PPU registers as the PPU holds them:
+        /// `--peek PPU:2101:1` is OBSEL (INIDISP, OBSEL, BGMODE, MOSAIC,
+        /// M7SEL, `$2123-$212F`, CGWSEL, CGADSUB, SETINI; any other is refused).
         #[arg(long = "peek")]
         peek: Vec<String>,
         /// Assert memory equals expected bytes after warm-up. Format:

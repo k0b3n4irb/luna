@@ -340,6 +340,60 @@ pub(crate) fn parse_cgram_peek_spec(spec: &str) -> Option<Result<(u8, u32), Stri
     })
 }
 
+/// A `--peek OAM:OFFSET:COUNT` spec: `COUNT` **bytes** (same forms as any
+/// `--peek` count) of the PPU's own OAM (544 bytes: the 512-byte low table,
+/// then the 32-byte high table) from the byte offset `OFFSET` in hex, as
+/// `OAMADD` addresses it. `None` when the spec is not OAM-prefixed.
+pub(crate) fn parse_oam_peek_spec(spec: &str) -> Option<Result<(u16, u32), String>> {
+    let spec = spec.trim();
+    let rest = spec
+        .strip_prefix("OAM:")
+        .or_else(|| spec.strip_prefix("oam:"))?;
+    let Some((at, count_s)) = rest.rsplit_once(':') else {
+        return Some(Err(format!(
+            "expected OAM:OFFSET:COUNT (byte offset in hex, count in bytes), got `{spec}`"
+        )));
+    };
+    let digits = at.trim().trim_start_matches("0x").trim_start_matches('$');
+    let offset = match u16::from_str_radix(digits, 16) {
+        Ok(o) if o < 0x220 => o,
+        Ok(o) => {
+            return Some(Err(format!(
+                "OAM offset ${o:X} is past the 544 bytes of OAM ($000-$21F)"
+            )));
+        }
+        Err(e) => return Some(Err(format!("bad OAM offset `{at}`: {e}"))),
+    };
+    Some(match parse_peek_count(count_s) {
+        Ok(count) => Ok((offset, u32::from(count))),
+        Err(e) => Err(format!("bad count `{count_s}`: {e}")),
+    })
+}
+
+/// A `--peek PPU:REGISTER:COUNT` spec: `COUNT` consecutive write-only PPU
+/// registers from the address `REGISTER` in hex (`PPU:2101:1`), one byte
+/// each, as the PPU holds them. `None` when the spec is not PPU-prefixed.
+pub(crate) fn parse_ppu_peek_spec(spec: &str) -> Option<Result<(u16, u32), String>> {
+    let spec = spec.trim();
+    let rest = spec
+        .strip_prefix("PPU:")
+        .or_else(|| spec.strip_prefix("ppu:"))?;
+    let Some((at, count_s)) = rest.rsplit_once(':') else {
+        return Some(Err(format!(
+            "expected PPU:REGISTER:COUNT (register address in hex, count of registers), got `{spec}`"
+        )));
+    };
+    let digits = at.trim().trim_start_matches("0x").trim_start_matches('$');
+    let reg = match u16::from_str_radix(digits, 16) {
+        Ok(r) => r,
+        Err(e) => return Some(Err(format!("bad PPU register `{at}`: {e}"))),
+    };
+    Some(match parse_peek_count(count_s) {
+        Ok(count) => Ok((reg, u32::from(count))),
+        Err(e) => Err(format!("bad count `{count_s}`: {e}")),
+    })
+}
+
 /// A `--screenshot-frames` range: `A..B` (every frame from `A` to `B`,
 /// both included) or `A..B/K` (one frame in `K`, starting at `A`), as
 /// `(first, last, step)`.
