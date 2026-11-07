@@ -2686,6 +2686,20 @@ impl DmaBus for DmaBusView<'_> {
             // CGDATA ($2122) is never dropped during active display (handled
             // at the source in Ppu::write — ares io.cpp:55-60); VRAM/OAM still
             // drop via their own `active_display` gates.
+            if self.ppu.vram_provenance_enabled() {
+                let hdma = self.dma_channel & HDMA_CHANNEL_FLAG != 0;
+                self.ppu.set_vram_writer(luna_ppu::VramWriter {
+                    kind: if hdma {
+                        luna_ppu::VramWriterKind::Hdma
+                    } else {
+                        luna_ppu::VramWriterKind::Dma
+                    },
+                    pc: self.cpu_pc,
+                    source: self.last_a_addr,
+                    channel: self.dma_channel & 7,
+                    frame: self.trace_frame,
+                });
+            }
             self.ppu.write(b_offset, value);
             self.drain_ppu_accesses();
         } else if (0x40..=0x7F).contains(&b_offset) {
@@ -3039,6 +3053,9 @@ impl SnesBus<'_> {
         // the row index); per-line dynamic state (HiColor CGRAM DMAs,
         // HDMA gradients) lands on the hardware row.
         if self.ppu_line < vblank_start {
+            if self.ppu_line == 1 {
+                self.ppu.vram_provenance_check(self.frame_count);
+            }
             self.ppu
                 .render_current_scanline(self.ppu_line, luna_ppu::RenderOptions::default());
             // Latch that this frame showed visible content if the line was
@@ -4012,6 +4029,15 @@ impl SnesBus<'_> {
                 }
             }
             self.strict_ppu_access(off, true);
+            if self.ppu.vram_provenance_enabled() {
+                self.ppu.set_vram_writer(luna_ppu::VramWriter {
+                    kind: luna_ppu::VramWriterKind::Cpu,
+                    pc: self.cpu_pc_full,
+                    source: 0,
+                    channel: 0,
+                    frame: self.frame_count,
+                });
+            }
             self.ppu.write(off, value);
             self.drain_ppu_accesses();
             if off == 0x00 {

@@ -55,7 +55,11 @@ pub(crate) fn run(
         eprintln!("error: enable_nocash_log: {e}");
         return ExitCode::from(1);
     }
-    if strict_hw && let Err(e) = em.enable_hw_strict() {
+    if strict_hw
+        && let Err(e) = em
+            .enable_hw_strict()
+            .and_then(|()| em.enable_vram_provenance(true))
+    {
         eprintln!("error: enable_hw_strict: {e}");
         return ExitCode::from(1);
     }
@@ -233,11 +237,17 @@ pub(crate) fn run(
     let mut strict_faults = false;
     if strict_hw {
         let frames = em.frame_count().unwrap_or(0);
-        match em.take_hw_faults() {
-            Ok(report) => {
+        match em
+            .take_hw_faults()
+            .and_then(|r| Ok((r, em.take_vram_provenance()?)))
+        {
+            Ok((report, prov)) => {
                 println!("\n--- strict ---");
-                println!("{}", crate::strict::render_text(&report, frames));
-                strict_faults = !report.faults.is_empty() || report.overflow > 0;
+                println!("{}", crate::strict::render_text(&report, &prov, frames));
+                strict_faults = !report.faults.is_empty()
+                    || report.overflow > 0
+                    || !prov.entries.is_empty()
+                    || prov.overflow > 0;
             }
             Err(e) => {
                 eprintln!("\nerror: take_hw_faults: {e}");

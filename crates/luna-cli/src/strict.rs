@@ -3,14 +3,14 @@
 
 use std::process::ExitCode;
 
-use luna_api::StrictReport;
+use luna_api::{StrictReport, VramProvReport};
 
 use crate::parsers::{InputFlags, apply_input_flags};
 use crate::rom::load_rom_into;
 use crate::state::{PokeAt, PokeGroup};
 
 /// The fault lines, one per distinct (rule, pc, address), and a summary.
-pub(crate) fn render_text(report: &StrictReport, frames: u64) -> String {
+pub(crate) fn render_text(report: &StrictReport, prov: &VramProvReport, frames: u64) -> String {
     let mut lines: Vec<String> = report
         .faults
         .iter()
@@ -27,13 +27,46 @@ pub(crate) fn render_text(report: &StrictReport, frames: u64) -> String {
             report.overflow
         ));
     }
-    lines.push(if report.faults.is_empty() {
+    lines.extend(prov.entries.iter().map(|e| {
+        let last = e.last_write.as_ref().map_or_else(
+            || "never written".to_string(),
+            |w| {
+                let src = w
+                    .source
+                    .as_ref()
+                    .map_or(String::new(), |s| format!(" src={s}"));
+                format!(
+                    "last write {} pc={}{src} frame {} obsel ${:02X}, {}/32 byte(s)",
+                    w.origin, w.pc, w.frame, w.obsel, w.bytes_written
+                )
+            },
+        );
+        format!(
+            "{} tile {} sprite #{} (char ${:03X}) obsel ${:02X} (first: frame {})  {}  [{last}]",
+            e.rule, e.tile_addr, e.sprite, e.sprite_tile, e.obsel, e.frame, e.what
+        )
+    }));
+    if prov.overflow > 0 {
+        lines.push(format!(
+            "... {} more distinct tile finding(s) not kept (journal full)",
+            prov.overflow
+        ));
+    }
+    let found = report.faults.len() + prov.entries.len();
+    lines.push(if found == 0 {
         format!("strict: no hardware fault in {frames} frame(s)")
-    } else {
+    } else if prov.entries.is_empty() {
         format!(
             "strict: {} fault site(s), {} occurrence(s) in {frames} frame(s)",
             report.faults.len(),
             report.occurrences()
+        )
+    } else {
+        format!(
+            "strict: {} fault site(s), {} occurrence(s), {} sprite tile finding(s) in {frames} frame(s)",
+            report.faults.len(),
+            report.occurrences(),
+            prov.entries.len()
         )
     });
     lines.join("\n")
@@ -44,10 +77,16 @@ pub(crate) fn render_text(report: &StrictReport, frames: u64) -> String {
 pub(crate) fn render(
     rom: &std::path::Path,
     report: &StrictReport,
+    prov: &VramProvReport,
     frames: u64,
     json: bool,
 ) -> (String, u8) {
-    let code = u8::from(!report.faults.is_empty() || report.overflow > 0);
+    let code = u8::from(
+        !report.faults.is_empty()
+            || report.overflow > 0
+            || !prov.entries.is_empty()
+            || prov.overflow > 0,
+    );
     let text = if json {
         let v = serde_json::json!({
             "rom": rom.display().to_string(),
@@ -56,10 +95,11 @@ pub(crate) fn render(
             "occurrences": report.occurrences(),
             "overflow": report.overflow,
             "faults": report.faults,
+            "vram_provenance": prov,
         });
         serde_json::to_string_pretty(&v).unwrap_or_default()
     } else {
-        render_text(report, frames)
+        render_text(report, prov, frames)
     };
     (text, code)
 }
@@ -142,6 +182,10 @@ pub(crate) fn run_strict(o: &StrictOpts<'_>) -> ExitCode {
         eprintln!("error: enable_hw_strict: {e}");
         return ExitCode::from(2);
     }
+    if let Err(e) = em.enable_vram_provenance(true) {
+        eprintln!("error: enable_vram_provenance: {e}");
+        return ExitCode::from(2);
+    }
     let mut panicked = false;
     let run = em.run_script_watching(
         &mut script,
@@ -183,7 +227,14 @@ pub(crate) fn run_strict(o: &StrictOpts<'_>) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let (text, code) = render(o.rom, &report, ran, o.json);
+    let prov = match em.take_vram_provenance() {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("error: take_vram_provenance: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let (text, code) = render(o.rom, &report, &prov, ran, o.json);
     println!("{text}");
     ExitCode::from(code.max(u8::from(panicked)))
 }
@@ -192,6 +243,13 @@ pub(crate) fn run_strict(o: &StrictOpts<'_>) -> ExitCode {
 mod tests {
     use super::*;
     use luna_api::StrictFault;
+
+    fn no_prov() -> VramProvReport {
+        VramProvReport {
+            entries: vec![],
+            overflow: 0,
+        }
+    }
 
     fn fault() -> StrictFault {
         StrictFault {
@@ -214,7 +272,7 @@ mod tests {
             faults: vec![],
             overflow: 0,
         };
-        let (text, code) = render(p, &clean, 10, false);
+        let (text, code) = render(p, &clean, &no_prov(), 10, false);
         assert_eq!(
             (text.as_str(), code),
             ("strict: no hardware fault in 10 frame(s)", 0)
@@ -223,11 +281,11 @@ mod tests {
             faults: vec![fault()],
             overflow: 0,
         };
-        let (text, code) = render(p, &dirty, 10, false);
+        let (text, code) = render(p, &dirty, &no_prov(), 10, false);
         assert_eq!(code, 1);
         assert!(text.starts_with("R1 pc=$00:8017 $2118 cpu x7 (first: frame 1 line 40 h 312)"));
         assert!(text.ends_with("strict: 1 fault site(s), 7 occurrence(s) in 10 frame(s)"));
-        let (json, _) = render(p, &dirty, 10, true);
+        let (json, _) = render(p, &dirty, &no_prov(), 10, true);
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(v["ok"], false);
         assert_eq!(v["occurrences"], 7);
@@ -240,6 +298,9 @@ mod tests {
             faults: vec![],
             overflow: 3,
         };
-        assert_eq!(render(std::path::Path::new("a"), &full, 1, false).1, 1);
+        assert_eq!(
+            render(std::path::Path::new("a"), &full, &no_prov(), 1, false).1,
+            1
+        );
     }
 }

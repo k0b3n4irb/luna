@@ -7,6 +7,15 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ## [Unreleased]
 
+- `luna strict` and `luna run --strict-hw`: VRAM provenance, two rules on the sprite tiles the picture
+  draws. S1: the tile holds a non-zero pixel and no write ever touched it since power-on (its content
+  is whatever the VRAM chips held, which a console does not define). S4: the tile was last written
+  while `OBSEL` (bits 0-4) addressed the OBJ character data elsewhere than it does now. Each finding
+  names the last write (`cpu`, `dma<n>`, `hdma<n>` or `poke`, pc, source, frame). Exit 1 on any
+  finding; JSON key `vram_provenance`. MCP `enable_vram_provenance` / `take_vram_provenance`,
+  `luna-api` `enable_vram_provenance` / `take_vram_provenance`. Observation only (frame hashes are
+  unchanged). Limits: checked once per frame at the end of line 1, sprite visibility approximate,
+  S1 per tile; the guide lists them.
 - `luna test`: `[checkpoint.dsp]` reads the S-DSP registers at the instant of a checkpoint
   (`at_frame` and `at_symbol`), with the names and the comparators of `[asserts.dsp]` (same code),
   and the checkpoint failure lines (`` checkpoint@8 dsp.V3_SRCN: 0xA5 violates `eq 0x11` ``). The

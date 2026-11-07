@@ -323,3 +323,65 @@ async fn hw_strict_journal_round_trips_over_the_wire() {
     assert_eq!(again.structured_content.expect("structured")["ok"], true);
     client.cancel().await.ok();
 }
+
+/// The VRAM provenance journal over the wire: content poked before the
+/// journal starts, drawn by the power-on sprites, is S1; a drained journal
+/// is empty. Nothing of any game: the image is built here.
+#[tokio::test]
+async fn vram_provenance_round_trips_over_the_wire() {
+    use base64::Engine as _;
+    let mut rom = vec![0u8; 0x1_0000];
+    // LDA #$0F ; STA $2100 ; loop: BRA loop
+    rom[..7].copy_from_slice(&[0xA9, 0x0F, 0x8D, 0x00, 0x21, 0x80, 0xFE]);
+    rom[0x7FC0..0x7FD5].copy_from_slice(b"LUNA MCP PROVENANCE  ");
+    rom[0x7FD5] = 0x20;
+    rom[0x7FD7] = 0x07;
+    rom[0x7FFC] = 0x00;
+    rom[0x7FFD] = 0x80;
+    let client = connect().await;
+    client
+        .call_tool(
+            CallToolRequestParams::new("load_rom_bytes").with_arguments(args(&serde_json::json!({
+                "rom_base64": base64::engine::general_purpose::STANDARD.encode(&rom),
+                "force_mapper": "lorom",
+            }))),
+        )
+        .await
+        .expect("load_rom_bytes");
+    client
+        .call_tool(CallToolRequestParams::new("poke_vram").with_arguments(args(
+            &serde_json::json!({ "offset": 0, "data": [170, 170, 170, 170] }),
+        )))
+        .await
+        .expect("poke_vram");
+    client
+        .call_tool(
+            CallToolRequestParams::new("enable_vram_provenance")
+                .with_arguments(args(&serde_json::json!({ "enabled": true }))),
+        )
+        .await
+        .expect("enable_vram_provenance");
+    for _ in 0..3 {
+        client
+            .call_tool(
+                CallToolRequestParams::new("step_until_frame")
+                    .with_arguments(args(&serde_json::json!({ "max_steps": 1_000_000 }))),
+            )
+            .await
+            .expect("step_until_frame");
+    }
+    let taken = client
+        .call_tool(CallToolRequestParams::new("take_vram_provenance"))
+        .await
+        .expect("take_vram_provenance");
+    let v = taken.structured_content.expect("structured result");
+    assert_eq!(v["ok"], false);
+    assert_eq!(v["entries"][0]["rule"], "S1");
+    assert_eq!(v["entries"][0]["tile_addr"], "$0000");
+    let again = client
+        .call_tool(CallToolRequestParams::new("take_vram_provenance"))
+        .await
+        .expect("take_vram_provenance again");
+    assert_eq!(again.structured_content.expect("structured")["ok"], true);
+    client.cancel().await.ok();
+}

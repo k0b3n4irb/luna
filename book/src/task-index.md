@@ -123,6 +123,7 @@ means that transport has no form of it.
 | the audio as a WAV | `--audio-out out.wav` | `drain_audio` | [`luna run`](using/cli-run-state.md#luna-run--quick-render--audio-dump) |
 | whether a ROM's header is ready for a physical cartridge | `luna cart-check` | `cart_check` | [`luna cart-check`](using/cli-analysis.md#luna-cart-check--is-the-header-ready-for-a-physical-cartridge) |
 | what a real console would refuse that an emulator lets through (a VRAM write while the picture is drawn, a DMA through the blocked zone) | `luna strict`, `luna run --strict-hw` | `enable_hw_strict`, `take_hw_faults` | [`luna strict`](using/cli-analysis.md#luna-strict--what-a-real-console-would-have-refused) |
+| a sprite that draws a tile no write ever filled, or one uploaded under another `OBSEL` layout | `luna strict`, `luna run --strict-hw` | `enable_vram_provenance`, `take_vram_provenance` | [`luna strict`](using/cli-analysis.md#luna-strict--what-a-real-console-would-have-refused) |
 | the music as a `.spc` file | `luna spc-dump` | `export_spc` | [`luna spc-dump`](using/cli-analysis.md#luna-spc-dump--export-a-spc-sound-file) |
 | the DSP voices and the driver's memory | `--peek APU:…`, `--dump-aram` | `dsp_registers`, `peek_aram` | [Audio-side visibility](using/cli-run-state.md#audio-side-visibility) |
 | the order of the key-on and key-off writes | `--dsp-trace` | `enable_dsp_trace` | [Audio-side visibility](using/cli-run-state.md#audio-side-visibility) |

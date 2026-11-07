@@ -333,6 +333,7 @@ impl Emulator {
                 }
                 MemoryKind::SnesVideoRam => {
                     snes.ppu.vram.poke(o as u16, v);
+                    snes.ppu.note_vram_poke(o as u16, snes.frame_count);
                     true
                 }
                 MemoryKind::SnesSpriteRam => {

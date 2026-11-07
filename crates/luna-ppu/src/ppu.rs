@@ -243,6 +243,14 @@ pub struct Ppu {
     /// write. Never in a save-state.
     #[serde(skip)]
     pub debug_accesses: Option<Vec<PpuAccess>>,
+    /// VRAM provenance journal (`None` = off); see [`crate::provenance`].
+    /// Never in a save-state.
+    #[serde(skip)]
+    pub(crate) prov: Option<Box<crate::provenance::VramProv>>,
+    /// The writer of the next `$2118` / `$2119` write, set by the system
+    /// glue while the journal is on.
+    #[serde(skip)]
+    pub(crate) prov_writer: crate::provenance::VramWriter,
     /// 512 B palette memory.
     pub cgram: Cgram,
     /// 544 B object attribute memory.
@@ -557,6 +565,8 @@ impl Ppu {
         Self {
             vram: Vram::new(),
             debug_accesses: None,
+            prov: None,
+            prov_writer: crate::provenance::VramWriter::default(),
             cgram: Cgram::new(),
             oam: Oam::new(),
             inidisp: 0x80, // post-reset: forced blank
@@ -1451,6 +1461,9 @@ impl Ppu {
                 } else {
                     self.vram.write_hi_gated(value, !self.active_display)
                 };
+                if let Some(addr) = written {
+                    self.note_vram_write(addr);
+                }
                 if let (Some(log), Some(addr)) = (self.debug_accesses.as_mut(), written) {
                     log.push(PpuAccess {
                         memory: PpuMemory::Vram,

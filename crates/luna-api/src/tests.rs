@@ -4617,3 +4617,96 @@ fn strict_mode_reports_a_fault_and_leaves_the_frame_hash_untouched() {
     assert!(strict.take_hw_faults().unwrap().faults.is_empty());
     assert!(plain.take_hw_faults().unwrap().faults.is_empty());
 }
+
+/// Forced blank; `DMA` 64 bytes of the ROM itself (non-zero) to VRAM byte
+/// `$4000` through channel 0 (`STA $420B` at `$00:8031`, so the transfer runs at `$00:8034`); then `OBSEL` = 1,
+/// which makes sprite character 0 (every OAM entry at power-on) draw there.
+fn provenance_dma_rom() -> Vec<u8> {
+    demo_lorom_with(
+        &[
+            0xA9, 0x80, 0x8D, 0x00, 0x21, 0xA9, 0x80, 0x8D, 0x15, 0x21, 0x9C, 0x16, 0x21, 0xA9,
+            0x20, 0x8D, 0x17, 0x21, 0xA9, 0x01, 0x8D, 0x00, 0x43, 0xA9, 0x18, 0x8D, 0x01, 0x43,
+            0x9C, 0x02, 0x43, 0xA9, 0x80, 0x8D, 0x03, 0x43, 0x9C, 0x04, 0x43, 0xA9, 0x40, 0x8D,
+            0x05, 0x43, 0x9C, 0x06, 0x43, 0xA9, 0x01, 0x8D, 0x0B, 0x42, 0x8D, 0x01, 0x21, 0xA9,
+            0x0F, 0x8D, 0x00, 0x21, 0x80, 0xFE,
+        ],
+        None,
+    )
+}
+
+/// Forced blank; `STA $2118` / `$2119` 32 times from VRAM word 0 (the
+/// tile sprite character 0 draws at `OBSEL` = 0); screen on.
+fn provenance_cpu_rom() -> Vec<u8> {
+    demo_lorom_with(
+        &[
+            0xA9, 0x80, 0x8D, 0x00, 0x21, 0xA9, 0x80, 0x8D, 0x15, 0x21, 0x9C, 0x16, 0x21, 0x9C,
+            0x17, 0x21, 0xA2, 0x10, 0xA9, 0xFF, 0x8D, 0x18, 0x21, 0x8D, 0x19, 0x21, 0xCA, 0xD0,
+            0xF5, 0xA9, 0x0F, 0x8D, 0x00, 0x21, 0x80, 0xFE,
+        ],
+        None,
+    )
+}
+
+#[test]
+fn vram_provenance_names_the_dma_behind_a_tile_and_leaves_frames_alone() {
+    let mut plain = Emulator::new();
+    plain.load_rom_bytes(provenance_dma_rom()).unwrap();
+    let mut prov = Emulator::new();
+    prov.load_rom_bytes(provenance_dma_rom()).unwrap();
+    assert!(!prov.vram_provenance_enabled().unwrap());
+    prov.enable_vram_provenance(true).unwrap();
+    assert!(prov.vram_provenance_enabled().unwrap());
+
+    run_frames(&mut plain, 4);
+    run_frames(&mut prov, 4);
+    assert_eq!(
+        plain.frame_hash(false).unwrap(),
+        prov.frame_hash(false).unwrap(),
+        "the journal only observes"
+    );
+    assert_eq!(
+        plain.state().stats.total_mclk,
+        prov.state().stats.total_mclk
+    );
+
+    let report = prov.take_vram_provenance().unwrap();
+    assert_eq!(report.overflow, 0);
+    assert_eq!(report.entries.len(), 1, "{report:?}");
+    let e = &report.entries[0];
+    assert_eq!((e.rule, e.tile_addr.as_str(), e.sprite), ("S4", "$4000", 0));
+    assert_eq!(e.obsel, 1);
+    let w = e.last_write.as_ref().unwrap();
+    assert_eq!(w.origin, "dma0");
+    // The transfer starts at the instruction after `STA $420B`.
+    assert_eq!(w.pc, "$00:8034");
+    assert_eq!(w.source.as_deref(), Some("$00:801F"), "last byte of tile 0");
+    assert_eq!((w.obsel, w.bytes_written), (0, 32));
+    // Drained; a journal that is off reports nothing.
+    assert!(prov.take_vram_provenance().unwrap().entries.is_empty());
+    assert!(plain.take_vram_provenance().unwrap().entries.is_empty());
+}
+
+#[test]
+fn vram_provenance_flags_unwritten_content_and_a_cpu_upload_is_clean() {
+    // Content nobody wrote (poked before the journal starts), drawn by the
+    // power-on sprites: S1. The writes of strict_fault_rom come while the
+    // picture is drawn, so the console drops them and they tag nothing.
+    let mut e = Emulator::new();
+    e.load_rom_bytes(strict_fault_rom()).unwrap();
+    e.poke_vram(0, &[0xAA; 32]).unwrap();
+    e.enable_vram_provenance(true).unwrap();
+    run_frames(&mut e, 3);
+    let report = e.take_vram_provenance().unwrap();
+    assert_eq!(report.entries.len(), 1, "{report:?}");
+    let f = &report.entries[0];
+    assert_eq!((f.rule, f.tile_addr.as_str()), ("S1", "$0000"));
+    assert!(f.last_write.is_none());
+
+    // The same tile filled by the CPU in forced blank: clean.
+    let mut c = Emulator::new();
+    c.load_rom_bytes(provenance_cpu_rom()).unwrap();
+    c.enable_vram_provenance(true).unwrap();
+    run_frames(&mut c, 3);
+    assert!(c.take_vram_provenance().unwrap().entries.is_empty());
+    assert_eq!(c.peek_vram(0, 4).unwrap(), vec![0xFF; 4]);
+}

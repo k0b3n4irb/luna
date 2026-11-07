@@ -11,11 +11,15 @@
 
 mod memory;
 mod ppu;
+mod provenance;
 mod renderer;
 mod tile;
 
 pub use memory::{Cgram, Oam, Vram};
 pub use ppu::{BgState, Ppu, PpuAccess, PpuMemory, register};
+pub use provenance::{
+    VRAM_PROV_MAX_REPORTS, VramProvReason, VramProvReport, VramTileTag, VramWriter, VramWriterKind,
+};
 pub use renderer::{
     FRAME_H, FRAME_H_MAX, FRAME_W, LAYERS, LayerPixel, LayerRow, RenderOptions, Scanline,
     SpriteEntry, TilemapImage, bg_bpp, decode_all_sprites, render_bg_tilemap, render_cgram_palette,

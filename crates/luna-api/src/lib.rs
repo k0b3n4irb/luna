@@ -45,6 +45,7 @@ pub use luna_ppu::TilemapImage;
 /// Framebuffer dimensions (256×224, 239 rows in overscan), re-exported so front-ends size their
 /// texture/window through `luna-api` rather than depending on `luna-ppu`.
 pub use luna_ppu::{FRAME_H, FRAME_H_MAX, FRAME_W};
+pub use provenance::{VramLastWrite, VramProvEntry, VramProvReport, vram_provenance_rules};
 use serde::Serialize;
 pub use strict::{StrictFault, StrictReport, strict_rules};
 
@@ -80,6 +81,7 @@ pub mod memory_search;
 pub mod memory_view;
 pub mod paths;
 mod power_on;
+pub mod provenance;
 pub mod strict;
 pub mod symbols;
 pub mod ticks;
@@ -3651,7 +3653,9 @@ impl Emulator {
     pub fn poke_vram(&mut self, offset: u16, data: &[u8]) -> Result<usize, ApiError> {
         let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
         for (i, &b) in data.iter().enumerate() {
-            snes.ppu.vram.poke(offset.wrapping_add(i as u16), b);
+            let at = offset.wrapping_add(i as u16);
+            snes.ppu.vram.poke(at, b);
+            snes.ppu.note_vram_poke(at, snes.frame_count);
         }
         Ok(data.len())
     }

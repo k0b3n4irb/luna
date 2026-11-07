@@ -1494,8 +1494,12 @@ enum Command {
     /// have refused or corrupted — a VRAM/OAM/CGRAM write or a PPU memory
     /// read while the picture is drawn (R1-R4), a DMA through the blocked
     /// A-bus zone (R5) or between WRAM and $2180 (R6), a manual joypad read
-    /// during the auto-read (R8). The journal only observes: the run is
-    /// identical to a plain one. One line per distinct (rule, pc, address).
+    /// during the auto-read (R8). It also checks, once a frame, the sprite
+    /// tiles the picture draws: a tile with pixels that no write ever
+    /// filled (S1, its content is the power-on VRAM) or that was uploaded
+    /// under another OBSEL layout (S4). The journal only observes: the run
+    /// is identical to a plain one. One line per distinct (rule, pc,
+    /// address), one per distinct (S1/S4, tile).
     ///
     /// Exit 0 = no fault, 1 = at least one fault, 2 = the ROM cannot be
     /// loaded.

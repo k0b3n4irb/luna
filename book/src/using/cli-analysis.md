@@ -1220,6 +1220,47 @@ faults are kept; `overflow` counts the others. `luna run --strict-hw` prints the
 after the final state (exit 1 on a fault), and the MCP tools `enable_hw_strict` /
 `take_hw_faults` give it to a client (a `load_rom` turns the journal off).
 
+**VRAM provenance: sprite tiles nobody filled.** Besides R1-R8, `luna strict` and
+`luna run --strict-hw` tag every VRAM byte written through `$2118` / `$2119` with its
+writer (the instruction, or the DMA channel and its source, the frame, `OBSEL` at that
+moment; a write the active display drops tags nothing). Once per frame the journal then
+judges the sprite tiles the picture draws:
+
+| Rule | Finding |
+|---|---|
+| S1 | A visible sprite draws a tile that holds a non-zero pixel and that no write touched since power-on. Its content is the power-on VRAM, which a console does not define, so a cartridge can show something else than the emulator. |
+| S4 | The tile was last written while `OBSEL` (name base and name select, bits 0-4) put the OBJ character data elsewhere than it does now: the upload was made for another layout. |
+
+One line per distinct (rule, tile), with the first sprite that drew it and the last write:
+
+```bash
+luna strict "game.sfc" --frames 600
+# S1 tile $6A40 sprite #12 (char $0A2) obsel $63 (first: frame 2)  sprite tile drawn with non-zero pixels but never written: its content is the power-on VRAM  [never written]
+# S4 tile $4000 sprite #3 (char $000) obsel $03 (first: frame 41)  sprite tile written under another OBSEL character layout than the one that draws it  [last write dma0 pc=$00:8120 src=$01:C000 frame 1 obsel $63, 32/32 byte(s)]
+# strict: 0 fault site(s), 0 occurrence(s), 2 sprite tile finding(s) in 600 frame(s)
+luna strict "game.sfc" --json | jq '.vram_provenance.entries[] | select(.rule == "S1")'
+```
+
+(Sample output: the addresses are those of an imagined ROM.) The exit code is `1` on any
+finding, and `--json` carries them under `vram_provenance: {entries: [{rule, what,
+tile_addr, sprite, sprite_tile, frame, obsel, last_write: {origin, pc, source, frame,
+obsel, bytes_written} | null}], overflow}`. The MCP tools `enable_vram_provenance
+{enabled}` and `take_vram_provenance` give it to a client; `luna-api` has the same pair.
+
+What the check does not see, on purpose:
+
+- It runs **once per frame, at the end of line 1**. An `OBSEL` change made later in the
+  frame (a mid-frame switch of the OBJ base) is missed, and so is a tile uploaded after
+  that point and needed in the same frame.
+- Sprite visibility is **approximate**: the 32 sprites / 34 slivers per line limits are
+  not modelled, so a tile of a sprite the line drops still counts.
+- S1 is **per tile** (32 bytes): a tile written in part counts as written.
+- The journal must be **on before the ROM runs**: `strict` and `--strict-hw` do it, but over
+  MCP, call `enable_vram_provenance` right after `load_rom` (a `load_rom` turns it off). A tile
+  written before the switch reads as never written.
+- S4 is a **heuristic**: a game may re-upload on purpose, or keep tiles that the new layout
+  never draws. Read it as a lead, then look at the writer it names.
+
 **Playing a scenario.** A run with the pad at rest only sees the screens a
 game reaches by itself. `--input`, `--input2` and `--input-at` (the grammar of
 `luna state`: `frame:hex`, or `N+K:hex` counted from the N-th arrival on a

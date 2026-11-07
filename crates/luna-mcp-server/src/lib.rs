@@ -49,6 +49,9 @@
 //! - `enable_profile` / `take_profile` → master cycles per symbol (issue #227).
 //! - `enable_hw_strict` / `take_hw_faults` → the hardware strict journal
 //!   (what a real console would refuse or corrupt, rules R1-R8).
+//! - `enable_vram_provenance` / `take_vram_provenance` → the sprite tiles the
+//!   picture draws that no write filled (S1) or that were uploaded under
+//!   another OBSEL layout (S4), with the write that last touched each.
 //! - `enable_nocash_log` / `take_nocash_log` and `enable_wdm_log` /
 //!   `take_wdm_log` → the SDK assert/log channels ($21FC Nocash TTY
 //!   text + WDM assert hits).
@@ -848,6 +851,25 @@ pub struct HwFaultsResult {
     pub overflow: u64,
     /// The distinct faults, in order of first occurrence.
     pub faults: Vec<HwFaultEntry>,
+}
+
+/// `enable_vram_provenance` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct EnableVramProvenanceParams {
+    /// `true` starts the journal (switch it on before the ROM runs);
+    /// `false` stops and drops it.
+    pub enabled: bool,
+}
+
+/// `take_vram_provenance` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct VramProvenanceResult {
+    /// `true` when there is no finding and nothing was dropped.
+    pub ok: bool,
+    /// New distinct findings dropped because the journal was full.
+    pub overflow: u64,
+    /// The distinct (rule, tile) findings, in order of first occurrence.
+    pub entries: Vec<luna_api::VramProvEntry>,
 }
 
 /// `capabilities` result (issue #90).
@@ -5013,6 +5035,50 @@ impl LunaServer {
             em.enable_hw_strict().map_err(|e| api_err_to_mcp(&e))?;
         }
         Ok(rmcp::Json(EmptyOk { ok: true }))
+    }
+
+    #[rmcp::tool(
+        description = "Start (enabled=true) or stop the VRAM provenance journal: every \
+                                VRAM byte written through $2118/$2119 is tagged with its writer \
+                                (CPU or DMA/HDMA channel, pc, source, frame, OBSEL), a write \
+                                dropped by the active display tags nothing. Once a frame, at the \
+                                first visible line, the sprite tiles the picture draws are \
+                                judged: S1 = non-zero tile never written (power-on content), \
+                                S4 = written under another OBSEL character layout. Switch on \
+                                before the ROM runs. Observation only: frames are identical. \
+                                Loading a ROM turns it off. Drain with `take_vram_provenance`."
+    )]
+    async fn enable_vram_provenance(
+        &self,
+        Parameters(params): Parameters<EnableVramProvenanceParams>,
+    ) -> Result<rmcp::Json<EmptyOk>, ErrorData> {
+        self.emulator
+            .lock()
+            .await
+            .enable_vram_provenance(params.enabled)
+            .map_err(|e| api_err_to_mcp(&e))?;
+        Ok(rmcp::Json(EmptyOk { ok: true }))
+    }
+
+    #[rmcp::tool(
+        description = "Drain the VRAM provenance journal: one entry per distinct (rule, \
+                                tile) with the first sprite that drew it and the last write \
+                                that touched the tile (origin, pc, source, frame, OBSEL, \
+                                bytes written). Enable first with `enable_vram_provenance`, \
+                                then run/step. `ok` is true when nothing was recorded."
+    )]
+    async fn take_vram_provenance(&self) -> Result<rmcp::Json<VramProvenanceResult>, ErrorData> {
+        let report = self
+            .emulator
+            .lock()
+            .await
+            .take_vram_provenance()
+            .map_err(|e| api_err_to_mcp(&e))?;
+        Ok(rmcp::Json(VramProvenanceResult {
+            ok: report.entries.is_empty() && report.overflow == 0,
+            overflow: report.overflow,
+            entries: report.entries,
+        }))
     }
 
     #[rmcp::tool(
