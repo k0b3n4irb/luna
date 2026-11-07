@@ -501,6 +501,8 @@ mod tests {
             hclock: 400,
             blank: false,
             force_blank: false,
+            end_line: 42,
+            end_hclock: 400,
         }
     }
 

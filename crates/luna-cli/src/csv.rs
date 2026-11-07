@@ -221,7 +221,11 @@ pub(crate) fn write_superfx_trace_csv(
 /// V-blank flag, `force_blank` INIDISP (`$2100`) bit 7 at the write (safe iff
 /// `blank||force_blank`), `src` the 24-bit A-bus source (`bank:offset`),
 /// `vram_word` the VMADD word the byte landed at, `reg` the B-bus port ($2118
-/// low / $2119 high), `value` the transferred byte.
+/// low / $2119 high), `value` the transferred byte. `line` is the scanline of
+/// the byte's own slot (a long burst walks across lines). `end_line` and
+/// `end_hclock` close the row: where the burst ends (the line, and the master
+/// clock 0..1363 within it, at which the CPU gets the bus back), the same for
+/// every byte of one burst.
 pub(crate) fn write_dma_trace_csv(
     path: &std::path::Path,
     events: &[luna_api::DmaTraceEvent],
@@ -236,12 +240,12 @@ pub(crate) fn write_dma_trace_csv(
         .collect();
     write_csv(
         path,
-        "seq,frame,line,blank,force_blank,src,vram_word,reg,value",
+        "seq,frame,line,blank,force_blank,src,vram_word,reg,value,end_line,end_hclock",
         &vram,
         |f, i, ev| {
             writeln!(
                 f,
-                "{},{},{},{},{},{},${:04X},${:02X},${:02X}",
+                "{},{},{},{},{},{},${:04X},${:02X},${:02X},{},{}",
                 i,
                 ev.frame,
                 ev.line,
@@ -251,6 +255,8 @@ pub(crate) fn write_dma_trace_csv(
                 ev.vram_word,
                 ev.b_offset,
                 ev.value,
+                ev.end_line,
+                ev.end_hclock,
             )
         },
     )

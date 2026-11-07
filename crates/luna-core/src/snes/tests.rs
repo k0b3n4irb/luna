@@ -1884,10 +1884,17 @@ fn sa1_main_triggers_irq_and_sa1_handler_runs() {
 /// Returns the machine after the burst and `(mclk in the line before the
 /// STA, mdma_cost of the burst)`.
 fn dma_ramp_across_the_frame_return() -> (Snes, u32, u64) {
+    dma_ramp_from_line(261, 0x0F, false, false)
+}
+
+/// [`dma_ramp_across_the_frame_return`] started on `line`, with `inidisp`
+/// written to `$2100` first (`$0F` screen on, `$8F` forced blank), with the
+/// strict journal on when `strict` and the DMA trace when `trace`.
+fn dma_ramp_from_line(line: u16, inidisp: u8, strict: bool, trace: bool) -> (Snes, u32, u64) {
     const TRIGGER: u16 = 0x8040;
     let mut rom = demo_lorom().rom;
     let setup: &[u8] = &[
-        0xA9, 0x0F, 0x8D, 0x00, 0x21, // LDA #$0F ; STA $2100 (screen on)
+        0xA9, inidisp, 0x8D, 0x00, 0x21, // LDA #inidisp ; STA $2100
         0xA9, 0x80, 0x8D, 0x15, 0x21, // LDA #$80 ; STA $2115 (inc after $2119)
         0xA9, 0x01, 0x8D, 0x00, 0x43, // LDA #$01 ; STA $4300 (mode 1, A to B)
         0xA9, 0x18, 0x8D, 0x01, 0x43, // LDA #$18 ; STA $4301 ($2118)
@@ -1917,17 +1924,23 @@ fn dma_ramp_across_the_frame_return() -> (Snes, u32, u64) {
     }
     let mut snes = Snes::from_cartridge(Cartridge::from_bytes(rom).unwrap());
     snes.reset();
+    if strict {
+        snes.enable_hw_strict();
+    }
+    if trace {
+        snes.dma.enable_dma_trace(10_000);
+    }
     // A VRAM that differs from the ramp everywhere it could land.
     for i in 0..352u16 {
         snes.ppu.vram.poke(0x9940 + i, !(i as u8));
     }
     for _ in 0..4_000_000 {
         snes.step();
-        if snes.ppu_line == 261 && snes.mcycles_in_line > 64 && snes.cpu.pc < TRIGGER {
+        if snes.ppu_line == line && snes.mcycles_in_line > 64 && snes.cpu.pc < TRIGGER {
             break;
         }
     }
-    assert_eq!(snes.ppu_line, 261, "positioned on the last NTSC line");
+    assert_eq!(snes.ppu_line, line, "positioned on the start line");
     snes.cpu.pc = TRIGGER;
     for _ in 0..5 {
         snes.step(); // the VMADD writes, then LDA #$01
@@ -1942,7 +1955,6 @@ fn dma_ramp_across_the_frame_return() -> (Snes, u32, u64) {
 }
 
 #[test]
-#[ignore = "lot 2 (DMA d'un seul bloc): the fast path writes the whole burst, the console loses what follows the frame return"]
 fn one_block_dma_loses_its_end_after_the_frame_return() {
     let (snes, at_sta, cost) = dma_ramp_across_the_frame_return();
     let landed = |i: u16| snes.ppu.vram.peek(0x9940 + i) == i as u8;
@@ -1962,4 +1974,110 @@ fn one_block_dma_loses_its_end_after_the_frame_return() {
         "console: ~{expected} bytes land before the frame return, luna wrote {n}"
     );
     assert_eq!(all, n, "nothing lands after the first lost byte");
+}
+
+/// The other way round: a burst started on the last picture lines with the
+/// screen on loses what it writes while the picture is drawn, and lands from
+/// the first `VBlank` line (ares `writeVRAM`: `!displayDisable && vcounter() <
+/// vdisp()` loses the write, `VMADD` still advances).
+#[test]
+fn one_block_dma_started_in_the_picture_lands_from_the_vblank_line() {
+    let (snes, at_sta, _cost) = dma_ramp_from_line(223, 0x0F, false, false);
+    let landed = |i: u16| snes.ppu.vram.peek(0x9940 + i) == i as u8;
+    let first = (0..352u16).find(|&i| landed(i)).expect("the end lands");
+    let all = (0..352u16).filter(|&i| landed(i)).count() as i64;
+    // Lines 223 and 224 are picture: what is left of 223, then a whole line.
+    // minus the two DRAM refreshes (40 mclk, 5 bytes each) of the lines crossed
+    let expected = i64::from(1364 - at_sta - 16 - 8) / 8 + 1364 / 8 - 10;
+    eprintln!(
+        "burst from line 223 at mclk {at_sta}: first byte to land {first} (expected ~{expected})"
+    );
+    assert!(
+        (i64::from(first) - expected).abs() <= 6,
+        "console: ~{expected} bytes are lost before line 225, luna lost {first}"
+    );
+    assert_eq!(
+        all,
+        352 - i64::from(first),
+        "everything from the first landed byte on lands"
+    );
+}
+
+/// The burst is charged the same whether it runs as one lump (forced blank:
+/// nothing to cross) or line by line (screen on across the frame return).
+#[test]
+fn a_burst_cut_at_the_gate_edge_costs_what_the_lump_costs() {
+    for line in [261, 223] {
+        let (cut, _, _) = dma_ramp_from_line(line, 0x0F, false, false);
+        let (lump, _, _) = dma_ramp_from_line(line, 0x8F, false, false);
+        assert_eq!(
+            (cut.total_mclk, cut.ppu_line, cut.mcycles_in_line),
+            (lump.total_mclk, lump.ppu_line, lump.mcycles_in_line),
+            "line {line}: the cut burst ends where the lump ends"
+        );
+    }
+}
+
+/// `luna strict` R1 rises on the bytes the console loses, at their line, not
+/// at the line the burst started on.
+#[test]
+fn strict_r1_rises_on_the_bytes_lost_after_the_frame_return() {
+    let (mut snes, at_sta, _cost) = dma_ramp_from_line(261, 0x0F, true, false);
+    let landed = (0..352u16)
+        .filter(|&i| snes.ppu.vram.peek(0x9940 + i) == i as u8)
+        .count() as u64;
+    let (faults, _) = snes.take_hw_faults();
+    let r1: Vec<_> = faults
+        .iter()
+        .filter(|f| f.rule == crate::hw_strict::HwRule::VramWrite && f.origin != MemOrigin::Cpu)
+        .collect();
+    eprintln!("start mclk {at_sta}: {landed} landed, R1 {r1:?}");
+    // One fault per port ($2118, $2119), folded: none before the frame return.
+    assert_eq!(r1.len(), 2);
+    assert!(
+        r1.iter().all(|f| f.line == 0),
+        "the first lost byte is on line 0"
+    );
+    assert_eq!(
+        r1.iter().map(|f| f.count).sum::<u64>(),
+        352 - landed,
+        "R1 counts the lost bytes, no more"
+    );
+}
+
+/// `--dma-trace`: each byte carries its own line and dot, and the burst's end
+/// closes the row.
+#[test]
+fn dma_trace_walks_the_bytes_across_lines_and_stamps_the_end() {
+    let (mut snes, _, _) = dma_ramp_from_line(261, 0x0F, false, true);
+    let events = snes.dma.take_dma_trace();
+    let vram: Vec<_> = events
+        .iter()
+        .filter(|e| matches!(e.b_offset, 0x18 | 0x19))
+        .collect();
+    assert_eq!(vram.len(), 352);
+    assert_eq!(vram[0].line, 261);
+    assert_eq!(vram[351].line, 1, "the last byte is past the frame return");
+    assert!(
+        vram.windows(2)
+            .all(|w| (w[0].line, w[0].hclock) < (w[1].line, w[1].hclock) || w[1].line < w[0].line),
+        "time only moves forward, the line count wrapping once"
+    );
+    assert!(vram.iter().any(|e| e.line == 0));
+    assert!(
+        vram.iter()
+            .all(|e| e.end_line == vram[0].end_line && e.end_hclock == vram[0].end_hclock),
+        "one end for the whole burst"
+    );
+    // 2844 mclk from line 261 at hclock 192 (the cost the first test prints):
+    // line 1, dot 77 (hclock 308), the DRAM refresh of the lines crossed
+    // (40 mclk each) on top.
+    assert_eq!(vram[0].end_line, 1);
+    assert!(
+        (380..440).contains(&vram[0].end_hclock),
+        "{}",
+        vram[0].end_hclock
+    );
+    // Crossing the frame return bumps the frame stamp of the later bytes.
+    assert_eq!(vram[351].frame, vram[0].frame + 1);
 }

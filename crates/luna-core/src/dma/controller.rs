@@ -5,7 +5,7 @@
 //! when software writes `$420B`.
 
 use super::bus::DmaBus;
-use super::channel::DmaChannel;
+use super::channel::{Direction, DmaChannel};
 
 /// One DMA byte landing in VRAM (`$2118`/`$2119`), captured at transfer
 /// time. The byte value is the one the DMA actually read from the
@@ -32,18 +32,28 @@ pub struct DmaTraceEvent {
     /// Completed-frame counter at the start of the owning DMA burst — lets a
     /// consumer bucket DMA→VRAM bytes by frame (the per-VBlank budget check).
     pub frame: u64,
-    /// PPU scanline at the start of the owning burst.
+    /// PPU scanline of this byte's transfer slot (a burst is walked at 8
+    /// master clocks per byte from its first byte, so a long one carries the
+    /// lines it really crosses).
     pub line: u16,
-    /// Exact horizontal master-clock (0..1363) at the transfer — Mesen2's
+    /// Exact horizontal master-clock (0..1363) of this byte's slot — Mesen2's
     /// `GetHClock` (the Event Viewer plots events at `(hclock, line)`).
     pub hclock: u16,
-    /// `true` if the burst started in the vertical-blank window
+    /// `true` if this byte's slot is in the vertical-blank window
     /// (`line >= vblank_start`).
     pub blank: bool,
     /// `true` if INIDISP (`$2100`) forced-blank (bit 7) was set at the write.
     /// A VRAM write is safe iff `blank || force_blank` (V-blank *or* forced
     /// blank); otherwise it races active display and the PPU drops it.
     pub force_blank: bool,
+    /// Scanline on which the owning burst ends, the CPU getting the bus back
+    /// (the same for every byte of one burst). For an HDMA byte, the line of
+    /// the byte itself. Lets a trace show a burst that runs past the end of
+    /// the `VBlank` without replaying the cost model.
+    pub end_line: u16,
+    /// Horizontal master-clock (0..1363) at the end of the owning burst; see
+    /// [`Self::end_line`].
+    pub end_hclock: u16,
 }
 
 /// Bounded ring for the DMA→VRAM transfer-time tracer.
@@ -94,6 +104,17 @@ pub struct Dma {
     /// total. `None` outside a segmented burst. Transient, like the cursor.
     #[serde(skip)]
     pub mdma_clock: Option<u32>,
+}
+
+/// What a sync DMA is about to do, see [`Dma::mdma_plan`].
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MdmaPlan {
+    /// Channels in the burst.
+    pub channels: u32,
+    /// Bytes in the burst, all channels.
+    pub bytes: u64,
+    /// Some A to B channel writes OAM, VRAM or CGRAM data.
+    pub gated_port: bool,
 }
 
 /// Resume state for a segmented sync DMA (Phase 5). The per-channel
@@ -163,6 +184,34 @@ impl Dma {
         let reg = (offset & 0x0F) as u8;
         self.channels[channel].write(reg, value);
         true
+    }
+
+    /// What the sync DMA triggered by `mask` will do, read from the channel
+    /// registers before it runs: the channels, the bytes (a `DAS` of 0 is
+    /// 64 KiB) and whether any A to B channel writes a port whose write
+    /// depends on the picture gate (OAM data `$2104`, VRAM `$2118/9`, CGRAM
+    /// `$2122`).
+    #[must_use]
+    pub fn mdma_plan(&self, mask: u8) -> MdmaPlan {
+        let mut plan = MdmaPlan::default();
+        for ch in (0..8).filter(|ch| mask & (1 << ch) != 0) {
+            let c = &self.channels[ch];
+            plan.channels += 1;
+            plan.bytes += if c.das == 0 {
+                0x1_0000
+            } else {
+                u64::from(c.das)
+            };
+            if c.params.direction == Direction::AToB {
+                plan.gated_port |= c
+                    .params
+                    .mode
+                    .pattern()
+                    .iter()
+                    .any(|off| matches!(c.bbad.wrapping_add(*off), 0x04 | 0x18 | 0x19 | 0x22));
+            }
+        }
+        plan
     }
 
     /// Execute the sync-DMA pass triggered by a write of `mask` to

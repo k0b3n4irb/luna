@@ -23,7 +23,7 @@ use luna_cpu_65c816::Cpu;
 use luna_ppu::Ppu;
 
 use crate::coproc::{Dsp1Mapper, Sa1Chip};
-use crate::dma::{Dma, DmaBus, DmaTraceEvent, DmaTraceLog, HDMA_CHANNEL_FLAG};
+use crate::dma::{Dma, DmaBus, DmaTraceEvent, DmaTraceLog, HDMA_CHANNEL_FLAG, MdmaPlan};
 use crate::mclk::{MclkAccounting, MclkBuckets, MclkKind};
 use crate::power::{PowerOnRng, PowerOnState};
 
@@ -2393,6 +2393,68 @@ impl Snes {
     }
 }
 
+/// Where the beam stands for each byte of a DMA burst.
+///
+/// ares and Mesen2 gate every `$2104` / `$2118/9` / `$2122` write of a DMA on
+/// the scanline the byte lands on (screen on and line < `vdisp`: the write is
+/// lost, the address still advances). A burst is a run of 8-master-clock slots
+/// (`cpu/dma.cpp`), so the line of byte N is the burst's start walked forward
+/// N slots. HDMA bytes do not advance: they belong to the line that runs them.
+#[derive(Clone, Copy)]
+struct ByteBeam {
+    /// Frame counter of the byte (bumps at the frame return).
+    frame: u64,
+    /// Scanline of the byte.
+    line: u16,
+    /// Master clock within the line (0..period).
+    hclock: u32,
+    /// Scanlines in the frame (the line after the last is 0).
+    lines: u16,
+    /// SETINI interlace (the short line 240 needs it).
+    interlace: bool,
+    /// Current field (the short line 240 needs it).
+    odd_field: bool,
+    /// `false` for HDMA, whose bytes all belong to one line.
+    advancing: bool,
+    /// Last channel announced, so a new one pays its 8-clock start.
+    last_channel: u8,
+    /// First scanline of the `VBlank` (for the crossing test).
+    vblank_start: u16,
+    /// Walked through a line whose picture gate differs from the first one's.
+    crossed: bool,
+}
+
+impl ByteBeam {
+    /// The picture gate's line half: `true` on a picture line.
+    const fn picture(&self, line: u16) -> bool {
+        line < self.vblank_start
+    }
+
+    /// Move the beam forward by `mclk` master clocks (no-op for HDMA).
+    const fn advance(&mut self, mclk: u32) {
+        if !self.advancing {
+            return;
+        }
+        let first = self.picture(self.line);
+        self.hclock += mclk;
+        loop {
+            let period = line_period(self.line, self.interlace, self.odd_field);
+            if self.hclock < period {
+                break;
+            }
+            self.hclock -= period;
+            self.line += 1;
+            if self.line >= self.lines {
+                self.line = 0;
+                self.frame += 1;
+            }
+            if self.picture(self.line) != first {
+                self.crossed = true;
+            }
+        }
+    }
+}
+
 /// DMA-side view of the system: holds the minimum needed for a sync
 /// transfer (WRAM + cartridge + PPU) **without** carrying a reference
 /// to the [`Dma`] controller, so the controller can borrow itself
@@ -2439,6 +2501,9 @@ struct DmaBusView<'a> {
     /// stamped onto each `DmaTraceEvent` so the Event Viewer can plot
     /// `(hclock, line)` at full column precision (Mesen2 `GetHClock`).
     trace_hclock: u16,
+    /// Where each byte of this burst lands, see [`ByteBeam`]: the line the
+    /// picture gate, the strict rules and the DMA trace use.
+    beam: ByteBeam,
     /// DMA channel (0-7) currently driving the transfer — set by the
     /// controller via [`DmaBus::set_active_channel`] before each channel's
     /// segment, so captured B-bus writes carry their source channel
@@ -2502,8 +2567,8 @@ impl DmaBusView<'_> {
         if let Some(rule) = crate::hw_strict::ppu_access_rule(
             offset,
             write,
-            self.trace_line,
-            self.trace_hclock,
+            self.beam.line,
+            self.beam.hclock as u16,
             vblank_start_line(overscan),
             self.ppu.inidisp & 0x80 != 0,
         ) {
@@ -2512,7 +2577,7 @@ impl DmaBusView<'_> {
                 self.cpu_pc,
                 0x2100 | u32::from(offset),
                 MemOrigin::from_channel_tag(self.dma_channel),
-                (self.trace_frame, self.trace_line, self.trace_hclock),
+                (self.beam.frame, self.beam.line, self.beam.hclock as u16),
             );
         }
     }
@@ -2659,6 +2724,18 @@ impl DmaBus for DmaBusView<'_> {
                     && (self.ppu.inidisp & 0x80) == 0;
                 self.ppu.beam_dot = self.trace_hclock / 4;
             }
+            // The picture gate of an OAM / VRAM data byte (ares `writeOAM`
+            // / `writeVRAM`, Mesen2 `SnesPpu`): the screen on and the line
+            // of THIS byte's slot before `vdisp` loses the write while the
+            // address advances. The gate is the byte's, not the last CPU
+            // write's, and not the burst's first line: a burst that crosses
+            // the VBlank edge changes gate mid-way.
+            if matches!(b_offset, 0x04 | 0x18 | 0x19) {
+                self.ppu.active_display = self.beam.line
+                    < vblank_start_line(self.ppu.setini & 0x04 != 0)
+                    && (self.ppu.inidisp & 0x80) == 0;
+                self.ppu.beam_dot = (self.beam.hclock / 4) as u16;
+            }
             // DMA B-bus trace: capture (source → VMADD → byte) BEFORE the
             // write, since the $2119 (high) write auto-increments VMADD.
             // Captures EVERY PPU B-bus write ($2100-$213F), not just the
@@ -2676,11 +2753,14 @@ impl DmaBus for DmaBusView<'_> {
                     b_offset,
                     value,
                     channel: self.dma_channel,
-                    frame: self.trace_frame,
-                    line: self.trace_line,
-                    hclock: self.trace_hclock,
-                    blank: self.trace_blank,
+                    frame: self.beam.frame,
+                    line: self.beam.line,
+                    hclock: self.beam.hclock as u16,
+                    blank: self.beam.line >= vblank_start_line(self.ppu.setini & 0x04 != 0),
                     force_blank: self.ppu.inidisp & 0x80 != 0,
+                    // A burst's end is patched in once its time is charged.
+                    end_line: self.beam.line,
+                    end_hclock: self.beam.hclock as u16,
                 });
             }
             // CGDATA ($2122) is never dropped during active display (handled
@@ -2741,10 +2821,17 @@ impl DmaBus for DmaBusView<'_> {
         // which is what the SA-1's `conflict()` reads. A DMA from ROM slows
         // a SA-1 running from ROM (Speed Test: DMA ROM|ROM 5.08 MHz).
         self.mapper.step_coproc(mcycles, *self.scpu_mar);
+        // One byte slot is gone: the next byte lands that much later.
+        self.beam.advance(mcycles);
     }
 
     fn set_active_channel(&mut self, channel: u8) {
         self.dma_channel = channel;
+        // ares `Channel::dmaRun`: `step(8)` before a channel's first byte.
+        if channel != self.beam.last_channel {
+            self.beam.last_channel = channel;
+            self.beam.advance(8);
+        }
     }
 }
 
@@ -3085,6 +3172,7 @@ impl SnesBus<'_> {
             // log is moved into the view for the line and returned after.
             let mut trace = self.dma.dma_trace.take();
             let trace_hclock = self.hclock();
+            let beam = self.byte_beam(0, false, 0xFF);
             let mut view = DmaBusView {
                 wram: &mut *self.wram,
                 mapper: &mut *self.mapper,
@@ -3103,6 +3191,7 @@ impl SnesBus<'_> {
                 // the frame wrap): never `VBlank`.
                 trace_blank: false,
                 trace_hclock,
+                beam,
                 dma_channel: 0,
                 mem_trace: self.mem_trace_log.as_mut(),
                 access_counters: self.access_counters.as_deref_mut(),
@@ -3183,6 +3272,7 @@ impl SnesBus<'_> {
             // renderer also uses it to pick the interlaced field's rows.
             self.ppu.field = !self.ppu.field;
             let trace_hclock = self.hclock();
+            let beam = self.byte_beam(0, false, 0xFF);
             let mut view = DmaBusView {
                 wram: &mut *self.wram,
                 mapper: &mut *self.mapper,
@@ -3205,6 +3295,7 @@ impl SnesBus<'_> {
                 // the frame wrap): never `VBlank`.
                 trace_blank: false,
                 trace_hclock,
+                beam,
                 dma_channel: 0,
                 mem_trace: self.mem_trace_log.as_mut(),
                 access_counters: self.access_counters.as_deref_mut(),
@@ -3341,6 +3432,49 @@ impl SnesBus<'_> {
                 (self.frame_count, line, hclock),
             );
         }
+    }
+
+    /// The beam walker for a burst's bytes, started `offset` master clocks
+    /// after the current position. `advancing` is `false` for HDMA, whose
+    /// bytes all belong to the line that runs them.
+    const fn byte_beam(&self, offset: u32, advancing: bool, last_channel: u8) -> ByteBeam {
+        let mut beam = ByteBeam {
+            frame: self.frame_count,
+            line: self.ppu_line,
+            hclock: self.mcycles_in_line,
+            lines: self.scanlines_per_frame,
+            interlace: self.ppu.setini & 0x01 != 0,
+            odd_field: self.ppu.field,
+            advancing,
+            last_channel,
+            vblank_start: self.vblank_start_line(),
+            crossed: false,
+        };
+        beam.advance(offset);
+        beam
+    }
+
+    /// The walker of a sync DMA burst: `offset` clocks from now, with the
+    /// channel already started (`last_channel`) or not (`0xFF`).
+    const fn burst_beam(&self, offset: u32, last_channel: u8) -> ByteBeam {
+        self.byte_beam(offset, true, last_channel)
+    }
+
+    /// Whether a burst of `plan`, armed at `mclk_at_edge`, runs through a
+    /// scanline whose OAM / VRAM / CGRAM gate differs from the one it starts
+    /// on (the start of the `VBlank`, or the return to the picture). Only a
+    /// burst that does needs its bytes written line by line; the margin
+    /// covers the DRAM refresh the cost model leaves out.
+    fn burst_crosses_gate(&self, mclk_at_edge: u64, plan: &MdmaPlan, clock_count: u32) -> bool {
+        if !plan.gated_port || self.ppu.inidisp & 0x80 != 0 {
+            return false;
+        }
+        let cost = mdma_cost(mclk_at_edge, plan.channels, plan.bytes, clock_count);
+        let lines = cost / u64::from(MCYCLES_PER_SCANLINE) + 1;
+        let margin = lines * u64::from(DRAM_REFRESH_CYCLES);
+        let mut beam = self.byte_beam(0, true, 0xFF);
+        beam.advance(u32::try_from(cost + margin).unwrap_or(u32::MAX));
+        beam.crossed
     }
 
     /// The exact horizontal master-clock position within the current scanline
@@ -3514,13 +3648,17 @@ impl SnesBus<'_> {
         // `advance_coproc = false`: coprocs already advanced per byte via
         // `DmaBusView::tick`, so the master-clock charge here must not
         // re-charge them.
-        if self.dma.hdmaen == 0 {
-            // Fast path — no HDMA armed, so nothing the DMA could
-            // cross matters: run the whole burst as one lump (the
-            // legacy behaviour, byte-identical). Covers virtually all
-            // forced-blank / vblank uploads.
+        let plan = self.dma.mdma_plan(value);
+        if self.dma.hdmaen == 0 && !self.burst_crosses_gate(mclk_at_edge, &plan, clock_count) {
+            // Fast path — no HDMA armed and no picture gate changing under
+            // the burst, so nothing the DMA could cross matters: run the
+            // whole burst as one lump (byte-identical to the segmented walk
+            // for such a burst). Covers virtually all forced-blank / vblank
+            // uploads. Each byte still carries its own line and dot.
             let mut trace = self.dma.dma_trace.take();
+            let first_event = trace.as_ref().map_or(0, |t| t.events.len());
             let trace_hclock = self.hclock();
+            let beam = self.burst_beam(mdma_preamble(mclk_at_edge), 0xFF);
             let bytes = {
                 let trace_blank_now = self.ppu_line >= self.vblank_start_line();
                 let mut view = DmaBusView {
@@ -3539,6 +3677,7 @@ impl SnesBus<'_> {
                     trace_line: self.ppu_line,
                     trace_blank: trace_blank_now,
                     trace_hclock,
+                    beam,
                     dma_channel: 0,
                     mem_trace: self.mem_trace_log.as_mut(),
                     access_counters: self.access_counters.as_deref_mut(),
@@ -3558,6 +3697,7 @@ impl SnesBus<'_> {
                 clock_count,
             );
             self.advance_time(cost, false);
+            self.stamp_burst_end(first_event);
             return;
         }
 
@@ -3577,12 +3717,22 @@ impl SnesBus<'_> {
         self.dma.mdma_clock = Some(preamble);
         self.advance_time(u64::from(preamble), false);
         let mut trace = self.dma.dma_trace.take();
+        let first_event = trace.as_ref().map_or(0, |t| t.events.len());
         loop {
+            // A channel already started by the previous segment must not pay
+            // its 8-clock start again.
+            let resume = self
+                .dma
+                .mdma_cursor
+                .map(|c| c.current_ch)
+                .filter(|&ch| self.dma.channels[usize::from(ch) & 7].seg_running)
+                .unwrap_or(0xFF);
             let room_mclk = self.line_period().saturating_sub(self.mcycles_in_line);
             // Bytes that fit before the next boundary (≥1 to progress).
             // 8 mclk/byte, matching `DmaChannel::run_segment`.
             let seg_bytes = (room_mclk / 8).max(1);
             let trace_hclock = self.hclock();
+            let beam = self.burst_beam(0, resume);
             let clock_before = self.dma.mdma_clock.unwrap_or(0);
             {
                 let trace_blank_now = self.ppu_line >= self.vblank_start_line();
@@ -3602,6 +3752,7 @@ impl SnesBus<'_> {
                     trace_line: self.ppu_line,
                     trace_blank: trace_blank_now,
                     trace_hclock,
+                    beam,
                     dma_channel: 0,
                     mem_trace: self.mem_trace_log.as_mut(),
                     access_counters: self.access_counters.as_deref_mut(),
@@ -3626,6 +3777,21 @@ impl SnesBus<'_> {
         let counter_dma = u64::from(self.dma.mdma_clock.take().unwrap_or(0));
         self.advance_time(mdma_realign(counter_dma, clock_count), false);
         self.dma.dma_trace = trace;
+        self.stamp_burst_end(first_event);
+    }
+
+    /// Give the trace events a burst recorded (from `first_event` on) the
+    /// line and dot where it ended, the CPU getting the bus back: the
+    /// charged time includes the DRAM refresh the walk of the bytes leaves
+    /// out, so the end is read off the clock once it is charged.
+    fn stamp_burst_end(&mut self, first_event: usize) {
+        let (end_line, end_hclock) = (self.ppu_line, self.hclock());
+        if let Some(log) = self.dma.dma_trace.as_mut() {
+            for ev in log.events.iter_mut().skip(first_event) {
+                ev.end_line = end_line;
+                ev.end_hclock = end_hclock;
+            }
+        }
     }
 
     /// A CPU read, in ares' shape (`cpu/memory.cpp:8-19`): the DMA edge runs

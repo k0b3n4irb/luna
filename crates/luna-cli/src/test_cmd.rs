@@ -2849,6 +2849,8 @@ mod tests {
             hclock: 0,
             blank,
             force_blank,
+            end_line: 10,
+            end_hclock: 0,
         };
         let events = [
             ev(1, 0x18, true, false),  // VBlank: safe, screen-on

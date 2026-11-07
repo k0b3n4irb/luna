@@ -1064,15 +1064,19 @@ pub struct DmaTraceLine {
     pub channel: u8,
     /// Completed-frame counter at the start of the owning burst.
     pub frame: u64,
-    /// PPU scanline at the start of the owning burst.
+    /// PPU scanline of this byte's own transfer slot.
     pub line: u16,
-    /// Horizontal master-clock (0..1363) at the transfer.
+    /// Horizontal master-clock (0..1363) of this byte's slot.
     pub hclock: u16,
-    /// Burst started inside vertical blank.
+    /// This byte's slot is inside vertical blank.
     pub blank: bool,
     /// INIDISP forced-blank was set at the write. A VRAM write is safe
     /// iff `blank || force_blank`.
     pub force_blank: bool,
+    /// Scanline where the owning burst ends (the CPU gets the bus back).
+    pub end_line: u16,
+    /// Horizontal master-clock (0..1363) where the owning burst ends.
+    pub end_hclock: u16,
 }
 
 /// `take_dma_trace` result.
@@ -5377,6 +5381,8 @@ impl LunaServer {
                 hclock: ev.hclock,
                 blank: ev.blank,
                 force_blank: ev.force_blank,
+                end_line: ev.end_line,
+                end_hclock: ev.end_hclock,
             })
             .collect();
         Ok(rmcp::Json(DmaTraceResult { events }))

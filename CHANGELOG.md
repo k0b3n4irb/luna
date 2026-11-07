@@ -7,6 +7,14 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ## [Unreleased]
 
+- A DMA that crosses the end of the `VBlank` loses what the console loses. Each byte of a one-block DMA
+  is now written (or lost) on the line of its own slot, as ares and Mesen2 gate every `$2104` / `$2118/9`
+  write: a 352-byte VRAM upload started on the last line of the frame keeps the ~140 bytes of that line and
+  loses the rest, where luna used to write all 352 (and a burst started on the last picture lines lands
+  from line 225, where luna used the last CPU write's stale gate). Bursts that cross no gate edge are
+  unchanged. `luna strict` R1 now rises on the lost bytes, at their line. `--dma-trace` (and the MCP
+  `take_dma_trace`) gives each byte its own line and dot and two new closing columns, `end_line` and
+  `end_hclock`: where the burst ends and the CPU gets the bus back.
 - Reading what the PPU holds: `luna state --peek OAM:OFFSET:COUNT` reads the PPU's own 544-byte OAM
   (not the WRAM copy: a missed or out-of-VBlank OAM DMA leaves a sane copy and a wrong screen), and
   `--peek PPU:REGISTER:COUNT` reads write-only registers as the PPU keeps them (INIDISP, OBSEL, BGMODE,

@@ -1210,9 +1210,12 @@ proves it on any ROM).
 | R8 | Manual read of `$4016` / `$4017` while the auto-joypad read runs (`$4212` bit 0). | ares `cpu/io.cpp` |
 
 `VBlank` starts on line 225 (240 with overscan, `$2133` bit 2): a write on
-line 224 is a fault, on line 225 it is not. A DMA is judged at the position
-where its burst starts, so a burst that begins on the last picture lines is
-reported even if most of its bytes land in `VBlank`. Two rules were left out
+line 224 is a fault, on line 225 it is not. A DMA is judged byte by byte, at
+the line of each byte's own 8-master-clock slot: a burst that begins in
+`VBlank` and runs past its end is reported on the bytes that land on picture
+lines (the ones the console loses, and luna loses too), and a burst that
+begins on the last picture lines is reported only on the bytes before line
+225. `--dma-trace` shows the end of each burst (`end_line`, `end_hclock`). Two rules were left out
 because no reference settles them: the effect of a DMA to a B-bus register
 with no device, and open-bus values.
 
