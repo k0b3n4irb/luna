@@ -25,11 +25,11 @@
 //! ```
 //!
 //! The host device's sample rate is usually 44.1 kHz or 48 kHz, not
-//! 32 kHz. We request 32 kHz from cpal where supported; in every case a
+//! 32.04 kHz. We request 32 040 Hz from cpal where supported; in every case a
 //! 6-point cubic Hermite [`Resampler`] (Niemitalo 2009) sits between
 //! the ring consumer and the device buffer. The resampler tracks a
 //! sub-sample fractional position and steps it by
-//! `32000 / device_rate` per output sample (nudged by the dynamic rate
+//! `32040 / device_rate` per output sample (nudged by the dynamic rate
 //! control, see `apply_drc`) — well below the audible
 //! stopband ripple of a naïve linear interpolator.
 
@@ -43,7 +43,7 @@ use ringbuf::traits::{Consumer, Observer, Split};
 
 /// Target SNES audio sample rate. The host stream is configured to
 /// this rate when the device supports it.
-pub(crate) const TARGET_SAMPLE_RATE: u32 = 32_000;
+pub(crate) const TARGET_SAMPLE_RATE: u32 = luna_api::SAMPLE_RATE_HZ;
 
 /// Maximum number of stereo samples the SPSC ring can hold (~125 ms
 /// at 32 kHz — comfortable safety margin against UI hitches without
@@ -540,8 +540,15 @@ mod tests {
     fn resampler_step_is_below_one_when_upsampling() {
         // 32 k → 48 k: step = 0.667. Three output samples consume
         // two input samples on average.
-        let r = Resampler::new(32_000, 48_000);
-        assert!((r.step - 32_000.0 / 48_000.0).abs() < 1e-6);
+        let r = Resampler::new(super::TARGET_SAMPLE_RATE, 48_000);
+        assert!((r.step - 32_040.0 / 48_000.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn resampler_input_rate_is_the_s_dsp_rate() {
+        // The core produces 32 040 Hz; reading it as 32 000 would play
+        // the stream 0.125 % flat.
+        assert_eq!(super::TARGET_SAMPLE_RATE, 32_040);
     }
 
     #[test]
