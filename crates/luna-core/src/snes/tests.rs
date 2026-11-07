@@ -1874,3 +1874,92 @@ fn sa1_main_triggers_irq_and_sa1_handler_runs() {
         "SA-1 IRQ handler should have written sentinel"
     );
 }
+
+/// A one-block DMA, no HDMA, started on the last line of the frame with the
+/// screen on: 352 bytes of a ramp to VRAM word `$4CA0` (`$2118/9`, mode 1).
+///
+/// The console filters every `$2118/9` write at the line level (ares and
+/// Mesen2: screen on and `line < vdisp` loses the write, `VMADD` still
+/// advances), so a burst that crosses the frame return loses its end.
+/// Returns the machine after the burst and `(mclk in the line before the
+/// STA, mdma_cost of the burst)`.
+fn dma_ramp_across_the_frame_return() -> (Snes, u32, u64) {
+    const TRIGGER: u16 = 0x8040;
+    let mut rom = demo_lorom().rom;
+    let setup: &[u8] = &[
+        0xA9, 0x0F, 0x8D, 0x00, 0x21, // LDA #$0F ; STA $2100 (screen on)
+        0xA9, 0x80, 0x8D, 0x15, 0x21, // LDA #$80 ; STA $2115 (inc after $2119)
+        0xA9, 0x01, 0x8D, 0x00, 0x43, // LDA #$01 ; STA $4300 (mode 1, A to B)
+        0xA9, 0x18, 0x8D, 0x01, 0x43, // LDA #$18 ; STA $4301 ($2118)
+        0xA9, 0x00, 0x8D, 0x02, 0x43, // LDA #$00 ; STA $4302
+        0xA9, 0x90, 0x8D, 0x03, 0x43, // LDA #$90 ; STA $4303
+        0xA9, 0x00, 0x8D, 0x04, 0x43, // LDA #$00 ; STA $4304 (bank 0)
+        0xA9, 0x60, 0x8D, 0x05, 0x43, // LDA #$60 ; STA $4305 (352 = $0160)
+        0xA9, 0x01, 0x8D, 0x06, 0x43, // LDA #$01 ; STA $4306
+        0x80, 0xFE, // BRA * (wait for line 261)
+    ];
+    rom[..setup.len()].copy_from_slice(setup);
+    // The game sets VMADD in VBlank, so the CPU's own $2116/7 writes refresh
+    // the VRAM gate on the last line, as they do on the console.
+    let trigger: &[u8] = &[
+        0xA9, 0xA0, 0x8D, 0x16, 0x21, // LDA #$A0 ; STA $2116
+        0xA9, 0x4C, 0x8D, 0x17, 0x21, // LDA #$4C ; STA $2117 (word $4CA0)
+        0xA9, 0x01, // LDA #$01
+        0x8D, 0x0B, 0x42, // STA $420B
+        0xEA, 0xEA, 0xEA, 0xEA, // NOP x4 (the edge runs before the next access)
+        0xDB, // STP
+    ];
+    let at = usize::from(TRIGGER - 0x8000);
+    rom[at..at + trigger.len()].copy_from_slice(trigger);
+    // The ramp: byte i = i (mod 256), at $00:9000.
+    for i in 0..352usize {
+        rom[0x1000 + i] = i as u8;
+    }
+    let mut snes = Snes::from_cartridge(Cartridge::from_bytes(rom).unwrap());
+    snes.reset();
+    // A VRAM that differs from the ramp everywhere it could land.
+    for i in 0..352u16 {
+        snes.ppu.vram.poke(0x9940 + i, !(i as u8));
+    }
+    for _ in 0..4_000_000 {
+        snes.step();
+        if snes.ppu_line == 261 && snes.mcycles_in_line > 64 && snes.cpu.pc < TRIGGER {
+            break;
+        }
+    }
+    assert_eq!(snes.ppu_line, 261, "positioned on the last NTSC line");
+    snes.cpu.pc = TRIGGER;
+    for _ in 0..5 {
+        snes.step(); // the VMADD writes, then LDA #$01
+    }
+    let at_sta = snes.mcycles_in_line;
+    let edge = snes.total_mclk + 6;
+    let cost = mdma_cost(edge, 1, 352, 6);
+    for _ in 0..8 {
+        snes.step();
+    }
+    (snes, at_sta, cost)
+}
+
+#[test]
+#[ignore = "lot 2 (DMA d'un seul bloc): the fast path writes the whole burst, the console loses what follows the frame return"]
+fn one_block_dma_loses_its_end_after_the_frame_return() {
+    let (snes, at_sta, cost) = dma_ramp_across_the_frame_return();
+    let landed = |i: u16| snes.ppu.vram.peek(0x9940 + i) == i as u8;
+    let n = (0..352u16).take_while(|&i| landed(i)).count() as i64;
+    let all = (0..352u16).filter(|&i| landed(i)).count() as i64;
+    eprintln!(
+        "burst from line 261 at mclk {at_sta}: cost {cost} mclk, ends on line {} (frame +1), dot {}; \
+         landed prefix {n} of 352 bytes ({all} landed in all)",
+        (261 + (u64::from(at_sta) + cost) / 1364) % 262,
+        (u64::from(at_sta) + cost) % 1364 / 4
+    );
+    // The burst leaves the line at (1364 - start - preamble 16..24 - channel 8) / 8
+    // bytes; a few bytes of slack for the exact dot of the edge.
+    let expected = i64::from(1364 - at_sta - 16 - 8) / 8;
+    assert!(
+        (n - expected).abs() <= 6,
+        "console: ~{expected} bytes land before the frame return, luna wrote {n}"
+    );
+    assert_eq!(all, n, "nothing lands after the first lost byte");
+}
