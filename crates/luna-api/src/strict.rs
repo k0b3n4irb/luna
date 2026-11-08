@@ -11,7 +11,7 @@ use crate::{ApiError, Emulator};
 /// One distinct fault: a rule broken by one instruction at one address.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct StrictFault {
-    /// Rule code, `R1`..`R9`.
+    /// Rule code, `R1`..`R11`.
     pub rule: &'static str,
     /// One-line statement of the rule.
     pub what: &'static str,
@@ -62,6 +62,8 @@ pub fn strict_rules() -> Vec<(&'static str, &'static str)> {
         HwRule::DmaWramPort,
         HwRule::AutoJoypadRead,
         HwRule::AutoJoypadRegRead,
+        HwRule::InidispEarlyLatch,
+        HwRule::SetiniEarlyLatch,
     ]
     .into_iter()
     .map(|r| (r.code(), r.summary()))
@@ -133,7 +135,10 @@ mod tests {
     #[test]
     fn every_rule_is_listed_once_in_order() {
         let codes: Vec<_> = strict_rules().into_iter().map(|r| r.0).collect();
-        assert_eq!(codes, ["R1", "R2", "R3", "R4", "R5", "R6", "R8", "R9"]);
+        assert_eq!(
+            codes,
+            ["R1", "R2", "R3", "R4", "R5", "R6", "R8", "R9", "R10", "R11"]
+        );
     }
 
     #[test]

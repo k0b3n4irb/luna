@@ -50,6 +50,23 @@ pub enum HwRule {
     /// returns `io.joy1..4` unfiltered; Mesen2 flags the read as
     /// `SnesReadDuringAutoJoy`). R7 was never issued.
     AutoJoypadRegRead,
+    /// R10 — a CPU write to `$2100` (INIDISP) while the picture is drawn
+    /// (`HBlank` included), with bit 7 set on the data bus just before the write
+    /// and bit 7 clear in the value: the PPU latches the register early, from
+    /// the previous bus byte, and on a three-chip console corrupts OBJ tile
+    /// data. The mitigation is a write whose preceding bus byte has bit 7
+    /// clear (`sta $0f2100`, not `sta $802100`). Source: the hardware tests of
+    /// undisbeliever/snes-test-roms (`inidisp-d7-glitch-test.asm`), not a
+    /// reference emulator: neither ares (`ppu/io.cpp:193-197`) nor Mesen2
+    /// (`SnesPpu.cpp:1889-1896`) models the early latch.
+    InidispEarlyLatch,
+    /// R11 — a CPU write to `$2133` (SETINI) while the picture is drawn
+    /// (force blank clear, before `VBlank`) when bits 1 or 6 of the value
+    /// differ from the previous bus byte: the PPU may latch the register early
+    /// and show the old bits (`setini-early-read-mode7ex.asm`: red or blue
+    /// dots). That `VBlank` and force blank exempt it is a HYPOTHESIS carried
+    /// over from INIDISP, not a measurement.
+    SetiniEarlyLatch,
 }
 
 impl HwRule {
@@ -65,6 +82,8 @@ impl HwRule {
             Self::DmaWramPort => "R6",
             Self::AutoJoypadRead => "R8",
             Self::AutoJoypadRegRead => "R9",
+            Self::InidispEarlyLatch => "R10",
+            Self::SetiniEarlyLatch => "R11",
         }
     }
 
@@ -85,6 +104,12 @@ impl HwRule {
             Self::AutoJoypadRead => "manual $4016/$4017 read during the auto-joypad read",
             Self::AutoJoypadRegRead => {
                 "$4218-$421F read during the auto-joypad read: a partial word"
+            }
+            Self::InidispEarlyLatch => {
+                "$2100 write with bit 7 on the data bus and bit 7 clear in the value, picture drawn: early latch"
+            }
+            Self::SetiniEarlyLatch => {
+                "$2133 write differing from the data bus in bit 1 or 6, picture drawn: early latch (hypothesis)"
             }
         }
     }
@@ -197,6 +222,35 @@ pub fn ppu_access_rule(
     }
 }
 
+/// Does a CPU write to `$2100` / `$2133` break R10 / R11? `offset` is the byte
+/// offset from `$2100`, `prev_bus` the byte on the data bus just before the
+/// write (the previous bus value, not the value written), `value` the byte
+/// written. Pure, so the edges are testable. Unlike [`ppu_access_rule`] it
+/// looks at the bus, so only a CPU write can ask: a DMA drives the B bus
+/// itself.
+#[must_use]
+pub const fn early_latch_rule(
+    offset: u8,
+    prev_bus: u8,
+    value: u8,
+    line: u16,
+    vblank_start: u16,
+    force_blank: bool,
+) -> Option<HwRule> {
+    let drawing = line < vblank_start;
+    match offset {
+        // The mitigation of the hardware test is to enter force blank with
+        // bit 7 set, so a value with bit 7 set is silent.
+        0x00 if drawing && prev_bus & 0x80 != 0 && value & 0x80 == 0 => {
+            Some(HwRule::InidispEarlyLatch)
+        }
+        0x33 if drawing && !force_blank && (prev_bus ^ value) & 0x42 != 0 => {
+            Some(HwRule::SetiniEarlyLatch)
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -273,6 +327,41 @@ mod tests {
         assert_eq!(ppu_access_rule(0x3B, false, 50, 1100, NTSC, false), None);
         // A read of the status register is not one of the rules.
         assert_eq!(ppu_access_rule(0x3F, false, 50, 600, NTSC, false), None);
+    }
+
+    #[test]
+    fn early_latch_edges() {
+        // R10: bit 7 on the bus, bit 7 clear in the value, picture drawn.
+        let r10 = |prev, val, line| early_latch_rule(0x00, prev, val, line, NTSC, false);
+        assert_eq!(r10(0x8F, 0x0F, 100), Some(HwRule::InidispEarlyLatch));
+        assert_eq!(r10(0x8F, 0x0F, 0), Some(HwRule::InidispEarlyLatch));
+        assert_eq!(r10(0x8F, 0x0F, 224), Some(HwRule::InidispEarlyLatch));
+        assert_eq!(r10(0x8F, 0x0F, 225), None, "VBlank");
+        assert_eq!(r10(0x21, 0x0F, 100), None, "bus bit 7 clear");
+        assert_eq!(r10(0x8F, 0x8F, 100), None, "entering force blank");
+        assert_eq!(
+            early_latch_rule(0x00, 0x8F, 0x0F, 230, OVERSCAN, false),
+            Some(HwRule::InidispEarlyLatch)
+        );
+        // R10 does not depend on force blank (the register is being written).
+        assert_eq!(
+            early_latch_rule(0x00, 0x80, 0x00, 10, NTSC, true),
+            Some(HwRule::InidispEarlyLatch)
+        );
+        // R11: bits 1 / 6 differ, force blank clear, picture drawn.
+        let r11 = |prev, val, line, fb| early_latch_rule(0x33, prev, val, line, NTSC, fb);
+        assert_eq!(r11(0x00, 0x40, 100, false), Some(HwRule::SetiniEarlyLatch));
+        assert_eq!(r11(0x00, 0x02, 100, false), Some(HwRule::SetiniEarlyLatch));
+        assert_eq!(r11(0x40, 0x40, 100, false), None, "same bits");
+        assert_eq!(
+            r11(0x00, 0x01, 100, false),
+            None,
+            "bit 0 is not in the mask"
+        );
+        assert_eq!(r11(0x00, 0x40, 225, false), None, "VBlank");
+        assert_eq!(r11(0x00, 0x40, 100, true), None, "force blank");
+        // Other registers are not concerned.
+        assert_eq!(early_latch_rule(0x01, 0x80, 0x00, 100, NTSC, false), None);
     }
 
     #[test]

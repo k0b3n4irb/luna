@@ -1504,7 +1504,7 @@ enum Command {
     /// have refused or corrupted — a VRAM/OAM/CGRAM write or a PPU memory
     /// read while the picture is drawn (R1-R4), a DMA through the blocked
     /// A-bus zone (R5) or between WRAM and $2180 (R6), a manual joypad read
-    /// during the auto-read (R8), or of `$4218-$421F` (R9). It also checks, once a frame, the sprite
+    /// during the auto-read (R8), or of `$4218-$421F` (R9), a write to `$2100` with bit 7 on the data bus (R10) or to `$2133` over a different bus byte (R11) while the picture is drawn. It also checks, once a frame, the sprite
     /// tiles the picture draws: a tile with pixels that no write ever
     /// filled (S1, its content is the power-on VRAM) or that was uploaded
     /// under another OBSEL layout (S4). The journal only observes: the run

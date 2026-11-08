@@ -3312,6 +3312,7 @@ impl Bus for SnesBus<'_> {
         if self.sched_enabled {
             *self.cpu_cycles += 1;
         }
+        self.strict_early_latch(addr, value);
         // A write drives the data bus too, so it updates the MDR.
         *self.mdr = value;
         self.trace_mem_access(addr, MemEventKind::Write, value);
@@ -3408,6 +3409,38 @@ impl SnesBus<'_> {
                 rule,
                 self.cpu_pc_full,
                 0x2100 | u32::from(offset),
+                MemOrigin::Cpu,
+                (self.frame_count, line, hclock),
+            );
+        }
+    }
+
+    /// Strict mode: R10 / R11, a CPU write to `$2100` / `$2133` judged against
+    /// the byte on the data bus *before* the write (`*self.mdr`, not yet
+    /// overwritten by the value). Read-only.
+    fn strict_early_latch(&mut self, addr: Addr24, value: u8) {
+        if self.hw_faults.is_none() {
+            return;
+        }
+        // `$21xx` of banks `$00-$3F` / `$80-$BF` only.
+        if (bank_of(addr) & 0x7F) >= 0x40 || !matches!(offset_of(addr), 0x2100 | 0x2133) {
+            return;
+        }
+        let off = (offset_of(addr) & 0xFF) as u8;
+        let (line, hclock) = (self.ppu_line, self.hclock());
+        if let Some(rule) = crate::hw_strict::early_latch_rule(
+            off,
+            *self.mdr,
+            value,
+            line,
+            self.vblank_start_line(),
+            self.ppu.inidisp & 0x80 != 0,
+        ) && let Some(log) = self.hw_faults.as_mut()
+        {
+            log.note(
+                rule,
+                self.cpu_pc_full,
+                0x2100 | u32::from(off),
                 MemOrigin::Cpu,
                 (self.frame_count, line, hclock),
             );

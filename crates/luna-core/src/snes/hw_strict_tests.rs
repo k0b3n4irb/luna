@@ -387,3 +387,114 @@ fn r9_stays_quiet_when_the_program_waits_for_busy_to_fall() {
     ];
     assert!(run_journal(rom_looping(&code, 5), 3).is_empty());
 }
+
+/// `CLC ; XCE ; REP #$10 ; LDX #x ; STX abs` : a 16-bit store whose low byte
+/// lands on `abs` and its high byte on `abs + 1`, so the bus holds the low
+/// byte when the second register is written. Returns the access bytes and the
+/// offset of the `STX` in them.
+fn stx16(x: u16, abs: u16) -> (Vec<u8>, u32) {
+    let code = vec![
+        0x18,
+        0xFB,
+        0xC2,
+        0x10,
+        0xA2,
+        x as u8,
+        (x >> 8) as u8,
+        0x8E,
+        abs as u8,
+        (abs >> 8) as u8,
+    ];
+    (code, 7)
+}
+
+fn early_latch_faults(inidisp: u8, access: &[u8]) -> Vec<HwFault> {
+    let (cart, _) = rom_access(inidisp, None, access);
+    run_journal(cart, 2)
+}
+
+#[test]
+fn r10_inidisp_written_with_bit_7_on_the_bus_is_flagged_on_every_picture_line() {
+    // Bus byte 0x8F (written to $20FF), then INIDISP <- 0x0F.
+    let (access, stx) = stx16(0x0F8F, 0x20FF);
+    let (cart, pc) = rom_access(0x0F, None, &access);
+    let faults = run_journal(cart, 2);
+    assert!(!faults.is_empty());
+    assert!(
+        faults.iter().all(|f| f.rule == HwRule::InidispEarlyLatch
+            && f.pc == pc + stx
+            && f.addr == 0x2100
+            && f.origin == MemOrigin::Cpu),
+        "{faults:?}"
+    );
+    let l = lines(&faults);
+    assert_eq!(l.first(), Some(&0));
+    assert_eq!(l.last(), Some(&224), "silent from the first VBlank line");
+}
+
+#[test]
+fn r10_stays_quiet_when_the_bus_or_the_value_makes_it_safe() {
+    // Bus bit 7 clear (0x0F then 0x0F).
+    let (access, _) = stx16(0x0F0F, 0x20FF);
+    assert!(early_latch_faults(0x0F, &access).is_empty());
+    // Entering force blank: the value has bit 7 set (0x8F, 0x8F).
+    let (access, _) = stx16(0x8F8F, 0x20FF);
+    assert!(early_latch_faults(0x0F, &access).is_empty());
+    // A plain `sta $2100`: the last byte on the bus is the address high byte.
+    let access = [0xA9, 0x0F, 0x8D, 0x00, 0x21];
+    assert!(early_latch_faults(0x0F, &access).is_empty());
+    // The mitigation of the hardware test: `sta.l $0f2100`, bank byte 0x0F.
+    let access = [0xA9, 0x0F, 0x8F, 0x00, 0x21, 0x0F];
+    assert!(early_latch_faults(0x0F, &access).is_empty());
+}
+
+#[test]
+fn r10_flags_a_long_store_through_a_bank_with_bit_7_set() {
+    // `sta.l $802100`: the bank byte 0x80 is the last byte on the bus.
+    let access = [0xA9, 0x0F, 0x8F, 0x00, 0x21, 0x80];
+    let faults = early_latch_faults(0x0F, &access);
+    assert!(!faults.is_empty());
+    assert!(faults.iter().all(|f| f.rule == HwRule::InidispEarlyLatch));
+}
+
+#[test]
+fn r11_setini_written_over_a_different_bus_byte_is_flagged_when_drawing() {
+    // $2132 <- 0x00 then SETINI <- 0x40: the bus holds 0x00.
+    let (access, stx) = stx16(0x4000, 0x2132);
+    let (cart, pc) = rom_access(0x0F, None, &access);
+    let faults = run_journal(cart, 2);
+    assert!(!faults.is_empty());
+    assert!(
+        faults.iter().all(|f| f.rule == HwRule::SetiniEarlyLatch
+            && f.pc == pc + stx
+            && f.addr == 0x2133
+            && f.origin == MemOrigin::Cpu),
+        "{faults:?}"
+    );
+    let l = lines(&faults);
+    assert_eq!(l.first(), Some(&0));
+    assert_eq!(l.last(), Some(&224));
+}
+
+#[test]
+fn r11_stays_quiet_in_force_blank_or_when_the_bits_agree() {
+    let (access, _) = stx16(0x4000, 0x2132);
+    assert!(early_latch_faults(0x8F, &access).is_empty(), "force blank");
+    // Bus 0x40, value 0x40.
+    let (access, _) = stx16(0x4040, 0x2132);
+    assert!(early_latch_faults(0x0F, &access).is_empty());
+    // A plain `sta $2133`: the bus holds the address high byte 0x21.
+    let access = [0xA9, 0x00, 0x8D, 0x33, 0x21];
+    assert!(early_latch_faults(0x0F, &access).is_empty());
+}
+
+#[test]
+fn r10_and_r11_ignore_a_dma_to_the_registers() {
+    // A DMA writes through the B bus, with no data-bus byte of its own.
+    let cart = rom_dma_to(0x0F, 0x00);
+    assert!(
+        run_journal(cart, 2)
+            .iter()
+            .all(|f| f.rule != HwRule::InidispEarlyLatch)
+    );
+}

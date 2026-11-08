@@ -48,7 +48,7 @@
 //!   → pointer-device input.
 //! - `enable_profile` / `take_profile` → master cycles per symbol (issue #227).
 //! - `enable_hw_strict` / `take_hw_faults` → the hardware strict journal
-//!   (what a real console would refuse or corrupt, rules R1-R6, R8, R9).
+//!   (what a real console would refuse or corrupt, rules R1-R6, R8-R11).
 //! - `enable_vram_provenance` / `take_vram_provenance` → the sprite tiles the
 //!   picture draws that no write filled (S1) or that were uploaded under
 //!   another OBSEL layout (S4), with the write that last touched each.
@@ -820,7 +820,7 @@ pub struct CartCheckResult {
 /// address.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct HwFaultEntry {
-    /// Rule code, `R1`..`R9`.
+    /// Rule code, `R1`..`R11`.
     pub rule: String,
     /// One-line statement of the rule.
     pub what: String,
@@ -5030,7 +5030,9 @@ impl LunaServer {
                                 memory read while the picture is drawn (R1-R4), a DMA through \
                                 the blocked A-bus zone (R5) or between WRAM and $2180 (R6), a \
                                 manual joypad read during the auto-read (R8), or a read of \
-                                $4218-$421F then (R9). Observation \
+                                $4218-$421F then (R9), an INIDISP write with bit 7 on the data bus \
+                                or a SETINI write differing from it, while the picture is drawn \
+                                (R10, R11). Observation \
                                 only: frames are identical. Loading a ROM turns it off again. \
                                 Drain with `take_hw_faults`."
     )]
