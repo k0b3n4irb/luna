@@ -7,6 +7,14 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ## [Unreleased]
 
+- `luna strict` gets two rules, **R10** and **R11**: the early latch of `$2100` (INIDISP) and `$2133` (SETINI). A CPU
+  write to `$2100` with bit 7 on the data bus and bit 7 clear in the value, or to `$2133` over a bus byte that differs in
+  bit 1 or 6, while the picture is drawn. The source is the hardware tests of undisbeliever/snes-test-roms, not a
+  reference emulator (neither ares nor Mesen2 models it); the SETINI exemption of `VBlank` and forced blank is a
+  hypothesis. HDMA-driven writes are out of reach. `tools/fetch-undisbeliever-roms.sh` builds the test ROMs (pinned
+  sources, not vendored) and `strict_undis` checks them, in CI; the Peter Lemon corpus (88 ROMs) raises neither rule; of 41 commercial ROMs, two raise R10, a few
+  times each, and both are a long-addressed `sta.l $802100` (bank byte `$80` on the bus) in picture time: the very
+  pattern the author's test names, so a finding, not a false positive. Rule lists in the CLI, API and MCP now read R1-R6, R8-R11.
 - A SPC700 that executes `STOP` no longer freezes the S-DSP and the timers, and the heuristic mailbox stub that took over
   `$2140-$2143` is gone. ares idles the stopped SMP core (`read(PC); idle()`), each idle cycle clocking the timers and
   the DSP, so only the core halts and the ports keep the last value the SPC wrote (the stub echoed the CPU's writes

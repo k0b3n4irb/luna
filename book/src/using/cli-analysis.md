@@ -1209,6 +1209,8 @@ proves it on any ROM).
 | R6 | DMA between WRAM and `$2180`: the B side does not happen. | ares `cpu/dma.cpp` `transfer` |
 | R8 | Manual read of `$4016` / `$4017` while the auto-joypad read runs (`$4212` bit 0). | ares `cpu/io.cpp` |
 | R9 | Read of `$4218-$421F` while the auto-joypad read runs (`$4212` bit 0): the registers are the shift registers the console is filling, so the value is a partial word (zero at the start, one more bit every 256 master clocks, 4224 in all). Wait for the flag to fall, as the SDK does. | ares `cpu/io.cpp`, `cpu/timing.cpp` `joypadEdge`; Mesen2 `SnesReadDuringAutoJoy` |
+| R10 | CPU write to `$2100` (INIDISP) while the picture is drawn (`HBlank` included) with bit 7 on the data bus just before the write and bit 7 clear in the value: the PPU latches the register early, from the previous bus byte, and on a three-chip console corrupts sprite tile data. Mitigation: a write whose preceding bus byte has bit 7 clear (`sta $0f2100`, not `sta $802100`), or a value with bit 7 set. | the author's hardware tests (`inidisp-d7-glitch-test`, `inidisp-hammer-*`), not a reference emulator |
+| R11 | CPU write to `$2133` (SETINI) while the picture is drawn, where bit 1 or bit 6 of the value differs from the previous bus byte: the PPU may latch the register early and show the old bits (red or blue dots in Mode 7 EXTBG). | the author's hardware test (`setini-early-read-mode7ex`); the exemption of `VBlank` and forced blank is a **hypothesis** carried over from INIDISP, not a measurement |
 
 `VBlank` starts on line 225 (240 with overscan, `$2133` bit 2): a write on
 line 224 is a fault, on line 225 it is not. A DMA is judged byte by byte, at
@@ -1220,6 +1222,33 @@ begins on the last picture lines is reported only on the bytes before line
 because no reference settles them: the effect of a DMA to a B-bus register
 with no device, and open-bus values. There is no R7: that number was never issued, the first commit goes from R6 to R8, then R9.
 
+**R10 and R11 cite the author's hardware tests, not a reference emulator.** Neither ares
+(`ppu/io.cpp`) nor Mesen2 (`SnesPpu.cpp`) models the early latch, so these two rules rest on
+undisbeliever's test ROMs (`snes-test-roms`, Zlib), run on real consoles and described in their
+sources. `tools/fetch-undisbeliever-roms.sh` builds the ones the tests use, and
+`cargo test -p luna-cli --test strict_undis` checks the verdicts. A worked example:
+
+```
+$ luna strict inidisp-hammer-0f8f.sfc            # stx $20ff: $8f on the bus, then $0f to $2100
+R10 pc=$80:A34F $2100 cpu x106037 (first: frame 6 line 114 h 180)  ...early latch
+$ luna strict inidisp-hammer-0f-long.sfc         # sta $802100: the bank byte $80 is on the bus
+R10 pc=$80:A34E $2100 cpu x145803 ...
+$ luna strict inidisp-hammer-long-0f2100.sfc     # sta $0f2100: the mitigation
+strict: no hardware fault in 30 frame(s)
+$ luna strict setini-early-read-mode7ex.sfc
+R11 pc=$80:86AB $2133 cpu x147999 ...
+```
+
+Run over a local corpus of 41 commercial ROMs (600 frames each), R10 fires on two, one to four times each, and R11 on none; both
+R10 sites are a `sta.l $802100` with a value whose bit 7 is clear, in picture time: the pattern the author's test
+flags, written by professionals who could not know it. Over the 88 Peter Lemon test ROMs, neither rule fires.
+
+The limits, stated as such: the rules see CPU writes only. `setini-early-read-obj` (and the
+`inidisp-early-read-glitch-hdma` ROMs) write the register through HDMA, whose bus writes luna
+does not judge here, so `luna strict` stays silent on them. That the glitch needs the data bus
+byte of the *previous* cycle is the author's measurement; that `VBlank` and forced blank spare
+SETINI as they spare INIDISP is a hypothesis.
+
 Exit code: `0` = no fault, `1` = at least one (or a core panic), `2` = the
 ROM cannot be loaded. `--json` prints `{rom, frames, ok, occurrences,
 overflow, faults: [{rule, what, pc, addr, origin, frame, line, hclock,
@@ -1228,7 +1257,7 @@ faults are kept; `overflow` counts the others. `luna run --strict-hw` prints the
 after the final state (exit 1 on a fault), and the MCP tools `enable_hw_strict` /
 `take_hw_faults` give it to a client (a `load_rom` turns the journal off).
 
-**VRAM provenance: sprite tiles nobody filled.** Besides R1-R6, R8 and R9, `luna strict` and
+**VRAM provenance: sprite tiles nobody filled.** Besides R1-R6 and R8-R11, `luna strict` and
 `luna run --strict-hw` tag every VRAM byte written through `$2118` / `$2119` with its
 writer (the instruction, or the DMA channel and its source, the frame, `OBSEL` at that
 moment; a write the active display drops tags nothing). Once per frame the journal then

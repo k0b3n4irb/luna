@@ -310,3 +310,42 @@ jobs:
         with:
           name: oracle-json
           path: ORACLE.json
+
+  # ---------------------------------------------------------------------
+  # R10 / R11 of `luna strict` against the hardware-glitch test ROMs of
+  # undisbeliever/snes-test-roms (Zlib). Its own job, so the main `test` job
+  # does not wait for an assembler build: the ROMs are assembled from pinned
+  # sources by tools/fetch-undisbeliever-roms.sh (bass-untech needs g++, the
+  # resource converters need Pillow) and cached on that script's hash.
+  # ---------------------------------------------------------------------
+  strict-undis:
+    name: strict-undis
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # Absolute, as for the golden corpus: actions/cache rejects `..`.
+      LUNA_UNDIS_TEST_DIR: ${{ github.workspace }}/.luna_tests_undis
+      # A missing ROM is a FAILURE here, never a silent skip.
+      LUNA_UNDIS_TEST_REQUIRE: "1"
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install ALSA headers (cpal → alsa-sys)
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libudev-dev
+      - name: Install the Rust toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: strict-undis
+      - name: Cache the built ROMs
+        id: undis-cache
+        uses: actions/cache@v6
+        with:
+          path: ${{ github.workspace }}/.luna_tests_undis
+          key: strict-undis-${{ hashFiles('tools/fetch-undisbeliever-roms.sh') }}
+      - name: Build the ROMs (on cache miss)
+        if: steps.undis-cache.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get install -y python3-pil
+          tools/fetch-undisbeliever-roms.sh
+      - name: R10 / R11 against the author's ROMs
+        run: cargo test -p luna-cli --test strict_undis
