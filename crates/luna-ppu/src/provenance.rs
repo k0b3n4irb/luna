@@ -15,9 +15,10 @@
 //! (OBJ) tiles, the 4 bpp tiles `OBSEL` addresses:
 //!
 //! * **S1** — the sprite draws a tile no write ever touched since the
-//!   journal was switched on, and the tile holds a non-zero pixel. The
-//!   contents come from the power-on state of VRAM, which a console does
-//!   not define.
+//!   journal was switched on, whatever the tile holds (with the default
+//!   zero power-on it is blank, which hides nothing: the rule is "drawn
+//!   and never written"). The contents come from the power-on state of
+//!   VRAM, which a console does not define.
 //! * **S4** — the tile was last written while `OBSEL` addressed OBJ
 //!   character data differently (name base or name select, bits 0-4) than
 //!   it does now: the upload was made for another layout.
@@ -88,7 +89,7 @@ pub struct VramTileTag {
 /// Why a sprite tile is reported.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum VramProvReason {
-    /// S1 — drawn, non-zero, never written.
+    /// S1 — drawn and never written (whatever the tile holds).
     NeverWritten,
     /// S4 — written under another `OBSEL` address layout.
     ObselChanged,
@@ -109,7 +110,7 @@ impl VramProvReason {
     pub const fn summary(self) -> &'static str {
         match self {
             Self::NeverWritten => {
-                "sprite tile drawn with non-zero pixels but never written: its content is the power-on VRAM"
+                "sprite tile drawn but never written: its content is the power-on VRAM"
             }
             Self::ObselChanged => {
                 "sprite tile written under another OBSEL character layout than the one that draws it"
@@ -303,13 +304,17 @@ impl Ppu {
         frame: u64,
     ) {
         let tag = prov.tags[off / TILE_BYTES];
-        // A zero tile draws nothing: no pixel can be wrong.
-        if (0..TILE_BYTES).all(|i| self.vram.peek(((off + i) & 0xFFFF) as u16) == 0) {
-            return;
-        }
         let reason = match tag {
+            // S1 is judged on "drawn and never written", whatever the
+            // tile holds: with the default zero power-on VRAM it is blank,
+            // but a console does not define it.
             None => VramProvReason::NeverWritten,
             Some(t) if (t.obsel ^ self.obsel) & OBSEL_ADDRESS_BITS != 0 => {
+                // A blank tile written under another layout draws nothing:
+                // no pixel can be wrong.
+                if (0..TILE_BYTES).all(|i| self.vram.peek(((off + i) & 0xFFFF) as u16) == 0) {
+                    return;
+                }
                 VramProvReason::ObselChanged
             }
             Some(_) => return,
@@ -396,9 +401,23 @@ mod tests {
     }
 
     #[test]
-    fn a_blank_tile_never_written_draws_nothing_wrong() {
+    fn a_blank_tile_never_written_is_flagged_all_the_same() {
+        // The zero power-on VRAM makes the tile transparent, but a console
+        // does not define it: S1 does not look at the content.
         let mut p = ppu_with_sprite(0, 0, 0);
-        assert!(reports(&mut p, 1).is_empty());
+        let r = reports(&mut p, 1);
+        assert_eq!(r.len(), 1, "{r:?}");
+        assert_eq!(r[0].reason, VramProvReason::NeverWritten);
+        // Written with zeros by a DMA/port write: clean.
+        let mut q = ppu_with_sprite(0, 0, 0);
+        q.write(register::VMAIN, 0x80);
+        q.write(register::VMADDL, 0);
+        q.write(register::VMADDH, 0);
+        for _ in 0..16 {
+            q.write(register::VMDATAL, 0);
+            q.write(register::VMDATAH, 0);
+        }
+        assert!(reports(&mut q, 1).is_empty());
     }
 
     #[test]
@@ -460,7 +479,9 @@ mod tests {
     #[test]
     fn only_the_address_bits_of_obsel_count_for_s4() {
         let mut p = ppu_with_sprite(0, 0, 0);
-        upload(&mut p, 0, 32);
+        // Size 3 makes sprite #0 16x16: tiles 0, 1, 16 and 17 (word 16 n).
+        upload(&mut p, 0, 64);
+        upload(&mut p, 256, 64);
         p.write(register::OBSEL, 0x60); // sprite size only
         assert!(reports(&mut p, 1).is_empty());
     }

@@ -168,3 +168,56 @@ fn strict_refuses_a_poke_the_run_never_reaches() {
     assert_eq!(o.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&o.stderr).contains("never reached arrival"));
 }
+
+/// Forced blank; one visible sprite (OAM entry 0 at X = 10, Y = 20, tile 0,
+/// the 127 others parked at Y = 240); screen on; wait forever. `fill` is the
+/// VRAM word written to tile 0 first (`None`: no VRAM write at all).
+fn sprite_rom(fill: Option<u8>) -> Vec<u8> {
+    let mut c: Vec<u8> = vec![0xA9, 0x80, 0x8D, 0x00, 0x21]; // forced blank
+    c.extend([0x9C, 0x02, 0x21, 0x9C, 0x03, 0x21]); // OAMADD = 0
+    c.extend([0xA9, 10, 0x8D, 0x04, 0x21, 0xA9, 20, 0x8D, 0x04, 0x21]); // X, Y
+    c.extend([0x9C, 0x04, 0x21, 0x9C, 0x04, 0x21]); // tile 0, attr 0
+    c.extend([0xA2, 127]); // LDX #127
+    let loop_at = c.len();
+    c.extend([0x9C, 0x04, 0x21, 0xA9, 0xF0, 0x8D, 0x04, 0x21]); // X=0, Y=240
+    c.extend([0x9C, 0x04, 0x21, 0x9C, 0x04, 0x21, 0xCA]); // tile, attr, DEX
+    let back = (loop_at as isize - (c.len() as isize + 2)) as i8;
+    c.extend([0xD0, back as u8]);
+    if let Some(v) = fill {
+        c.extend([
+            0xA9, 0x80, 0x8D, 0x15, 0x21, 0x9C, 0x16, 0x21, 0x9C, 0x17, 0x21,
+        ]);
+        c.extend([
+            0xA2, 16, 0xA9, v, 0x8D, 0x18, 0x21, 0x8D, 0x19, 0x21, 0xCA, 0xD0, 0xF5,
+        ]);
+    }
+    c.extend([0xA9, 0x0F, 0x8D, 0x00, 0x21, 0x80, 0xFE]); // screen on; spin
+    c
+}
+
+#[test]
+fn strict_flags_a_drawn_sprite_tile_no_write_filled_even_with_the_zero_power_on() {
+    let dir = setup("s1");
+    let rom = dir.join("s1.sfc");
+    write_rom(&rom, &sprite_rom(None));
+    let o = luna(&["strict", "--frames", "5"], &rom);
+    let out = String::from_utf8_lossy(&o.stdout);
+    assert_eq!(o.status.code(), Some(1), "{out}");
+    assert!(out.contains("S1 tile $0000 sprite #0"), "{out}");
+}
+
+#[test]
+fn strict_is_quiet_when_the_sprite_tile_was_written_blank_or_not() {
+    let dir = setup("s1-quiet");
+    let rom = dir.join("s1-quiet.sfc");
+    for fill in [0x00u8, 0xFF] {
+        write_rom(&rom, &sprite_rom(Some(fill)));
+        let o = luna(&["strict", "--frames", "5"], &rom);
+        assert_eq!(
+            o.status.code(),
+            Some(0),
+            "fill {fill:#x}: {}",
+            String::from_utf8_lossy(&o.stdout)
+        );
+    }
+}

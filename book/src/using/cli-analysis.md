@@ -1183,7 +1183,7 @@ luna cart-check --json "game.sfc" | jq '.findings[] | select(.severity != "info"
 
 ```
 luna strict [--frames N] [--json] [--force-mapper M] [--force-region R]
-            [--input S] [--input2 S] [--input-at ROUTINE]
+            [--power-on S] [--input S] [--input2 S] [--input-at ROUTINE]
             [--poke-at ROUTINE [--poke-hit N] --poke NAME=HEX]... [--sym FILE] <ROM>
 ```
 
@@ -1236,14 +1236,14 @@ judges the sprite tiles the picture draws:
 
 | Rule | Finding |
 |---|---|
-| S1 | A visible sprite draws a tile that holds a non-zero pixel and that no write touched since power-on. Its content is the power-on VRAM, which a console does not define, so a cartridge can show something else than the emulator. |
+| S1 | A visible sprite draws a tile that no write touched since power-on, whatever that tile holds (blank included: with the default zero power-on a never-written tile is transparent, yet a console shows its undefined content). Its content is the power-on VRAM, which a console does not define, so a cartridge can show something else than the emulator. |
 | S4 | The tile was last written while `OBSEL` (name base and name select, bits 0-4) put the OBJ character data elsewhere than it does now: the upload was made for another layout. |
 
 One line per distinct (rule, tile), with the first sprite that drew it and the last write:
 
 ```bash
 luna strict "game.sfc" --frames 600
-# S1 tile $6A40 sprite #12 (char $0A2) obsel $63 (first: frame 2)  sprite tile drawn with non-zero pixels but never written: its content is the power-on VRAM  [never written]
+# S1 tile $6A40 sprite #12 (char $0A2) obsel $63 (first: frame 2)  sprite tile drawn but never written: its content is the power-on VRAM  [never written]
 # S4 tile $4000 sprite #3 (char $000) obsel $03 (first: frame 41)  sprite tile written under another OBSEL character layout than the one that draws it  [last write dma0 pc=$00:8120 src=$01:C000 frame 1 obsel $63, 32/32 byte(s)]
 # strict: 0 fault site(s), 0 occurrence(s), 2 sprite tile finding(s) in 600 frame(s)
 luna strict "game.sfc" --json | jq '.vram_provenance.entries[] | select(.rule == "S1")'
@@ -1262,7 +1262,11 @@ What the check does not see, on purpose:
   that point and needed in the same frame.
 - Sprite visibility is **approximate**: the 32 sprites / 34 slivers per line limits are
   not modelled, so a tile of a sprite the line drops still counts.
-- S1 is **per tile** (32 bytes): a tile written in part counts as written.
+- S1 is **per tile** (32 bytes): a tile written in part counts as written. It does not look at
+  the content, so it fires with the default zero power-on too; `--power-on random` is not
+  needed to see it, only to see what the console might show instead. A sprite the game never
+  parked (OAM at power-on holds sprites at X = 0, Y = 0) draws tile 0: initialise the OAM or
+  hide the sprites (Y = 240) before the screen goes on.
 - The journal must be **on before the ROM runs**: `strict` and `--strict-hw` do it, but over
   MCP, call `enable_vram_provenance` right after `load_rom` (a `load_rom` turns it off). A tile
   written before the switch reads as never written.

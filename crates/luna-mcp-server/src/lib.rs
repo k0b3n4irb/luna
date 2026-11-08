@@ -5048,7 +5048,7 @@ impl LunaServer {
                                 (CPU or DMA/HDMA channel, pc, source, frame, OBSEL), a write \
                                 dropped by the active display tags nothing. Once a frame, at the \
                                 first visible line, the sprite tiles the picture draws are \
-                                judged: S1 = non-zero tile never written (power-on content), \
+                                judged: S1 = drawn tile never written (power-on content, blank or not), \
                                 S4 = written under another OBSEL character layout. Switch on \
                                 before the ROM runs. Observation only: frames are identical. \
                                 Loading a ROM turns it off. Drain with `take_vram_provenance`."

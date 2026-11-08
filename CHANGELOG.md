@@ -7,6 +7,11 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ## [Unreleased]
 
+- `luna strict` rule **S1** (sprite tile never written) is judged on "drawn and never written", whatever the tile
+  holds. It used to need a non-zero pixel, and the default zero power-on VRAM makes a never-written tile blank, so
+  the rule was silent unless `--power-on random` was given. A ROM whose visible sprite draws a tile no write
+  ever filled now exits 1 with no option. A tile written with zeros is still clean. S4 still skips a blank tile.
+
 - The auto-joypad read is a sequence on the beam, as on the console and in ares and Mesen2. It begins at the
   first multiple of 256 master clocks at or after H130 of the first V-blank line, lasts 4224 master clocks
   (`$4212` bit 0 is set for that long), and fills `$4218-$421F` progressively: zeroed at the start, then one
