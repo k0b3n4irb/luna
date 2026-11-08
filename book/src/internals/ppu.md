@@ -304,9 +304,9 @@ palette entry (`$2121` / `$2122`) and the Mode 7 matrix (`$211B`,
 
 ### 7.3 Auto-joypad-read ($4200 bit 0)
 
-Fires at scanline `vdisp + 2.5` (NTSC line 227.5) when bit 0 of `$4200` is set. Reads `$4016/$4017` 16 times, writes the resulting bit-shifted-in values to `$4218..$421F`.
+Runs when bit 0 of `$4200` is set, as a sequence of 33 steps of 128 master clocks (4224 in all) that begins at the first multiple of 256 master clocks at or after H130 of the first V-blank line (ares `joypadEdge`). `$4218..$421F` are zeroed at the start, then one bit of each pad is shifted in per 256 clocks, MSB first: a read during the sequence sees a partial word.
 
-While the auto-read is in progress, `$4212` bit 0 reads 1 ("auto-joypad-read busy").
+While the sequence runs, `$4212` bit 0 reads 1 ("auto-joypad-read busy"); `luna strict` rule R9 flags a read of `$4218-$421F` then.
 
 ### 7.4 HVBJOY ($4212)
 

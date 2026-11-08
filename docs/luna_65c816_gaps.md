@@ -131,6 +131,7 @@ and Mesen2's per-cycle `DetectNmiSignalEdge` do (#1, #2 below).
 | 3 | 🔧 | **Dummy bus cycles in the interrupt sequence** — **fixed 2026-09-19** (`ad8855f`, shipped in v1.25.0). ares `interrupt()` opens with `read(PC.d); idle();` before the pushes; luna omitted both, so a hardware NMI/IRQ took 6 bus cycles in native mode where hardware takes 8 — every handler started 14 mclk early. `hardware_interrupt_entry` now performs them, called from `service_nmi`/`service_irq` only (BRK/COP correctly keep the short sequence). The trailing `idleJump()` is owed nothing: it is an empty virtual in `wdc65816.hpp:12` that the SNES CPU never overrides. This was the root cause of PPU gap #7b (HiColor128, now pixel-exact). | `instruction.cpp:1-14`, `wdc65816.hpp:12` | `opcodes.rs` `hardware_interrupt_entry`; test `hardware_interrupts_spend_two_cycles_brk_does_not` |
 | 4 | 🟡 | **WAI resume granularity.** luna advances the bus in fixed `WAI_TICK_MCYCLES` (8 mclk) chunks while waiting, so wake latency is quantized rather than single-cycle. Harmless for the `WAI; BRA -3` VBlank idiom. | single `idle()` loop | `opcodes.rs:64` |
 | 5 | 🟡 | **Post-DMA interrupt delay — the references disagree.** Mesen2 delays NMI/IRQ recognition by one cycle after a DMA/HDMA burst (`SnesCpu.cpp:124-128`, `SnesCpu.Shared.h:323-346`). ares has the same field, `status.irqLock`, set by `dmaRun` / `hdmaSetup` / `hdmaRun` and on a `$4200` write — but `CPU::step()` clears it at its top and every access and DMA step calls `step()`, so it is **always 0** by the time any `lastCycle()` runs. It is dead code as ares is written. luna follows ares and does not implement it; adopting Mesen2's live rule would be a separate, separately-measured change. | ares `timing.cpp:12`, `dma.cpp:21,32,40`, `irq.cpp:49,89` vs Mesen2 as above | not implemented (deliberate) |
+| 6 | 🟡 | **Auto-joypad read: the pad is captured once.** ares latches the port at counter 0 and re-reads the data line on every even counter (`autoJoypadPort1 = controllerPort1.data()`), so a button changed *during* the 4224-clock window can reach the shift register on hardware. luna samples every device at the start edge and shifts that word in. The sequence itself (start phase, 33 edges of 128 clocks, zero at the start, busy flag) is the references'. A pad changing inside the window is a sub-frame event no script or host produces. | `cpu/timing.cpp:144-196`; Mesen2 `InternalRegisters.cpp:62-147` | `cpu_regs.rs` `joypad_edge`, `sample_auto_read` (deliberate) |
 
 ---
 
@@ -142,9 +143,10 @@ either. The instruction core is machine-proven (Tom Harte 5,079,754 / 5,120,000 
 interrupt path is now a faithful port end to end: the lines, the sampling
 point, the `I` mask's position, and the entry sequence.
 
-What remains is one quantisation (#4, `WAI` on an 8-mclk grid) and one
+What remains is one quantisation (#4, `WAI` on an 8-mclk grid), one
 place where the two references genuinely disagree (#5), where we follow
-ares. Both are timing-only, with no known game impact.
+ares, and one deliberate simplification of the auto-joypad read (#6, the pad
+is captured once per sequence). All are timing-only, with no known game impact.
 
 ## History
 

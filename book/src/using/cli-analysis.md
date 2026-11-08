@@ -1208,6 +1208,7 @@ proves it on any ROM).
 | R5 | DMA or HDMA access to the A-bus zone the hardware blocks in banks `$00-$3F` / `$80-$BF` (`$2100-$21FF`, `$4000-$41FF`, `$4200-$421F`, `$4300-$437F`): reads as 0, a write is dropped. | ares `cpu/dma.cpp` `validA` |
 | R6 | DMA between WRAM and `$2180`: the B side does not happen. | ares `cpu/dma.cpp` `transfer` |
 | R8 | Manual read of `$4016` / `$4017` while the auto-joypad read runs (`$4212` bit 0). | ares `cpu/io.cpp` |
+| R9 | Read of `$4218-$421F` while the auto-joypad read runs (`$4212` bit 0): the registers are the shift registers the console is filling, so the value is a partial word (zero at the start, one more bit every 256 master clocks, 4224 in all). Wait for the flag to fall, as the SDK does. | ares `cpu/io.cpp`, `cpu/timing.cpp` `joypadEdge`; Mesen2 `SnesReadDuringAutoJoy` |
 
 `VBlank` starts on line 225 (240 with overscan, `$2133` bit 2): a write on
 line 224 is a fault, on line 225 it is not. A DMA is judged byte by byte, at
@@ -1217,7 +1218,7 @@ lines (the ones the console loses, and luna loses too), and a burst that
 begins on the last picture lines is reported only on the bytes before line
 225. `--dma-trace` shows the end of each burst (`end_line`, `end_hclock`). Two rules were left out
 because no reference settles them: the effect of a DMA to a B-bus register
-with no device, and open-bus values. There is no R7: that number was never issued, the first commit goes from R6 to R8.
+with no device, and open-bus values. There is no R7: that number was never issued, the first commit goes from R6 to R8, then R9.
 
 Exit code: `0` = no fault, `1` = at least one (or a core panic), `2` = the
 ROM cannot be loaded. `--json` prints `{rom, frames, ok, occurrences,
@@ -1227,7 +1228,7 @@ faults are kept; `overflow` counts the others. `luna run --strict-hw` prints the
 after the final state (exit 1 on a fault), and the MCP tools `enable_hw_strict` /
 `take_hw_faults` give it to a client (a `load_rom` turns the journal off).
 
-**VRAM provenance: sprite tiles nobody filled.** Besides R1-R8, `luna strict` and
+**VRAM provenance: sprite tiles nobody filled.** Besides R1-R6, R8 and R9, `luna strict` and
 `luna run --strict-hw` tag every VRAM byte written through `$2118` / `$2119` with its
 writer (the instruction, or the DMA channel and its source, the frame, `OBSEL` at that
 moment; a write the active display drops tags nothing). Once per frame the journal then

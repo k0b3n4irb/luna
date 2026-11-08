@@ -105,13 +105,14 @@ Hotkey: `F12` saves a screenshot, remappable under
 
 ## Auto-read + manual-mode behaviour
 
-The SNES auto-read latch fires once per VBlank (line 225, or 240 when the game enables overscan, on either region)
-when `NMITIMEN.0` is set; the same pulse also re-arms the manual-mode
+The SNES auto-read runs once per VBlank (it starts a few dots into line 225, or 240 when the game enables overscan, on
+either region) when `NMITIMEN.0` is set. It takes 4224 master clocks, during which `$4212` bit 0 is set and
+`$4218-$421F` fill bit by bit: read them once the flag has fallen. The same VBlank entry also re-arms the manual-mode
 `$4016`/`$4017` shift register (matching the hardware's controller-port latch).
 
 Real hardware physically locks out conflicting D-pad directions
 (Up + Down, Left + Right) — luna drops both opposing bits when the
-auto-read latches.
+auto-read starts.
 
 ## Remap dialog
 

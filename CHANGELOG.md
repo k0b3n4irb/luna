@@ -7,6 +7,16 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ## [Unreleased]
 
+- The auto-joypad read is a sequence on the beam, as on the console and in ares and Mesen2. It begins at the
+  first multiple of 256 master clocks at or after H130 of the first V-blank line, lasts 4224 master clocks
+  (`$4212` bit 0 is set for that long), and fills `$4218-$421F` progressively: zeroed at the start, then one
+  bit shifted in per 256 clocks, MSB first. A read of `$4218` inside the window sees a partial word (a power of
+  two for a held button); luna used to copy the final value at V-blank entry and drop the busy flag three
+  lines later. The NMI-to-busy phase and the busy duration therefore move. The save-state format is v10
+  (the sequence position and the word being shifted in), and `luna-api`'s `joy1` / `joy2` are the live
+  registers. `luna strict` has a new rule **R9**: a CPU read of `$4218-$421F` while `$4212` bit 0 is set (the
+  value is a partial word; wait for the flag to fall). Known deviation, in `docs/luna_65c816_gaps.md` #6: the
+  pad is captured at the first edge, where ares samples the port at every even counter.
 - The guide and the reference docs state one Tom Harte figure, the measured one: 65C816 5,079,754 / 5,120,000
   states (40,000 states of the four `MVN`/`MVP` files are not run, 246 contradict the dataset by choice),
   SPC700 256,000 / 256,000. No more "100%" or "hardware truth": the vectors come from a software model, not
