@@ -1268,6 +1268,35 @@ fn step_until_frame_returns_when_frame_count_changes_or_caps() {
 }
 
 #[test]
+fn a_stopped_cpu_ends_instruction_runs_but_not_frame_runs() {
+    // The ROM is `LDA #$42 ; STA $0000 ; STP`. The S-CPU dies
+    // there, the machine does not (ares loops `idle()`): a run bounded by
+    // a FRAME finishes its frame, one bounded by a COUNT has nothing to
+    // count and ends, unless the host (the GUI) asked to go through.
+    let mut e = Emulator::new();
+    e.load_rom_bytes(demo_lorom_with(&[0xA9, 0x42, 0x8D, 0x00, 0x00, 0xDB], None))
+        .unwrap();
+    assert_eq!(e.step(100).unwrap(), 3, "LDA, STA, STP");
+    assert!(e.cpu_state().unwrap().stopped);
+    assert_eq!(e.step(100).unwrap(), 0, "a count-bounded run ends on STP");
+    let f0 = e.state().scheduler.frame_count;
+    let n = e.step_until_frame(1_000_000).unwrap();
+    assert!(n > 1000, "idle ticks are steps: {n}");
+    assert_eq!(e.state().scheduler.frame_count, f0 + 1);
+    assert!(e.cpu_state().unwrap().stopped);
+    // A frame-or-PC run takes the frame too.
+    let stop = e
+        .run_to_pc_or_frame(&[0x00_9000], 1_000_000, false)
+        .unwrap();
+    assert_eq!(stop, PcStop::Frame);
+    // The GUI's batches go through.
+    e.set_run_through_stp(true);
+    let f1 = e.state().scheduler.frame_count;
+    assert_eq!(e.step(200_000).unwrap(), 200_000);
+    assert!(e.state().scheduler.frame_count > f1);
+}
+
+#[test]
 fn state_serialises_to_json() {
     let mut e = Emulator::new();
     e.load_rom_bytes(demo_lorom()).unwrap();

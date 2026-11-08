@@ -96,7 +96,12 @@ spin on `r.wai`/`r.stp`. luna models them as `waiting`/`stopped` flags
 consumed in `step()` (`opcodes.rs:37-61`). `WAI` wakes on **either** NMI
 or IRQ *regardless of the `I` flag* (the I flag only gates whether the
 handler is entered) — luna matches and documents the `SEI; WAI` idiom.
-`STP` halts until `reset()`.
+`STP` halts the S-CPU until `reset()` (ares: only `power()` clears `r.stp`),
+**but not the machine**: ares loops `idle()` there, and every idle cycle is a
+`step(6)` of the PPU, the DRAM refresh, HDMA, the auto-joypad and the APU.
+luna's stopped `Cpu::step` charges one 6-mclk idle tick per step
+(`STP_TICK_MCYCLES`), so frames, `$4210` and the SPC700 go on; the NMI is
+latched by the hardware and never serviced. Row 7 below.
 
 ### Emulation-mode stack confinement & reset
 
@@ -132,6 +137,7 @@ and Mesen2's per-cycle `DetectNmiSignalEdge` do (#1, #2 below).
 | 4 | 🟡 | **WAI resume granularity.** luna advances the bus in fixed `WAI_TICK_MCYCLES` (8 mclk) chunks while waiting, so wake latency is quantized rather than single-cycle. Harmless for the `WAI; BRA -3` VBlank idiom. | single `idle()` loop | `opcodes.rs:64` |
 | 5 | 🟡 | **Post-DMA interrupt delay — the references disagree.** Mesen2 delays NMI/IRQ recognition by one cycle after a DMA/HDMA burst (`SnesCpu.cpp:124-128`, `SnesCpu.Shared.h:323-346`). ares has the same field, `status.irqLock`, set by `dmaRun` / `hdmaSetup` / `hdmaRun` and on a `$4200` write — but `CPU::step()` clears it at its top and every access and DMA step calls `step()`, so it is **always 0** by the time any `lastCycle()` runs. It is dead code as ares is written. luna follows ares and does not implement it; adopting Mesen2's live rule would be a separate, separately-measured change. | ares `timing.cpp:12`, `dma.cpp:21,32,40`, `irq.cpp:49,89` vs Mesen2 as above | not implemented (deliberate) |
 | 6 | 🟡 | **Auto-joypad read: the pad is captured once.** ares latches the port at counter 0 and re-reads the data line on every even counter (`autoJoypadPort1 = controllerPort1.data()`), so a button changed *during* the 4224-clock window can reach the shift register on hardware. luna samples every device at the start edge and shifts that word in. The sequence itself (start phase, 33 edges of 128 clocks, zero at the start, busy flag) is the references'. A pad changing inside the window is a sub-frame event no script or host produces. | `cpu/timing.cpp:144-196`; Mesen2 `InternalRegisters.cpp:62-147` | `cpu_regs.rs` `joypad_edge`, `sample_auto_read` (deliberate) |
+| 7 | 🔧 | **A stopped S-CPU froze the whole machine** — **fixed 2026-11-08**. `Cpu::step` returned at once on `STP` without a bus cycle, so `Snes::step` consumed 0 mclk: `frame_count`, the PPU, the DRAM refresh, HDMA, the auto-joypad read and the APU all stood still, and every run loop had to end on `cpu.stopped`. ares' `instructionStop` is `while(r.stp && !synchronizing()) { L idle(); }` (verified in the indexed ares source 2026-11-08): each iteration is a `step(6)` that runs all of them. Now each stopped step is one 6-mclk idle tick (the frame edge is seen at that grain; a frame is 357368 mclk as under `WAI`). Mesen2 differs on one point (`ProcessHaltedState` advances the PPU and events but not DMA/HDMA, which need a CPU cycle); luna follows ares, and no test ROM tells them apart. Callers: frame-bounded runs (`step_until_frame`, `run_to_pc_or_frame`, so `run --frames`, input scripts, the CLI tools) now finish their frame after an `STP`; instruction-bounded ones (`step`, `run_until_pc`, breakpoint runs) still end on it (nothing left to count) unless the host asks to go through (`Emulator::set_run_through_stp`, set by the GUI). | `cpu/cpu.cpp` (`main`: `r.wai` then `r.stp`), `wdc65816/instructions-other.cpp` `instructionStop`, `cpu/timing.cpp` `idle`/`step`; Mesen2 `SnesCpu.cpp` `ProcessHaltedState` | `opcodes.rs` `Cpu::step`; tests `a_stopped_cpu_does_not_freeze_the_master_clock`, `stp_polls_once_then_idles_the_clock`, `a_stopped_cpu_ends_instruction_runs_but_not_frame_runs` |
 
 ---
 

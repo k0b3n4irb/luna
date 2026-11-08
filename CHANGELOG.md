@@ -7,6 +7,13 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ## [Unreleased]
 
+- A stopped S-CPU (`STP`) no longer freezes the machine. Until now `STP` ended all time: `frame_count`, the PPU, the DRAM
+  refresh, HDMA, the auto-joypad read and the APU stood still. ares loops `idle()` on it (each one a full 6-mclk step of
+  the machine), so now the frames go on, `$4210` bit 7 rises at every VBlank, the NMI is latched and never serviced (ares' stopped loop is `L idle()`), and
+  a frame lasts as long as under `WAI`. Frame-bounded runs (`step_until_frame`, `run --frames`, input scripts, the other
+  CLI tools, MCP `step_until_frame`) finish their frame after an `STP`; instruction-bounded ones (`step`, `run_until_pc`,
+  breakpoint runs) still end on it, except in the GUI, which now plays on (new `Emulator::set_run_through_stp`). The
+  latch the stopped CPU keeps polling into is dropped by a reset. The golden suite is unchanged (CPUMSC keeps its reset). `docs/luna_65c816_gaps.md` row 7.
 - The golden ROM suite now reads the reference PNG shipped with each test ROM and compares luna's stable picture with
   it at tolerance 0 (the hashes only said luna agreed with itself). 22 ROMs are pixel-exact, 21 are within one LSB (a
   named class: the reference's colour conversion differs, bounded at 1, provenance unverified), 12 are listed

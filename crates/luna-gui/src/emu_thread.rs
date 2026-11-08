@@ -369,6 +369,10 @@ fn run(
             // instruction-accounting service level); on a hit we stash it
             // for the UI, auto-pause, and publish the halt frame. With no
             // debugger in play the hot path is unchanged.
+            // A stopped S-CPU (`STP`) leaves the PPU, the APU and the
+            // frame counter running (ares loops `idle()` on it): the batch
+            // goes on through it, one idle tick per step.
+            em.set_run_through_stp(true);
             let step_res: Result<u64, luna_api::ApiError> = if emu_dead {
                 Ok(0)
             } else if shared.has_breakpoints.load(Ordering::Acquire) {

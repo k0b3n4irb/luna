@@ -22,6 +22,8 @@ use luna_cpu_65c816::flags::bit;
 struct CountingBus {
     mem: Vec<u8>,
     polls: u32,
+    /// Master cycles charged through `io_cycle`.
+    idle_mclk: u64,
 }
 
 impl CountingBus {
@@ -29,6 +31,7 @@ impl CountingBus {
         Self {
             mem: vec![0; 0x100_0000],
             polls: 0,
+            idle_mclk: 0,
         }
     }
 }
@@ -40,7 +43,9 @@ impl Bus for CountingBus {
     fn write(&mut self, addr: Addr24, value: u8) {
         self.mem[addr as usize & 0x00FF_FFFF] = value;
     }
-    fn io_cycle(&mut self, _mcycles: MCycles) {}
+    fn io_cycle(&mut self, mcycles: MCycles) {
+        self.idle_mclk += mcycles;
+    }
     fn last_cycle(&mut self, _i_flag: bool) -> InterruptSample {
         self.polls += 1;
         InterruptSample::NONE
@@ -189,17 +194,24 @@ fn wai_polls_on_every_stalled_step() {
     }
 }
 
-/// `STP` polls once, on the step that executes it. ares then loops
-/// `L idle()` forever, but a luna `Cpu` that has stopped does no bus work
-/// at all — the system loop (`Snes::step`) owns the halted clock instead,
-/// so there is no further poll to make.
+/// `STP` polls on the step that executes it, then keeps polling: ares
+/// `instructionStop` is `while(r.stp && ...) { L idle(); }`, and every one
+/// of those idle cycles is a `step(6)` of the whole machine. A stopped
+/// `Cpu` makes no bus access but charges one idle tick per step (the system
+/// clock must never stand still), with the poll that goes with it.
 #[test]
-fn stp_polls_once_then_the_cpu_is_halted() {
+fn stp_keeps_polling_and_idles_the_clock() {
     let mode = &MODES[1];
     let (mut cpu, mut bus) = setup(mode, 0xDB);
     cpu.step(&mut bus);
     assert_eq!(bus.polls, 1);
+    let after_stp = bus.idle_mclk;
     cpu.step(&mut bus);
     cpu.step(&mut bus);
-    assert_eq!(bus.polls, 1, "a halted CPU makes no further accesses");
+    assert_eq!(bus.polls, 3, "one poll per stopped tick");
+    assert_eq!(
+        bus.idle_mclk,
+        after_stp + 12,
+        "two stopped steps = two 6-mclk idle ticks"
+    );
 }

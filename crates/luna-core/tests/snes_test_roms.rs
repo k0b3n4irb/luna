@@ -225,9 +225,6 @@ fn settle(rom: Vec<u8>, hold: u16, region: luna_cartridge::Region, native: bool)
     'run: while executed < STEP_CAP && snes.frame_count < FRAME_CAP {
         let sample_at = snes.frame_count + SAMPLE_FRAMES;
         while snes.frame_count < sample_at && executed < STEP_CAP {
-            if snes.cpu.stopped {
-                break;
-            }
             if catch_unwind(AssertUnwindSafe(|| {
                 snes.step();
             }))
@@ -247,17 +244,14 @@ fn settle(rom: Vec<u8>, hold: u16, region: luna_cartridge::Region, native: bool)
             stable = 0;
             last = h;
         }
-        if snes.cpu.stopped {
-            break;
-        }
     }
 
     // A ROM that ends in `STP` is waiting for the RESET button: CPUMSC's own
     // banner reads "Please Reset To PASS STP", and it prints the STP row's PASS
     // only after it finds, at boot, that the last run ended on a stop. The
     // reference capture shipped with the ROM is taken after that reset, so the
-    // harness presses it too (a stopped CPU also freezes luna's clock, so the
-    // picture at the stop is a half-scanned one).
+    // harness presses it too (the reset is still needed: the machine runs on
+    // after an `STP`, but only a boot finds the stop and prints the PASS).
     if snes.cpu.stopped {
         snes.reset();
         if hold != 0 {
@@ -265,7 +259,7 @@ fn settle(rom: Vec<u8>, hold: u16, region: luna_cartridge::Region, native: bool)
         }
         let target = snes.frame_count + STP_RESET_FRAMES;
         let mut n = 0u64;
-        while snes.frame_count < target && n < STEP_CAP && !snes.cpu.stopped {
+        while snes.frame_count < target && n < STEP_CAP {
             if catch_unwind(AssertUnwindSafe(|| snes.step())).is_err() {
                 break;
             }

@@ -169,6 +169,11 @@ impl Cpu {
         self.pc = u16::from(lo) | (u16::from(hi) << 8);
         self.stopped = false;
         self.waiting = false;
+        // RESET overrides whatever was latched: a stopped CPU polls on
+        // every idle tick (ares `L idle()`), so it leaves `STP` holding an
+        // NMI nobody served, which must not run at the reset vector.
+        self.pending_nmi = false;
+        self.pending_irq = false;
     }
 
     // -------------------------------------------------------------------

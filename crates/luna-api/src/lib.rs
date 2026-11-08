@@ -1419,6 +1419,11 @@ pub struct Emulator {
     /// true minimum. It lives here rather than in `Snes` so the save-state
     /// shape is untouched — a measurement of the run, not of the machine.
     stack_low: Option<StackLow>,
+    /// Instruction-bounded runs go on through an `STP` instead of ending
+    /// there (see `run_core_with`). A host that paces itself by batches
+    /// (the GUI) sets it so a stopped S-CPU leaves the picture and the
+    /// sound of the rest of the machine alive.
+    run_through_stp: bool,
     /// Stable hash of the loaded ROM bytes, captured at `load_rom` time.
     /// A save state records this so [`Emulator::load_state`] can refuse a
     /// state produced against a different ROM.
@@ -1728,6 +1733,7 @@ impl Emulator {
             rom_info: None,
             instructions_executed: 0,
             stack_low: None,
+            run_through_stp: false,
             rom_hash: 0,
             symbols: None,
             labels: labels::LabelStore::new(),
@@ -2269,8 +2275,8 @@ impl Emulator {
     /// had: `run_until_pc` skipped the instruction count, freezes, the call
     /// stack and the profile; two others skipped the profile fold).
     ///
-    /// Runs up to `max_steps` instructions, ending early on a `STOP`ped
-    /// CPU, on `interrupt` (polled every 4096 instructions — invisible on
+    /// Runs up to `max_steps` instructions, ending early on a `STP`ped
+    /// CPU (see [`Self::run_core_with`]), on `interrupt` (polled every 4096 instructions — invisible on
     /// the run, responsive within microseconds), or when `before` (checked
     /// ahead of each instruction, with the count executed so far) or
     /// `after` (checked once it completed) returns a stop value. Each
@@ -2279,6 +2285,26 @@ impl Emulator {
     /// the end. A core panic is caught and surfaced as [`ApiError::Panic`].
     fn run_core<T>(
         &mut self,
+        max_steps: u64,
+        interrupt: Option<&std::sync::atomic::AtomicBool>,
+        before: impl FnMut(&Snes, u64) -> Option<T>,
+        after: impl FnMut(&mut Snes) -> Option<T>,
+    ) -> Result<RunCore<T>, ApiError> {
+        let end_on_stp = !self.run_through_stp;
+        self.run_core_with(end_on_stp, max_steps, interrupt, before, after)
+    }
+
+    /// [`Self::run_core`] with the `STP` policy spelled out. A stopped
+    /// S-CPU does not stop the machine (ares loops `idle()` on it: the PPU,
+    /// the APU and the frame counter run on), so what a run does at an
+    /// `STP` is the caller's contract. `end_on_stp = true`: an
+    /// instruction-bounded run (`step N`, `run_until_pc`, a breakpoint
+    /// run) has no more instructions to count and ends there.
+    /// `false`: a frame-bounded run keeps going, each idle tick being one
+    /// step, until its frame completes.
+    fn run_core_with<T>(
+        &mut self,
+        end_on_stp: bool,
         max_steps: u64,
         interrupt: Option<&std::sync::atomic::AtomicBool>,
         mut before: impl FnMut(&Snes, u64) -> Option<T>,
@@ -2309,7 +2335,7 @@ impl Emulator {
         let mut stack_low = self.stack_low.clone();
         let _quiet = QuietPanics::new();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            while executed < max_steps && !snes.cpu.stopped {
+            while executed < max_steps && !(end_on_stp && snes.cpu.stopped) {
                 if executed & 0xFFF == 0 && interrupt.is_some_and(|f| f.load(Ordering::Relaxed)) {
                     return (None, true);
                 }
@@ -2404,7 +2430,8 @@ impl Emulator {
         interrupt: &std::sync::atomic::AtomicBool,
     ) -> Result<u64, ApiError> {
         let start_frame = self.snes.as_ref().ok_or(ApiError::NoRom)?.frame_count;
-        let run = self.run_core(
+        let run = self.run_core_with(
+            false,
             max_steps,
             Some(interrupt),
             |snes, _| (snes.frame_count != start_frame).then_some(()),
@@ -2458,6 +2485,14 @@ impl Emulator {
             distinct_pcs: seen.len(),
             executed: run.steps,
         })
+    }
+
+    /// Let instruction-bounded runs (`step`, `run_until_break`…) go on
+    /// through an `STP` rather than end on it. Off by default: a script
+    /// counting instructions wants the stop. Frame-bounded runs
+    /// ([`Self::step_until_frame`]) always go on.
+    pub const fn set_run_through_stp(&mut self, on: bool) {
+        self.run_through_stp = on;
     }
 
     /// Take a JSON-serialisable snapshot of the entire observable
@@ -3952,7 +3987,8 @@ impl Emulator {
         let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
         let start_frame = snes.frame_count;
         let mirrored = self.rom_info.as_ref().is_none_or(|r| r.mapper != "ExHiRom");
-        let run = self.run_core(
+        let run = self.run_core_with(
+            false,
             max_steps,
             None,
             |snes, executed| {

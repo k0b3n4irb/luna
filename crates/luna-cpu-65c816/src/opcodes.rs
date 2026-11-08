@@ -33,6 +33,10 @@ use luna_bus::{Addr24, Bus, MCycles, make_addr};
 /// while still letting a frame complete in O(scanlines × dots).
 const WAI_TICK_MCYCLES: MCycles = 8;
 
+/// Master-cycle cost of one `STP` idle tick: ares `CPU::idle()` is a
+/// `step(6)` (one internal cycle), and the stopped CPU loops on it.
+const STP_TICK_MCYCLES: MCycles = 6;
+
 /// Opcodes that spend exactly one internal "dead" cycle with no operand
 /// bus access (ares `idleIRQ` — the implied / register-only 2-cycle ops).
 /// `step` charges this after the op runs. XBA (`0xEB`) is handled
@@ -58,7 +62,16 @@ const fn is_implied_io(opcode: u8) -> bool {
 impl Cpu {
     /// Execute one instruction: fetch opcode at `PB:PC` and dispatch.
     pub fn step<B: Bus>(&mut self, bus: &mut B) {
+        // STP: ares `instructionStop` parks in `while(r.stp && ...) {
+        // idle(); }` and only `power()` leaves it. The S-CPU is dead but
+        // every idle cycle is a full `step(6)` of the machine around it
+        // (PPU, DRAM refresh, HDMA, auto-joypad, APU), so the clock keeps
+        // running one idle tick per step. The loop is `L idle()`, so it
+        // polls like the WAI one does; the latch it sets is never served
+        // (nothing leaves the loop), which is what `pending_nmi` shows.
         if self.stopped {
+            self.last_cycle(bus);
+            bus.io_cycle(STP_TICK_MCYCLES);
             return;
         }
         // WAI: the CPU pauses until an interrupt arrives. A latched NMI

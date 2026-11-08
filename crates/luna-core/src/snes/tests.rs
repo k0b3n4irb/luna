@@ -843,7 +843,8 @@ fn mem_trace_tags_dma_writes_with_their_origin_and_fires_watchpoints() {
 #[test]
 fn profile_credits_each_pc_with_its_real_cost() {
     // LDA #$42 ; STA $7E:0000 ; STP — three PCs, then parked STP ticks
-    // (which cost nothing, are not instructions, and leave no sample).
+    // (6 idle mclk each, not instructions: they are credited, as idle
+    // time, to the PC the stopped core stands on).
     let mut snes = Snes::from_cartridge(demo_lorom());
     snes.reset();
     snes.enable_profile();
@@ -851,7 +852,11 @@ fn profile_credits_each_pc_with_its_real_cost() {
         snes.step();
     }
     let p = snes.take_profile();
-    assert_eq!(p.samples.len(), 3, "{p:?}");
+    assert_eq!(p.samples.len(), 4, "{p:?}");
+    let parked = p.samples[&0x00_8007];
+    assert_eq!(parked.instructions, 0, "a parked tick is no instruction");
+    assert_eq!(parked.mclk, 5 * 6, "five ticks of 6 mclk");
+    assert_eq!(parked.idle_mclk, parked.mclk, "all of it idle time");
     let lda = p.samples[&0x00_8000];
     let sta = p.samples[&0x00_8002];
     let stp = p.samples[&0x00_8006];
@@ -862,7 +867,7 @@ fn profile_credits_each_pc_with_its_real_cost() {
     // WRAM write (40 mclk); every cost is real master clocks, so the
     // long store costs more than the immediate load.
     assert!(sta.mclk > lda.mclk, "{p:?}");
-    assert_eq!(p.total_mclk(), lda.mclk + sta.mclk + stp.mclk);
+    assert_eq!(p.total_mclk(), lda.mclk + sta.mclk + stp.mclk + parked.mclk);
     assert_eq!(lda.idle_mclk, 0);
     // Taking empties; the profiler stays on.
     assert!(snes.take_profile().samples.is_empty());
@@ -2145,4 +2150,84 @@ fn auto_read_mid_window_read_sees_a_partial_word() {
         word != 0 && word != 0x8000 && word.is_power_of_two(),
         "a read inside the window sees the bits shifted in so far, got {word:#06x}"
     );
+}
+
+/// [`idle_lorom`] with `STP` where the `WAI` loop was, and an NMI handler
+/// that bumps a WRAM byte: `SEI ; LDA #$80 ; STA $4200 ; STP`, and at
+/// `$8010` `INC $0000 ; RTI`, both NMI vectors pointing there.
+fn stp_lorom() -> Cartridge {
+    let mut rom = idle_lorom().rom;
+    rom[..10].fill(0xEA);
+    let prog = [0x78, 0xA9, 0x80, 0x8D, 0x00, 0x42, 0xDB];
+    rom[..prog.len()].copy_from_slice(&prog);
+    let nmi = [0xEE, 0x00, 0x00, 0x40];
+    rom[0x10..0x10 + nmi.len()].copy_from_slice(&nmi);
+    for v in [0x7FEA, 0x7FFA] {
+        rom[v] = 0x10;
+        rom[v + 1] = 0x80;
+    }
+    Cartridge::from_bytes(rom).unwrap()
+}
+
+/// The master-clock span of `frames` consecutive frames after the first
+/// two, and whether `$4210` bit 7 (the NMI flag) was raised on the way.
+fn frame_spans(snes: &mut Snes, frames: u64) -> (Vec<u64>, bool) {
+    let mut guard = 0u32;
+    let mut marks = Vec::new();
+    let mut seen_flag = false;
+    let mut last = snes.frame_count;
+    while marks.len() < (frames + 2) as usize {
+        snes.step();
+        seen_flag |= snes.cpu_regs.nmi_flag;
+        if snes.frame_count != last {
+            last = snes.frame_count;
+            marks.push(snes.total_mclk);
+        }
+        guard += 1;
+        assert!(guard < 4_000_000, "frames never advanced");
+    }
+    let spans = marks.windows(2).skip(1).map(|w| w[1] - w[0]).collect();
+    (spans, seen_flag)
+}
+
+#[test]
+fn a_stopped_cpu_does_not_freeze_the_master_clock() {
+    const FRAME_MCLK: u64 = 262 * 1364;
+    // ares `instructionStop`: `while(r.stp && ...) { idle(); }` — the
+    // CPU sits in a loop of idle cycles, each one a full `step(6)` that
+    // runs the PPU, the DRAM refresh, HDMA, the auto-joypad and the APU.
+    // Only the S-CPU is dead; the machine around it lives.
+    let mut snes = Snes::from_cartridge(stp_lorom());
+    snes.reset();
+    for _ in 0..4 {
+        snes.step();
+    }
+    assert!(snes.cpu.stopped, "the program reaches STP");
+    let (stp_spans, nmi_flag_seen) = frame_spans(&mut snes, 3);
+    assert!(snes.cpu.stopped, "STP is only left by a reset");
+    assert!(
+        nmi_flag_seen,
+        "$4210 bit 7 rises at every VBlank while the CPU is stopped"
+    );
+    assert_eq!(
+        snes.wram[0], 0,
+        "the NMI is latched, never serviced: the handler must not run"
+    );
+
+    // The stopped CPU polled at every tick, so it holds an NMI nobody
+    // served; the Reset button drops it with the stop.
+    assert!(snes.cpu.pending_nmi, "the latch is set, and never served");
+    snes.reset();
+    assert!(!snes.cpu.stopped && !snes.cpu.pending_nmi);
+
+    // A frame is 262 lines of 1364 mclk. A step is the unit the frame edge
+    // is seen at (6 mclk for a stopped tick, 8 for a `WAI` one), so each
+    // measured span is the nominal one to within that granularity, and
+    // the same frames under a `WAI` loop agree with it.
+    let mut idle = Snes::from_cartridge(idle_lorom());
+    idle.reset();
+    let (wai_spans, _) = frame_spans(&mut idle, 3);
+    for span in stp_spans.iter().chain(&wai_spans) {
+        assert!(span.abs_diff(FRAME_MCLK) < 8, "span {span}");
+    }
 }
