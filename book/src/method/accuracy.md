@@ -31,16 +31,19 @@ as any accuracy fix. They measure correspondence with the two reference
 emulators, not code quality: **A** is a faithful port whose residuals are
 below what can be observed, **A−** a faithful port with named residuals
 and no known effect on a game, **B+** correct on everything tested with
-corners not yet audited.
+corners not yet audited. No subsystem holds an **A** or **A−** while its gap
+document carries an open row: the APU after `STOP`, the SA-1 `$2202`
+placeholder and the open DMA/HDMA audit rows are why those four rows are
+**B+**.
 
 | Subsystem | Grade | In this guide |
 |---|:---:|---|
 | CPU 65c816 | **A−** | [The CPUs](../internals/cpus.md#65c816--the-main-cpu) |
-| SPC700 | **A−** | [The CPUs](../internals/cpus.md#spc700--the-audio-cpu) |
-| S-DSP (audio) | **A** | [The APU](../internals/apu.md) |
+| SPC700 | **B+** | [The CPUs](../internals/cpus.md#spc700--the-audio-cpu) |
+| S-DSP (audio) | **B+** | [The APU](../internals/apu.md) |
 | PPU | **A** | [The PPU](../internals/ppu.md) |
-| DMA / HDMA | **A−** | [Memory, DMA & the bus](../internals/memory-dma-bus.md#dma--hdma) |
-| SA-1 | **A−** | [SA-1](../internals/coprocessors-sa1.md) |
+| DMA / HDMA | **B+** | [Memory, DMA & the bus](../internals/memory-dma-bus.md#dma--hdma) |
+| SA-1 | **B+** | [SA-1](../internals/coprocessors-sa1.md) |
 | Super FX (GSU) | **A−** | [Super FX](../internals/coprocessors-superfx.md) |
 | DSP-1 (uPD7725) | **A−** | [Coprocessors](../internals/coprocessors.md#dsp-1) |
 | S-DD1 | **A−** | [S-DD1](../internals/coprocessors-sdd1.md) |

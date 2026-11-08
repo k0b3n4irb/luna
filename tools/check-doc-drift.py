@@ -25,6 +25,14 @@ claim is about, and fails when they disagree:
   grades     every grade the guide shows is the scorecard's: the
              `**A−** (scorecard: *Row*)` form on a subsystem page, and the
              table of `method/accuracy.md`, which carries every row.
+             No grade A or A− while a gap document the scorecard row cites
+             carries an open row (a table row marked ⚠️, not struck through).
+  tomharte   every Tom Harte figure the docs cite is the harness's: the
+             65C816 states passing / in the dataset, parsed from
+             `crates/luna-cpu-65c816/tests/tom_harte.rs` (EXPECTED_FILES ×
+             CASES_PER_FILE, less UNGATEABLE_FILES and CONTESTED_STATE), the
+             SPC700's from its own harness; no "100%" on a Tom Harte line,
+             no "hardware truth".
   changelog  every `--option` the CHANGELOG adds under `[Unreleased]` or the
              head version is named in the guide (a new option lands with
              its example, not just a CHANGELOG line).
@@ -398,6 +406,84 @@ def check_grades() -> list[str]:
     for row in shown:
         if row not in scorecard:
             fails.append(f"{rel(page)}: '{row}' is not a scorecard row")
+    # no A / A- while a cited gap document has an open row
+    open_rows = {}
+    for line in read(SCORECARD).splitlines():
+        m = re.match(rf"^\| ([^|]+?) \| \*\*({GRADE})\*\* \|", line)
+        if not m or not m.group(2).startswith("A"):
+            continue
+        for link in sorted(set(re.findall(r"\]\(([^)#]+\.md)", line))):
+            if link.startswith("archive/"):
+                continue
+            doc = SCORECARD.parent / link
+            if not doc.is_file():
+                continue
+            if doc not in open_rows:
+                open_rows[doc] = [
+                    l for l in read(doc).splitlines()
+                    if l.startswith("|") and "⚠️" in l and not l.startswith("| ~~")
+                ]
+            for l in open_rows[doc]:
+                num = l.split("|")[1].strip()
+                fails.append(
+                    f"{rel(SCORECARD)}: {m.group(1)} is {m.group(2)} but {rel(doc)} has an open row (#{num[:12]})"
+                )
+    return fails
+
+
+# ---- Tom Harte figures ------------------------------------------------------
+
+TH_65 = ROOT / "crates" / "luna-cpu-65c816" / "tests" / "tom_harte.rs"
+TH_SPC = ROOT / "crates" / "luna-cpu-spc700" / "tests" / "tom_harte.rs"
+NUM = r"\d{1,3}(?:,\d{3})+"
+
+
+def _const(text: str, name: str) -> int:
+    m = re.search(rf"const {name}: usize = ([\d_]+);", text)
+    if not m:
+        raise SystemExit(f"tomharte: const {name} not found in the harness")
+    return int(m.group(1).replace("_", ""))
+
+
+def tom_harte_figures() -> tuple[tuple[int, int, int], tuple[int, int]]:
+    """((passing, run, total) for the 65C816, (passing, total) for the SPC700)."""
+    h = read(TH_65)
+    cases = _const(h, "CASES_PER_FILE")
+    total = _const(h, "EXPECTED_FILES") * cases
+    run = total - _const(h, "UNGATEABLE_FILES") * cases
+    block = re.search(r"const CONTESTED_STATE: [^=]*= \[(.*?)\];", h, re.S).group(1)
+    contested = sum(int(a) for a in re.findall(r'\("[0-9a-f.]+", (\d+), \d+\)', block))
+    s = read(TH_SPC)
+    spc = _const(s, "EXPECTED_FILES") * _const(s, "CASES_PER_FILE")
+    return (run - contested, run, total), (spc, spc)
+
+
+def check_tomharte() -> list[str]:
+    (passing, run, total), (spc, _) = tom_harte_figures()
+    good_pairs = {(passing, total), (spc, spc)}
+    allowed = {passing, run, total, spc}
+    files = [ROOT / "README.md", ROOT / "CONTRIBUTING.md", *md_files(BOOK, ROOT / "docs")]
+    fails = []
+    for f in files:
+        # the founding-design record quotes a 2026 target, not a measurement
+        if "archive" in f.parts or f.name == "founding-design.md" or not f.is_file():
+            continue
+        for n, line in enumerate(read(f).splitlines(), 1):
+            where = f"{rel(f)}:{n}"
+            if re.search(r"hardware truth", line, re.I):
+                fails.append(f"{where}: 'hardware truth' (Tom Harte vectors are a software model)")
+            if re.search(r"tom harte|per-instruction|processor test suite", line, re.I) and re.search(r"100 ?%", line):
+                fails.append(f"{where}: '100%' on a Tom Harte line; cite {passing:,} / {total:,}")
+            if re.search(r"5\.08 ?M|\b256K\b", line):
+                fails.append(f"{where}: rounded Tom Harte figure; cite the exact counts")
+            for a, b in re.findall(rf"({NUM}) / ({NUM})", line):
+                a, b = int(a.replace(",", "")), int(b.replace(",", ""))
+                if (5_070_000 <= b <= 5_130_000 or 255_000 <= b <= 257_000) and (a, b) not in good_pairs:
+                    fails.append(f"{where}: {a:,} / {b:,} differs from the harness ({passing:,} / {total:,}, {spc:,} / {spc:,})")
+            for s in re.findall(NUM, line):
+                v = int(s.replace(",", ""))
+                if 5_070_000 <= v <= 5_130_000 and v not in allowed:
+                    fails.append(f"{where}: {s} is not a figure of the 65C816 harness ({passing:,} / {run:,} run / {total:,})")
     return fails
 
 
@@ -419,7 +505,7 @@ def check_changelog() -> list[str]:
 
 # ---------------------------------------------------------------------------
 
-CHECKS = ["links", "orphans", "paths", "version", "cli", "mcp", "index", "crates", "grades", "changelog"]
+CHECKS = ["links", "orphans", "paths", "version", "cli", "mcp", "index", "crates", "grades", "tomharte", "changelog"]
 
 
 def main() -> int:
@@ -448,6 +534,7 @@ def main() -> int:
             "index": lambda: check_index(binary),
             "crates": check_crates,
             "grades": check_grades,
+            "tomharte": check_tomharte,
             "changelog": check_changelog,
         }[name]()
         status = "OK" if not fails else f"{len(fails)} finding(s)"

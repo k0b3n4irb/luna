@@ -14,7 +14,7 @@ cumulative-sum), and bitmap/character-conversion helpers.
 | **On the console** | a second 65C816 on the cartridge, about three times faster, with its own RAM and accelerators |
 | **In luna** | `crates/luna-bus/src/sa1.rs` (the board: memory map, registers), `crates/luna-core/src/coproc/sa1.rs` (the chip: its CPU, timers, DMA) |
 | **Proven by** | the SNES-SA1 Speed Test v5.1: the rows without bus conflict match photographs of a console to the digit |
-| **Grade** | **A−** (scorecard: *SA-1*) |
+| **Grade** | **B+** (scorecard: *SA-1*) |
 | **Open gaps** | [`docs/luna_sa1_gaps.md`](https://github.com/k0b3n4irb/luna/blob/main/docs/luna_sa1_gaps.md): the scheduler steps the chip in batches; `$2202` models an SIC bit 6 the hardware does not have, and its latch is a placeholder (#2); the write-protection registers reset to allow-all where both references block (#3, #4, a deliberate choice explained there) |
 
 ## What the chip provides

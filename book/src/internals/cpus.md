@@ -55,7 +55,7 @@ A few deliberate notes:
 | **On the console** | the S-SMP: 8-bit, its own 64 KB of RAM, its own clock |
 | **In luna** | `crates/luna-cpu-spc700/src/` (`step.rs` is the cycle-stepped core that runs; `opcodes.rs` is an atomic interpreter kept as a test oracle) |
 | **Proven by** | the per-instruction suite, 256,000 / 256,000 states (`crates/luna-cpu-spc700/tests/tom_harte.rs`); the cycle-stepped core compared byte for byte with the atomic one |
-| **Grade** | **A−** (scorecard: *SPC700*) |
+| **Grade** | **B+** (scorecard: *SPC700*) |
 | **Open gaps** | [`docs/luna_spc700_gaps.md`](https://github.com/k0b3n4irb/luna/blob/main/docs/luna_spc700_gaps.md): the reset values of `S` and `PSW` (#1); after `STOP` the whole APU stops and a stub answers the ports (#3) |
 
 An 8-bit processor running in its own clock domain, in lockstep with the main

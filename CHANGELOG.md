@@ -7,6 +7,14 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ## [Unreleased]
 
+- The guide and the reference docs state one Tom Harte figure, the measured one: 65C816 5,079,754 / 5,120,000
+  states (40,000 states of the four `MVN`/`MVP` files are not run, 246 contradict the dataset by choice),
+  SPC700 256,000 / 256,000. No more "100%" or "hardware truth": the vectors come from a software model, not
+  a console. `tools/check-doc-drift.py` has a new `tomharte` check that parses the harness constants and fails
+  on any other figure a doc cites.
+- Four accuracy grades come down to **B+** (SPC700, S-DSP, DMA / HDMA, SA-1): each still carried an open
+  (⚠️) row in its gap document, not yet checked against the references. The `grades` check now refuses an
+  **A** or **A−** while a gap document the scorecard row cites has an open row.
 - The Event Viewer is withdrawn (GUI panel, overlay, `Emulator::enable_event_capture`, `swap_frame_events`,
   `event_snapshot`, `event_config(_mut)` and the `EventViewerConfig` / `EventViewerEvent` / `EventCategory` /
   `register_name` types of `luna-api`) until it is rewritten clean-room: its source followed a GPL-3.0
