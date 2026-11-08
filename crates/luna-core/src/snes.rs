@@ -498,7 +498,7 @@ pub struct MemTraceEvent {
     pub line: u16,
     /// Exact horizontal master-clock (0..1363) at the access — Mesen2's
     /// `GetHClock`. Pairs with `line` to place the event on a frame grid
-    /// (the Event Viewer plots events at `(hclock, line)`, column `hclock/2`).
+    /// (the trace plots events at `(hclock, line)`, column `hclock/2`).
     pub hclock: u16,
     /// `true` if the PPU is in the vertical-blank window
     /// (`line >= vblank_start`).
@@ -2498,7 +2498,7 @@ struct DmaBusView<'a> {
     trace_line: u16,
     trace_blank: bool,
     /// Exact horizontal master-clock (0..1363) at this DMA burst/line,
-    /// stamped onto each `DmaTraceEvent` so the Event Viewer can plot
+    /// stamped onto each `DmaTraceEvent` so a trace consumer can plot
     /// `(hclock, line)` at full column precision (Mesen2 `GetHClock`).
     trace_hclock: u16,
     /// Where each byte of this burst lands, see [`ByteBeam`]: the line the
@@ -2739,7 +2739,7 @@ impl DmaBus for DmaBusView<'_> {
             // DMA B-bus trace: capture (source → VMADD → byte) BEFORE the
             // write, since the $2119 (high) write auto-increments VMADD.
             // Captures EVERY PPU B-bus write ($2100-$213F), not just the
-            // VRAM ports — the Event Viewer categorises OAM ($2104),
+            // VRAM ports — the trace categorises OAM ($2104),
             // CGRAM ($2122), etc. DMA writes too. `vram_word` is only
             // meaningful for the $2118/$2119 ports; VRAM-only consumers
             // (the CLI `--dma-trace` CSV) filter on `b_offset`.
@@ -3165,7 +3165,7 @@ impl SnesBus<'_> {
         // per-line table cursor — only the application point moved one
         // crossing later, between the same two rendered rows.
         if self.ppu_line < vblank_start {
-            // Trace HDMA register writes for the Event Viewer, exactly like
+            // Trace HDMA register writes for the trace, exactly like
             // MDMA: hdma_run_line stamps each channel via set_active_channel
             // (HdmaChannelFlag | ch, Mesen2 SnesDmaController.cpp:264), and the
             // shared DmaBusView::write_b records the DmaTraceEvent. The trace
@@ -3284,7 +3284,7 @@ impl SnesBus<'_> {
                 apu_panicked: *self.apu_panicked,
                 // hdma_init only reads table headers/pointers (A-bus); it makes
                 // no B-bus register writes, so there is nothing to trace here.
-                // The per-scanline transfers below are what the Event Viewer
+                // The per-scanline transfers below are what the trace
                 // captures.
                 dma_trace: None,
                 last_a_addr: 0,

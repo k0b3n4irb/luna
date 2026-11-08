@@ -11,7 +11,7 @@ in real time as the game runs.
 |---|---|
 | **CPU** (65C816) | State (registers/flags), Memory (hex), Disassembly; Breakpoints; Mesen2's **Debugger** and **SPC Debugger** windows; **Memory Tools** and **Memory Search** (below) |
 | **SPC700** (audio CPU) | State, Memory (ARAM hex), Disassembly |
-| **PPU** | Sprites (OAM), Palette (CGRAM), Tilemap, **Event Viewer** |
+| **PPU** | Sprites (OAM), Palette (CGRAM), Tilemap |
 | **System** | Registers (full snapshot) |
 
 The disassemblers are M/X-aware for the 65C816 (operand widths follow the
@@ -30,8 +30,7 @@ steps it instruction by instruction — the same registry the MCP tools use.
 - **Run to the hit**: resume (`F2`). When a breakpoint fires the emulation
   auto-pauses, an orange **⏸ Break** banner appears in the menu bar with
   the hit's PC (and address/value for a watchpoint), the CPU disassembly
-  jumps to the halt PC with the line highlighted, and the Event Viewer
-  shows the hit as a *Breakpoint* dot at the exact scanline/H-clock.
+  jumps to the halt PC with the line highlighted.
 - **Step**: `F10` executes one instruction, `F6` runs to the next frame
   boundary (both also in the *Emulation* menu, and both pause first if the
   game is running). The framebuffer and all debug panels follow each step.
@@ -193,52 +192,3 @@ A few workflow helpers in the **File** and **Emulation** menus:
   the current ROM from disk in place — turn on auto-reload and an external SDK
   build (a rewritten `.sfc`) restarts the running game with no reopen.
 
-## The Event Viewer
-
-The Event Viewer answers one question the other panels can't: **where in the
-frame does each hardware access happen?** It plots every register access as a
-coloured dot over the running picture, at the exact `(scanline, cycle)` where
-it occurred — so a raster split, a gradient, or a mid-frame DMA burst is
-visible *as a shape on the frame*, not just a number.
-
-Open it from **Debug → Event Viewer**. It has three regions:
-
-- **Overlay** (centre) — the live framebuffer with event dots drawn on top.
-  Each category has its own colour. The horizontal position is the access's
-  master-clock within the scanline, at full precision, so events line up with
-  the pixels they affect.
-- **Filter panel** (right) — checkboxes to show or hide categories, grouped as
-  **PPU register writes** (VRAM, CGRAM, OAM, Mode 7, BG Options, BG Scroll,
-  Window, Others), **Other events** (PPU/SPC/CPU/WRAM reads and writes, IRQ,
-  NMI, marked breakpoints), and **DMA channels** (0–7, filtered individually).
-  *Select all* / *Deselect all* toggle the whole set.
-- **List** (bottom, optional) — every captured event decoded into a table:
-  scanline, cycle, program counter, type, and register address. Toggle it with
-  *Show list view*.
-
-Two more toggles help read busy frames: **Show previous frame events** fills in
-the part of the frame the current one hasn't reached yet, and the per-channel
-**DMA** filters isolate a single transfer.
-
-### What it captures
-
-The viewer records both **CPU register I/O** and **DMA B-bus writes** — the CPU
-is halted during a transfer, so capturing the DMA side is what makes an OAM or
-VRAM upload show up at all. **HDMA** is captured the same way, so per-scanline
-effects — colour-math gradients, window splits, status-bar raster — appear
-spread down the frame exactly where they fire, instead of leaving the middle of
-the picture blank.
-
-### Reading it
-
-A few patterns to look for:
-
-- **DMA bursts** cluster in the top/bottom bands (vblank), where games upload
-  VRAM and OAM.
-- **HDMA effects** form vertical streaks down the visible frame — one dot per
-  scanline as the channel re-writes a scroll, window, or colour register.
-- A **raster split** shows up as a horizontal line of events at the scanline
-  where the screen mode changes.
-
-Because the capture is passive, the Event Viewer never alters timing or
-rendering — turning it on does not change what the game does.

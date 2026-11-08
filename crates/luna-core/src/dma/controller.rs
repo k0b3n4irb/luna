@@ -27,7 +27,7 @@ pub struct DmaTraceEvent {
     pub value: u8,
     /// DMA channel (0-7) that performed this transfer — Mesen2's
     /// `DebugEventInfo::DmaChannel` (read from `dma->GetActiveChannel()`),
-    /// driving the Event Viewer's per-channel filter.
+    /// driving a per-channel filter.
     pub channel: u8,
     /// Completed-frame counter at the start of the owning DMA burst — lets a
     /// consumer bucket DMA→VRAM bytes by frame (the per-VBlank budget check).
@@ -37,7 +37,7 @@ pub struct DmaTraceEvent {
     /// lines it really crosses).
     pub line: u16,
     /// Exact horizontal master-clock (0..1363) of this byte's slot — Mesen2's
-    /// `GetHClock` (the Event Viewer plots events at `(hclock, line)`).
+    /// `GetHClock` (the trace plots events at `(hclock, line)`).
     pub hclock: u16,
     /// `true` if this byte's slot is in the vertical-blank window
     /// (`line >= vblank_start`).
@@ -351,7 +351,7 @@ impl Dma {
                 // `hdma_init` — the references keep that (stale) state; they do
                 // NOT re-copy the source on a mid-frame enable.
                 // Tag B-bus writes this channel makes with its channel id so
-                // the Event Viewer can plot them — faithful to Mesen2's
+                // a trace consumer can plot them — faithful to Mesen2's
                 // `_activeChannel = HdmaChannelFlag | i` (SnesDmaController.cpp
                 // :264). The HDMA flag (bit 6) marks the event as HDMA-sourced;
                 // consumers mask `& 7` for the channel number.
@@ -425,7 +425,7 @@ const fn hdma_cost(mclk_at_fire: u64, clock_count: u32, reads: u32) -> u32 {
 
 /// Marks an active-channel tag as HDMA-sourced (Mesen2's
 /// `SnesDmaController::HdmaChannelFlag`, `SnesDmaController.h:12`). OR'd onto
-/// the channel index for the Event Viewer; consumers take `& 7` for the
+/// the channel index for the trace; consumers take `& 7` for the
 /// channel number.
 pub(crate) const HDMA_CHANNEL_FLAG: u8 = 0x40;
 
@@ -693,7 +693,7 @@ mod tests {
     #[test]
     fn hdma_transfer_tags_writes_with_the_hdma_channel_flag() {
         // Regression: HDMA per-scanline register writes must be tagged with
-        // their channel so the Event Viewer can plot them — faithful to
+        // their channel so a trace consumer can plot them — faithful to
         // Mesen2's `_activeChannel = HdmaChannelFlag | i`. The tag is
         // `0x40 | ch`; consumers mask `& 7` for the channel number. (Without
         // this, raster/gradient HDMA effects were invisible in the overlay.)

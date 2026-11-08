@@ -300,10 +300,7 @@ fn run(
                         }
                     }
                     let cur = em.frame_count().unwrap_or(last_emu_frame);
-                    if cur != last_emu_frame {
-                        last_emu_frame = cur;
-                        em.swap_frame_events();
-                    }
+                    last_emu_frame = cur;
                     if let Ok(rgba) = em.render_display_rgba() {
                         shared.frame.store(cur, Ordering::Release);
                         framebuffer_in.write(rgba);
@@ -330,13 +327,8 @@ fn run(
                         );
                         emu_dead = true;
                     }
-                    // Keep the Event Viewer's frame double-buffer coherent
-                    // if the step crossed a frame boundary.
                     let cur = em.frame_count().unwrap_or(last_emu_frame);
-                    if cur != last_emu_frame {
-                        last_emu_frame = cur;
-                        em.swap_frame_events();
-                    }
+                    last_emu_frame = cur;
                     // Republish so the user SEES the effect of the step
                     // (paused = inspecting; show the current PPU state).
                     if let Ok(rgba) = em.render_display_rgba() {
@@ -477,9 +469,6 @@ fn run(
             }
             if cur_frame != last_emu_frame {
                 last_emu_frame = cur_frame;
-                // Roll the just-finished frame's captured events into the
-                // double-buffer (Mesen2 `ClearFrameEvents`) for the Event Viewer.
-                em.swap_frame_events();
                 frames_since_report += 1;
                 frame_produced = true;
                 frame_hz = em.frame_rate_hz();

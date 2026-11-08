@@ -2753,7 +2753,7 @@ fn dialogs(ui: &egui::Ui, view: &DebuggerView, st: &mut UiState, out: &mut Vec<D
                 if forbid {
                     ui.checkbox(enabled, "Enabled");
                 } else {
-                    ui.checkbox(mark, "Mark on Event Viewer");
+                    ui.checkbox(mark, "Mark (count, never halt)");
                     ui.checkbox(enabled, "Break Execution");
                 }
                 let parsed = parse_hex(lo).zip(parse_hex(if hi.is_empty() { lo } else { hi }));

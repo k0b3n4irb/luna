@@ -42,7 +42,6 @@ pub(crate) enum DebugPanel {
     Registers,
     Palette,
     Tilemap,
-    EventViewer,
     Breakpoints,
     Debugger,
     SpcDebugger,
@@ -53,7 +52,6 @@ pub(crate) enum DebugPanel {
 impl DebugPanel {
     const fn title(self) -> &'static str {
         match self {
-            Self::EventViewer => "Event Viewer",
             Self::Cpu => "CPU — 65c816",
             Self::CpuMemory => "CPU memory",
             Self::CpuDisasm => "CPU disassembly",
@@ -75,7 +73,6 @@ impl DebugPanel {
     /// Default window size (logical px) — sized to each panel's content.
     const fn default_size(self) -> (u32, u32) {
         match self {
-            Self::EventViewer => (980, 720),
             Self::Cpu => (250, 340),
             Self::Spc700 => (250, 320),
             Self::CpuMemory | Self::Spc700Memory => (660, 420),
@@ -456,13 +453,7 @@ impl DebugWindows {
                                 .max_rect(content)
                                 .layout(egui::Layout::top_down(egui::Align::Min)),
                         );
-                        // The Event Viewer drives its own internal panels
-                        // (`SidePanel`/`TopBottomPanel` via `show_inside`), which
-                        // need the full body rect and manage their own scrolling —
-                        // so it is NOT wrapped in the outer scroll area.
-                        if panel == DebugPanel::EventViewer {
-                            nav = ui::event_viewer_body(&mut body, snap);
-                        } else if matches!(panel, DebugPanel::Debugger | DebugPanel::SpcDebugger) {
+                        if matches!(panel, DebugPanel::Debugger | DebugPanel::SpcDebugger) {
                             if let Some(view) = snap.debugger.as_deref() {
                                 nav = Some(PanelNav::Debugger(ui::debugger_body(&mut body, view)));
                             }
@@ -486,8 +477,7 @@ impl DebugWindows {
                                 DebugPanel::Registers => ui::registers_body(ui, snap),
                                 DebugPanel::Palette => ui::palette_body(ui, snap),
                                 DebugPanel::Tilemap => nav = ui::tilemap_body(ui, snap),
-                                DebugPanel::EventViewer
-                                | DebugPanel::Debugger
+                                DebugPanel::Debugger
                                 | DebugPanel::SpcDebugger
                                 | DebugPanel::MemoryTools
                                 | DebugPanel::MemorySearch => {}

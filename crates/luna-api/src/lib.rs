@@ -50,9 +50,6 @@ pub use provenance::{VramLastWrite, VramProvEntry, VramProvReport, vram_provenan
 use serde::Serialize;
 pub use strict::{StrictFault, StrictReport, strict_rules};
 
-/// Faithful Mesen2 SNES Event Viewer data layer (categories, colors, register
-/// names, config). The GUI Event Viewer panel consumes this via the accessors
-/// on [`Emulator`].
 /// This build's version: the workspace version, the commit it was built
 /// from, `-dirty` when its code differs from that commit
 /// (`1.39.0+4360f7c`); the plain version when built without git.
@@ -71,7 +68,6 @@ pub use trace_logger::{
 pub mod code_log;
 pub mod debugger;
 pub mod dsp1_commands;
-pub mod event_viewer;
 pub mod expr;
 pub mod input;
 pub mod label_import;
@@ -97,9 +93,6 @@ pub mod workspace;
 pub use debugger::{
     CallStackRow, DebuggerStatus, FindResult, FunctionRow, GotoResult, LabelRow, SpcCallFrame,
     WatchStyle,
-};
-pub use event_viewer::{
-    CATEGORY_COUNT, EventCategory, EventViewerConfig, EventViewerEvent, register_name,
 };
 pub use expr::{ExprAccess, ExprCpu, ExprKind, ExprResult, Expression};
 pub use input::{FRAME_STEP_BUDGET, InputEvent, InputScript, ScriptBound, WatchEvent};
@@ -1475,14 +1468,6 @@ pub struct Emulator {
     /// Maintained API-side by the run loops: the CPU core stays
     /// untouched (user decision, 2026-08-08).
     call_stack: Option<Vec<CallFrame>>,
-    /// Event Viewer category/DMA visibility config.
-    event_config: event_viewer::EventViewerConfig,
-    /// The just-completed frame's captured events (Mesen2 `_debugEvents`),
-    /// CPU IO + DMA merged and sorted by `(scanline, cycle)`.
-    last_frame_events: Vec<CapturedEvent>,
-    /// The frame before that (Mesen2 `_prevDebugEvents`) — drawn trailing when
-    /// `show_previous_frame` is on.
-    prev_frame_events: Vec<CapturedEvent>,
     /// Active joypad-input capture, if recording (issue #83). `None` when
     /// not recording; fed by [`Emulator::set_joypad`], drained by
     /// [`Emulator::take_input_capture`].
@@ -1494,9 +1479,6 @@ pub struct Emulator {
     power_on: PowerOnState,
     /// The compiled condition of every breakpoint that has one, by id.
     bp_conditions: std::collections::BTreeMap<u32, expr::Expression>,
-    /// Event Viewer marks of *mark* breakpoints that fired since the last
-    /// [`Emulator::swap_frame_events`].
-    pending_marks: Vec<CapturedEvent>,
     /// What else than a breakpoint stops [`Emulator::run_until_break`].
     break_sources: BreakSources,
 }
@@ -1726,69 +1708,6 @@ pub struct BreakSources {
     pub scanline: Option<u16>,
 }
 
-/// One raw captured Event Viewer event before category/filter decode — either
-/// a CPU bus access (mem-trace) or a DMA B-bus write (dma-trace). Kept as the
-/// raw source so [`Emulator::event_snapshot`] can re-decode under the live
-/// config (visibility / DMA-channel toggles) without re-running the frame.
-#[derive(Clone, Copy)]
-enum CapturedEvent {
-    /// A CPU bus access or NMI/IRQ marker.
-    Cpu(MemTraceEvent),
-    /// A DMA B-bus write, carrying its source channel.
-    Dma(DmaTraceEvent),
-    /// A breakpoint hit (issue #68) — Mesen2's `MarkedBreakpoint` overlay
-    /// category. Injected by `run_until_break` at the halt position.
-    Break { pc: u32, line: u16, hclock: u16 },
-}
-
-impl CapturedEvent {
-    /// Sort key `(scanline, cycle)` — Mesen2 orders the event list/overlay by
-    /// PPU position. Cycle is the exact H-clock (Mesen2 `GetHClock`).
-    const fn sort_key(&self) -> (u16, u16) {
-        match self {
-            Self::Cpu(e) => (e.line, e.hclock),
-            Self::Dma(e) => (e.line, e.hclock),
-            Self::Break { line, hclock, .. } => (*line, *hclock),
-        }
-    }
-
-    /// The position key Mesen2's `FilterEvents` compares against the cursor:
-    /// `(scanline << 16) + cycle`.
-    fn position_key(&self) -> u32 {
-        let (line, cycle) = self.sort_key();
-        (u32::from(line) << 16) | u32::from(cycle)
-    }
-
-    /// Decode under `cfg`, flagging prev-frame membership. `None` when the
-    /// access has no category or is hidden by a category / DMA-channel filter.
-    fn decode(
-        &self,
-        cfg: &event_viewer::EventViewerConfig,
-        is_prev_frame: bool,
-    ) -> Option<EventViewerEvent> {
-        match self {
-            Self::Cpu(e) => event_viewer::decode_event(e, cfg, is_prev_frame),
-            Self::Dma(e) => event_viewer::decode_dma_event(e, cfg, is_prev_frame),
-            Self::Break { pc, line, hclock } => {
-                let category = event_viewer::EventCategory::MarkedBreakpoint;
-                if !cfg.visible[category.index()] {
-                    return None;
-                }
-                Some(EventViewerEvent {
-                    scanline: *line,
-                    cycle: *hclock,
-                    addr: (*pc & 0xFFFF) as u16,
-                    value: 0,
-                    pc: *pc,
-                    category,
-                    is_prev_frame,
-                    dma_channel: None,
-                })
-            }
-        }
-    }
-}
-
 impl Default for Emulator {
     fn default() -> Self {
         Self::new()
@@ -1823,18 +1742,10 @@ impl Emulator {
             profile_worst: Vec::new(),
             freezes: Vec::new(),
             call_stack: None,
-            event_config: event_viewer::EventViewerConfig {
-                visible: [true; event_viewer::CATEGORY_COUNT],
-                show_previous_frame: true,
-                show_dma_channels: [true; 8],
-            },
-            last_frame_events: Vec::new(),
-            prev_frame_events: Vec::new(),
             input_capture: None,
             forced_region: None,
             power_on: PowerOnState::Zero,
             bp_conditions: std::collections::BTreeMap::new(),
-            pending_marks: Vec::new(),
             break_sources: BreakSources {
                 brk: false,
                 cop: false,
@@ -2126,7 +2037,6 @@ impl Emulator {
             Ok(Ok(snes)) => {
                 self.snes = Some(snes);
                 self.bp_conditions.clear();
-                self.pending_marks.clear();
                 self.rom_info = Some(info.clone());
                 self.instructions_executed = 0;
                 self.rom_hash = rom_hash;
@@ -4541,8 +4451,7 @@ impl Emulator {
     }
 
     /// Make breakpoint `id` a *mark* (Mesen2's "mark" breakpoints): when it
-    /// fires it puts a breakpoint event on the Event Viewer and the run goes
-    /// on. Returns `false` for an unknown id.
+    /// fires it is counted and the run goes on. Returns `false` for an unknown id.
     pub fn bp_set_mark(&mut self, id: u32, mark: bool) -> Result<bool, ApiError> {
         let registry = self.bp_registry()?;
         if mark && registry.is_forbid(id) {
@@ -4889,9 +4798,8 @@ impl Emulator {
         }
         let before_step: std::cell::Cell<(bool, bool, u16)> = std::cell::Cell::default();
         let opcode: std::cell::Cell<u8> = std::cell::Cell::default();
-        // Marks that fired, with their beam position: shared by the two
-        // checks below.
-        let marks: std::cell::RefCell<Vec<(BreakHit, u16, u16)>> = std::cell::RefCell::default();
+        // Marks that fired: shared by the two checks below.
+        let marks: std::cell::RefCell<Vec<BreakHit>> = std::cell::RefCell::default();
         // The first hit that passes its condition: a mark is recorded and
         // the run goes on, anything else stops it.
         // The access a 65C816 hit's condition sees.
@@ -4940,8 +4848,7 @@ impl Emulator {
                 }
                 // A mark is recorded even inside a forbid range.
                 if bp.is_mark(hit.id) {
-                    let hclock = snes.mcycles_in_line.min(u32::from(u16::MAX)) as u16;
-                    marks.borrow_mut().push((hit, snes.ppu_line, hclock));
+                    marks.borrow_mut().push(hit);
                     continue;
                 }
                 if forbidden(snes, &hit) {
@@ -5103,45 +5010,12 @@ impl Emulator {
         if let Some(bp) = self.snes.as_mut().and_then(|s| s.breakpoints.as_mut())
             && out.hit.is_none_or(|h| h.id != BREAK_SOURCE_ID)
         {
-            for (hit, _, _) in &marks {
+            for hit in &marks {
                 bp.count_hit(hit.id);
             }
             if let Some(hit) = out.hit {
                 bp.count_hit(hit.id);
             }
-        }
-        self.pending_marks
-            .extend(
-                marks
-                    .into_iter()
-                    .map(|(hit, line, hclock)| CapturedEvent::Break {
-                        pc: hit.pc,
-                        line,
-                        hclock,
-                    }),
-            );
-        if let Some(hit) = out.hit {
-            // Surface the hit on the Event Viewer overlay (Mesen2's
-            // MarkedBreakpoint category, issue #68). Injected straight
-            // into the completed-frame buffer so it is visible while
-            // paused at the halt (the in-progress frame won't roll
-            // until resume). Sorted insert keeps the list ordered.
-            let (line, hclock) = self.snes.as_ref().map_or((0, 0), |s| {
-                (
-                    s.ppu_line,
-                    (s.mcycles_in_line).min(u32::from(u16::MAX)) as u16,
-                )
-            });
-            let ev = CapturedEvent::Break {
-                pc: hit.pc,
-                line,
-                hclock,
-            };
-            let key = ev.sort_key();
-            let idx = self
-                .last_frame_events
-                .partition_point(|e| e.sort_key() <= key);
-            self.last_frame_events.insert(idx, ev);
         }
         Ok(out)
     }
@@ -5696,104 +5570,6 @@ impl Emulator {
     pub fn take_mem_trace_log(&mut self) -> Result<Vec<MemTraceEvent>, ApiError> {
         let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
         Ok(snes.take_mem_trace_log())
-    }
-
-    // --- Event Viewer (faithful Mesen2 port; see `event_viewer` module) ---
-
-    /// Turn Event Viewer capture on or off. When on, the emulator records the
-    /// register IO range (`$2100-$437F`) plus NMI/IRQ markers; the GUI panel
-    /// drains them per frame via [`Emulator::swap_frame_events`].
-    pub fn enable_event_capture(&mut self, on: bool) -> Result<(), ApiError> {
-        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
-        if on {
-            snes.enable_mem_trace(16_384, None, Some((0x2100, 0x437F)));
-            // Also capture DMA B-bus writes (OAM/VRAM/CGRAM DMA) — the CPU
-            // mem-trace never sees them (the CPU is halted during a burst),
-            // so without this the overlay is sparse vs Mesen2.
-            snes.dma.enable_dma_trace(16_384);
-        } else {
-            snes.disable_mem_trace();
-            snes.dma.dma_trace = None;
-            self.last_frame_events.clear();
-            self.prev_frame_events.clear();
-        }
-        Ok(())
-    }
-
-    /// Roll the events captured since the last call into the completed-frame
-    /// buffers (Mesen2's `ClearFrameEvents`: `_prevDebugEvents = _debugEvents`).
-    /// The emu loop calls this once per emulated frame. A frame with no captured
-    /// events keeps the previous set (avoids flicker on quiet frames).
-    pub fn swap_frame_events(&mut self) {
-        let Some(snes) = self.snes.as_mut() else {
-            return;
-        };
-        // Drain BOTH traces: CPU IO accesses (mem-trace) and DMA B-bus
-        // writes (dma-trace). The CPU is halted during a DMA burst, so DMA
-        // register writes never appear in the mem-trace — merging the two is
-        // what makes the overlay dense (OAM/VRAM DMA show up).
-        let cpu = snes.take_mem_trace_log();
-        let dma = snes.dma.take_dma_trace();
-        if cpu.is_empty() && dma.is_empty() {
-            // Quiet frame: keep the previous set (avoids overlay flicker).
-            return;
-        }
-        let mut merged: Vec<CapturedEvent> = Vec::with_capacity(cpu.len() + dma.len());
-        merged.extend(cpu.into_iter().map(CapturedEvent::Cpu));
-        merged.extend(dma.into_iter().map(CapturedEvent::Dma));
-        merged.append(&mut self.pending_marks);
-        // Order by PPU position so the list/overlay are sequential.
-        merged.sort_by_key(CapturedEvent::sort_key);
-        std::mem::swap(&mut self.prev_frame_events, &mut self.last_frame_events);
-        self.last_frame_events = merged;
-    }
-
-    /// The current Event Viewer snapshot: the just-finished frame's visible
-    /// events, plus (when `show_previous_frame` is on) the previous frame's,
-    /// each decoded + filtered by the category visibility mask.
-    #[must_use]
-    pub fn event_snapshot(&self) -> Vec<EventViewerEvent> {
-        let mut out = Vec::with_capacity(self.last_frame_events.len());
-        for ev in &self.last_frame_events {
-            if let Some(e) = ev.decode(&self.event_config, false) {
-                out.push(e);
-            }
-        }
-        if self.event_config.show_previous_frame {
-            // Mesen2 `BaseEventManager::FilterEvents` (`:9-22`): include a
-            // previous-frame event only when its `(scanline<<16)+cycle` is
-            // GREATER than the cursor, so the prev frame fills in the part of
-            // the frame the current one has not reached yet (no duplication).
-            // luna polls at the frame boundary (no pause), so the live cursor
-            // is the last current-frame event's position — i.e. prev-frame
-            // events later than that fill the tail of the frame.
-            let cursor = self
-                .last_frame_events
-                .iter()
-                .map(CapturedEvent::position_key)
-                .max()
-                .unwrap_or(0);
-            for ev in &self.prev_frame_events {
-                if ev.position_key() <= cursor {
-                    continue;
-                }
-                if let Some(e) = ev.decode(&self.event_config, true) {
-                    out.push(e);
-                }
-            }
-        }
-        out
-    }
-
-    /// Read the Event Viewer config (category/DMA visibility, previous-frame).
-    #[must_use]
-    pub const fn event_config(&self) -> &EventViewerConfig {
-        &self.event_config
-    }
-
-    /// Mutate the Event Viewer config (the GUI toggles category/DMA visibility).
-    pub const fn event_config_mut(&mut self) -> &mut EventViewerConfig {
-        &mut self.event_config
     }
 
     /// Enable capture of `$21FC` Nocash-TTY writes (the SDK debug channel

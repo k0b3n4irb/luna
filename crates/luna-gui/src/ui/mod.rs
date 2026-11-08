@@ -21,7 +21,6 @@ mod config;
 mod cpu_state;
 mod debugger;
 mod disasm;
-mod event_viewer;
 mod memory;
 mod memory_search;
 mod memory_tools;
@@ -34,7 +33,6 @@ pub(crate) use debugger::{
     DebuggerAction, DebuggerSettings, DebuggerView, WatchLine, debugger_body,
 };
 pub(crate) use disasm::{cpu_disasm_body, spc700_disasm_body};
-pub(crate) use event_viewer::event_viewer_body;
 pub(crate) use memory::{cpu_memory_body, spc700_memory_body};
 pub(crate) use memory_search::memory_search_body;
 pub(crate) use memory_tools::memory_tools_body;
@@ -106,7 +104,6 @@ pub(crate) enum MenuAction {
     ToggleRegisters,
     TogglePalette,
     ToggleTilemap,
-    ToggleEventViewer,
     ToggleBreakpoints,
     /// Open / close the Debugger window (Mesen2's).
     ToggleDebugger,
@@ -157,30 +154,12 @@ pub(crate) enum PanelNav {
     DisasmSetLines(u16),
     /// Select which BG layer (0..3) the Tilemap Viewer renders.
     TilemapSetBg(usize),
-    /// An Event Viewer filter-panel change to apply to `event_config_mut()`.
-    EventViewer(EventViewerAction),
     /// What the Debugger window did this frame.
     Debugger(Vec<DebuggerAction>),
     /// What the Memory Tools window did this frame.
     MemoryTools(Vec<crate::memory_host::MemoryToolsAction>),
     /// What the Memory Search window did this frame.
     MemorySearch(Vec<crate::memory_host::MemorySearchAction>),
-}
-
-/// A change the Event Viewer's filter panel requests this frame, applied by
-/// `LunaApp` to `em.event_config_mut()`. Mirrors the `PanelNav` pattern: the
-/// read-only panel body cannot mutate the config directly, so it returns one
-/// of these and the main loop applies it under the emulator lock.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub(crate) enum EventViewerAction {
-    /// Toggle one category's visibility (`visible[index] = on`).
-    Category(usize, bool),
-    /// Toggle one DMA channel's visibility (`show_dma_channels[ch] = on`).
-    DmaChannel(usize, bool),
-    /// Toggle the "show previous frame events" flag.
-    PreviousFrame(bool),
-    /// Set every category + DMA-channel flag to `on` (Select all / Deselect all).
-    All(bool),
 }
 
 /// Per-frame snapshot of `luna-api` introspection, built by `LunaApp` only
@@ -211,16 +190,6 @@ pub(crate) struct DebugSnapshot {
     pub tilemap: Option<luna_api::TilemapImage>,
     /// Which BG layer (0..3) the Tilemap Viewer currently shows.
     pub tilemap_bg: usize,
-    /// Event Viewer overlay: `(rgba, width, height)` — events composited over
-    /// the game framebuffer (Mesen2-style). Built in `build_panel_snapshot`.
-    pub event_overlay: Option<(Vec<u8>, usize, usize)>,
-    /// A copy of the live `EventViewerConfig`, so the filter-panel checkboxes
-    /// can show their current state (the panel body is read-only; changes are
-    /// returned as an [`EventViewerAction`] and applied to the real config).
-    pub event_config: Option<luna_api::EventViewerConfig>,
-    /// Decoded Event Viewer events for the list view (already filtered by the
-    /// live config in `event_snapshot`).
-    pub event_list: Option<Vec<luna_api::EventViewerEvent>>,
     /// Exec-breakpoint addresses for the CPU disassembly gutter.
     pub cpu_bp_addrs: Vec<u32>,
     /// Breakpoints panel rows: each registry entry + the resolved symbol
@@ -277,7 +246,6 @@ pub(crate) struct UiState<'a> {
     pub show_registers: bool,
     pub show_palette: bool,
     pub show_tilemap: bool,
-    pub show_event_viewer: bool,
     pub show_debugger: bool,
     pub show_spc_debugger: bool,
     pub show_memory_tools: bool,

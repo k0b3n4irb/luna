@@ -458,13 +458,6 @@ pub(super) fn draw_menu_bar<F: FnMut(MenuAction)>(
                         emit(MenuAction::ToggleTilemap);
                         ui.close();
                     }
-                    if ui
-                        .selectable_label(state.show_event_viewer, "Event Viewer")
-                        .clicked()
-                    {
-                        emit(MenuAction::ToggleEventViewer);
-                        ui.close();
-                    }
                     ui.separator();
                     ui.label(egui::RichText::new("System").weak().small());
                     if ui

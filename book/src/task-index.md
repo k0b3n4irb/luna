@@ -99,7 +99,7 @@ means that transport has no form of it.
 | stop only when a condition holds (the sixth enemy, a write of a given value), or mark an event without stopping | — | `bp_add` with `condition` / `mark`, `run_until_break` | [Conditional breakpoints](using/mcp.md#conditional-breakpoints) |
 | see which bytes a game reads, writes or runs, how often and when last | — | `enable_access_counters`, `access_counters`, `reset_access_counters` | [Access counters](using/mcp.md#access-counters) |
 | read or patch any memory by its Mesen2 name (ROM, save RAM, SA-1 I-RAM, GSU RAM, DSP-1, VRAM…), or find what a bus address points at | — | `memory_kinds`, `read_memory`, `write_memory`, `absolute_address` | [Every memory by one name](using/mcp.md#every-memory-by-one-name) |
-| see when in the frame a register was written | the GUI's Event Viewer | `enable_mem_trace` | [The Event Viewer](using/debugging.md#the-event-viewer) |
+| see when in the frame a register was written | `--mem-trace`, `--dma-trace` | `enable_mem_trace`, `enable_dma_trace` | [`luna state`](using/cli-run-state.md#luna-state--json-snapshot--diagnostics-the-workhorse) |
 | see what a DMA sent to VRAM | `--dma-trace`, `--dump-vram` | `enable_dma_trace`, `peek_vram` | [`luna state`](using/cli-run-state.md#luna-state--json-snapshot--diagnostics-the-workhorse) |
 
 ## Measure what it costs

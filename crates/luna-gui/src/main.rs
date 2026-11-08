@@ -1624,7 +1624,6 @@ impl LunaApp {
             show_registers: self.debug_windows.is_open(DebugPanel::Registers),
             show_palette: self.debug_windows.is_open(DebugPanel::Palette),
             show_tilemap: self.debug_windows.is_open(DebugPanel::Tilemap),
-            show_event_viewer: self.debug_windows.is_open(DebugPanel::EventViewer),
             show_debugger: self.debug_windows.is_open(DebugPanel::Debugger),
             show_spc_debugger: self.debug_windows.is_open(DebugPanel::SpcDebugger),
             show_memory_tools: self.debug_windows.is_open(DebugPanel::MemoryTools),
@@ -1708,14 +1707,6 @@ impl LunaApp {
                         DebugPanel::Tilemap => {
                             snap.tilemap = em.render_tilemap_rgba(self.tilemap_bg).ok();
                             snap.tilemap_bg = self.tilemap_bg;
-                        }
-                        DebugPanel::EventViewer => {
-                            let events = em.event_snapshot();
-                            if let Ok(fb) = em.render_frame_rgba(false) {
-                                snap.event_overlay = Some(composite_event_overlay(&fb, &events));
-                            }
-                            snap.event_config = Some(em.event_config().clone());
-                            snap.event_list = Some(events);
                         }
                         DebugPanel::CpuMemory => {
                             let (bank, off) = ((cpu_addr >> 16) as u8, cpu_addr as u16);
@@ -1918,33 +1909,6 @@ impl LunaApp {
             }
             Some(PanelNav::TilemapSetBg(bg)) => {
                 self.tilemap_bg = bg.min(3);
-            }
-            Some(PanelNav::EventViewer(act)) => {
-                use crate::ui::EventViewerAction;
-                if let Ok(mut g) = self.emu.lock()
-                    && let Some(em) = g.as_mut()
-                {
-                    let cfg = em.event_config_mut();
-                    match act {
-                        EventViewerAction::Category(i, on) => {
-                            if let Some(v) = cfg.visible.get_mut(i) {
-                                *v = on;
-                            }
-                        }
-                        EventViewerAction::DmaChannel(ch, on) => {
-                            if let Some(v) = cfg.show_dma_channels.get_mut(ch) {
-                                *v = on;
-                            }
-                        }
-                        EventViewerAction::PreviousFrame(on) => {
-                            cfg.show_previous_frame = on;
-                        }
-                        EventViewerAction::All(on) => {
-                            cfg.visible = [on; luna_api::CATEGORY_COUNT];
-                            cfg.show_dma_channels = [on; 8];
-                        }
-                    }
-                }
             }
             Some(PanelNav::Debugger(actions)) => {
                 let cpu = dbg_cpu.unwrap_or(luna_api::ListingCpu::Snes);
@@ -2341,18 +2305,6 @@ impl LunaApp {
             }
             MenuAction::ToggleTilemap => {
                 self.debug_windows.toggle(event_loop, DebugPanel::Tilemap);
-            }
-            MenuAction::ToggleEventViewer => {
-                self.debug_windows
-                    .toggle(event_loop, DebugPanel::EventViewer);
-                // Capture only runs while the panel is open (it adds per-access
-                // tracing overhead).
-                let on = self.debug_windows.is_open(DebugPanel::EventViewer);
-                if let Ok(mut g) = self.emu.lock()
-                    && let Some(em) = g.as_mut()
-                {
-                    let _ = em.enable_event_capture(on);
-                }
             }
             MenuAction::ToggleInputConfig => {
                 self.show_input_config = !self.show_input_config;
@@ -2900,86 +2852,4 @@ fn save_last_rom_dir(dir: &Path) -> std::io::Result<()> {
         std::fs::create_dir_all(parent)?;
     }
     std::fs::write(&path, dir.to_string_lossy().as_ref())
-}
-
-/// Composite the Event Viewer overlay — the game framebuffer with the frame's
-/// captured events drawn over it. Faithful port of Mesen2's `BaseEventManager`
-/// `GetDisplayBuffer` / `DrawScreen` / `DrawEvents` (see
-/// `docs/event_viewer_reference.md` §C). Returns `(rgba, width, height)`.
-fn composite_event_overlay(
-    fb: &[u8],
-    events: &[luna_api::EventViewerEvent],
-) -> (Vec<u8>, usize, usize) {
-    // Display buffer: 682 wide (1364 H-clocks / 2) × scanlines*2 (262 NTSC).
-    const W: usize = 682;
-    const H: usize = 524;
-    const FB_W: usize = 256;
-    // 224 rows, or 239 under overscan — both fit the 524-row buffer.
-    let fb_h = (fb.len() / (FB_W * 4)).min(FRAME_H_MAX);
-
-    // Clear to 0xFF555555 (dark-gray border).
-    let mut buf = vec![0u8; W * H * 4];
-    for px in buf.chunks_exact_mut(4) {
-        px.copy_from_slice(&[0x55, 0x55, 0x55, 0xFF]);
-    }
-
-    // DrawScreen: blit the framebuffer with a lo-res 2×2 upsample, at
-    // col +44 / row +2 inside the 682-wide buffer.
-    if fb.len() >= FB_W * fb_h * 4 {
-        for dy in 0..(fb_h * 2) {
-            for dx in 0..(FB_W * 2) {
-                let s = ((dy >> 1) * FB_W + (dx >> 1)) * 4;
-                let d = ((dy + 2) * W + (dx + 44)) * 4;
-                buf[d..d + 4].copy_from_slice(&fb[s..s + 4]);
-            }
-        }
-    }
-
-    // DrawEvents: two passes (all halos, then all cores) so cores sit on top.
-    for draw_background in [true, false] {
-        for ev in events {
-            // ConvertScanlineCycleToRowColumn: x = cycle/2, y = scanline*2.
-            let x = (ev.cycle / 2) as i32;
-            let y = (ev.scanline as i32) * 2;
-            draw_event_dot(&mut buf, W, H, x, y, ev.category.color(), draw_background);
-        }
-    }
-    // TODO: pause-mode current-scanline line (yellow) + cursor dot (magenta) —
-    // Mesen2 draws these only when broken/paused. Not drawn here yet, although
-    // the GUI can now pause, break and single-step (issue #68).
-    (buf, W, H)
-}
-
-/// `BaseEventManager::DrawDot` — a 6×6 half-bright halo (`draw_background`) or a
-/// 2×2 opaque core. Ported verbatim from `BaseEventManager.cpp:32-60`.
-fn draw_event_dot(
-    buf: &mut [u8],
-    w: usize,
-    h: usize,
-    x: i32,
-    y: i32,
-    color: (u8, u8, u8),
-    draw_background: bool,
-) {
-    let (r, g, b) = color;
-    let (r, g, b) = if draw_background {
-        ((r >> 1) & 0x7F, (g >> 1) & 0x7F, (b >> 1) & 0x7F)
-    } else {
-        (r, g, b)
-    };
-    let (lo, hi) = if draw_background {
-        (-2i32, 3i32)
-    } else {
-        (0i32, 1i32)
-    };
-    for i in lo..=hi {
-        for j in lo..=hi {
-            let (px, py) = (x + j, y + i);
-            if px < 0 || px >= w as i32 || py < 0 || py >= h as i32 {
-                continue;
-            }
-            let d = (py as usize * w + px as usize) * 4;
-            buf[d..d + 4].copy_from_slice(&[r, g, b, 0xFF]);
-        }
-    }
 }

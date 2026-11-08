@@ -1337,7 +1337,7 @@ pub struct BpEntry {
     pub name: Option<String>,
     /// The condition it fires on, if any.
     pub condition: Option<String>,
-    /// A mark: it records an Event Viewer mark instead of halting.
+    /// A mark: it is counted instead of halting.
     pub mark: bool,
     /// The CPU it watches: `snes`, `spc`, `sa1`, `gsu` or `dsp`.
     pub cpu: String,
@@ -4013,7 +4013,7 @@ impl LunaServer {
                                 halts AFTER the accessing instruction with its PC/addr/value. \
                                 `condition`: an expression in Mesen2's language (see `eval`) that \
                                 must be non-zero for it to fire (`value`/`address` are the access). \
-                                `mark`: record an Event Viewer mark instead of halting. \
+                                `mark`: count the hit instead of halting. \
                                 `memory`: watch VRAM, CGRAM, OAM (through the PPU's ports) or the \
                                 SPC700's SpcMemory / SpcRam / SpcRom instead of the CPU bus; an \
                                 SPC700 watch stops it just after the access. `cpu` ('spc', \

@@ -7,6 +7,13 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ## [Unreleased]
 
+- The Event Viewer is withdrawn (GUI panel, overlay, `Emulator::enable_event_capture`, `swap_frame_events`,
+  `event_snapshot`, `event_config(_mut)` and the `EventViewerConfig` / `EventViewerEvent` / `EventCategory` /
+  `register_name` types of `luna-api`) until it is rewritten clean-room: its source followed a GPL-3.0
+  reference too closely. Nothing else depended on it: `--mem-trace`, `--dma-trace`, breakpoints and *mark*
+  breakpoints (counted, never halting) are unchanged. Earlier entries below describe what then shipped.
+- New top-level `NOTICE`: the ISC licence of ares and the inventory of the files that say they port code
+  from ares or Mesen2, with each origin licence.
 - A DMA that crosses the end of the `VBlank` loses what the console loses. Each byte of a one-block DMA
   is now written (or lost) on the line of its own slot, as ares and Mesen2 gate every `$2104` / `$2118/9`
   write: a 352-byte VRAM upload started on the last line of the frame keeps the ~140 bytes of that line and

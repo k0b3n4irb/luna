@@ -1099,19 +1099,6 @@ fn breakpoint_registry_halts_at_speed() {
     // Cleared registry: the loop runs to its budget again.
     let out = e.run_until_break(10).unwrap();
     assert!(out.hit.is_none());
-
-    // A hit surfaces on the Event Viewer as a MarkedBreakpoint event
-    // (issue #68) — visible immediately while paused at the halt.
-    e.set_cpu_register("pc", 0x0100).unwrap();
-    e.bp_add_exec(0x00_0105, None).unwrap();
-    let out = e.run_until_break(100).unwrap();
-    assert!(out.hit.is_some());
-    assert!(
-        e.event_snapshot().iter().any(|ev| ev.category
-            == event_viewer::EventCategory::MarkedBreakpoint
-            && ev.pc == 0x00_0105),
-        "the hit is injected into the Event Viewer buffer"
-    );
 }
 
 #[test]
