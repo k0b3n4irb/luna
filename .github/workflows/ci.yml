@@ -199,7 +199,18 @@ jobs:
       - name: Build the guide
         run: mdbook build book
       - name: Check the documentation against the tree
-        run: python3 tools/check-doc-drift.py
+        id: drift
+        shell: bash
+        run: python3 tools/check-doc-drift.py 2>&1 | tee doc-drift.log
+      - name: The ORACLE.json script and its tests
+        run: python3 tools/test_oracle_json.py
+      - name: Keep the verdict for ORACLE.json
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: oracle-log-doc-drift
+          path: doc-drift.log
+          if-no-files-found: ignore
 
   # ---------------------------------------------------------------------
   # NOTE: the Tom Harte SingleStepTests (both CPU cores) used to run here on
@@ -248,7 +259,15 @@ jobs:
         if: steps.rom-cache.outputs.cache-hit != 'true'
         run: tools/fetch-snes-test-roms.sh
       - name: Run golden suite
-        run: cargo test -p luna-core --test snes_test_roms --release
+        shell: bash
+        run: cargo test -p luna-core --test snes_test_roms --release 2>&1 | tee snes-test-roms.log
+      - name: Keep the verdict for ORACLE.json
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: oracle-log-snes-test-roms
+          path: snes-test-roms.log
+          if-no-files-found: ignore
       # The pictures in the guide and the README are frames of this corpus
       # (tools/doc-captures.py is their only writer). Re-render them and
       # compare: a capture that luna no longer produces, or a picture added
@@ -257,3 +276,37 @@ jobs:
         run: |
           cargo build --release --locked -p luna-cli
           python3 tools/doc-captures.py --check
+
+  # ---------------------------------------------------------------------
+  # ORACLE.json for this run: which oracles the golden suite and the doc
+  # check validated at this commit (tools/oracle-json.py reads their logs;
+  # nothing here is typed by hand). The Tom Harte gates are not in this
+  # workflow, so they show `skipped` here: their own file is the artifact
+  # of the `Tom Harte CPU suites` workflow. A few seconds, no build.
+  # ---------------------------------------------------------------------
+  oracle:
+    name: oracle-json
+    runs-on: ubuntu-latest
+    if: always()
+    needs: [docs, snes-test-roms]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: oracle-log-*
+          merge-multiple: true
+      - name: Write ORACLE.json
+        run: |
+          python3 tools/oracle-json.py \
+            --doc-drift doc-drift.log \
+            --snes-test-roms snes-test-roms.log \
+            --outcome doc-drift=${{ needs.docs.result }} \
+            --outcome snes-test-roms=${{ needs.snes-test-roms.result }} \
+            -o ORACLE.json
+          cat ORACLE.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: oracle-json
+          path: ORACLE.json

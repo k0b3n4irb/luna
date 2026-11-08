@@ -77,3 +77,58 @@ The first two tiers test *luna*; `luna test` lets homebrew developers test
 the SDK assert/log channels and displayed-frame hashes, run in-process
 through `luna-api` with a CI exit-code contract. See
 [Developing homebrew with luna](../using/homebrew-ci.md).
+
+## `ORACLE.json` — which oracles validated a commit
+
+A green check mark does not say *what* it was green against. `ORACLE.json` does:
+a small, versioned file (`schema: 1`) that CI **writes from the real results of
+the gates**, never by hand (`tools/oracle-json.py`, stdlib only, with its
+tests in `tools/test_oracle_json.py`). Any consumer can then say *"validated on
+2026-11-08 at `e55389f` by the 65C816 and SPC700 Tom Harte suites, the golden
+ROMs and the doc check; NOT proven: …"* without re-reading the workflows.
+
+| Field | Meaning |
+|---|---|
+| `schema` | format version, `1` |
+| `generated_at` | UTC time the file was written |
+| `commit` | full sha the gates ran on |
+| `luna_version` | the workspace version at that commit |
+| `gates[]` | one entry per gate: `name`, `workflow` (file / job), `result` (`pass`, `fail` or `skipped`), `counts`, `run_url` (the Actions run, or `local`) |
+| `not_proven` | a **fixed** list kept in the script: what no gate proves, whatever its colour (the Tom Harte vectors come from a software model and not from a console; the PNG / hash goldens are luna's own output or captures of unverified provenance; the contested `(dp,X)` states follow ares and Mesen2; coprocessors and the absolute audio level are not calibrated on a console) |
+| `core_code_commit` | the last commit that touched the CPU / APU core code (`core_code_paths` lists it) |
+
+The gates are `tom-harte-65816` and `tom-harte-spc700` (the *Tom Harte CPU
+suites* workflow), `snes-test-roms` (the golden ROM suite) and `doc-drift`
+(`ci.yml`). The Tom Harte `counts` are the report the harness already prints,
+parsed: `states_passed` / `states_total`, `contested` (the 246 states of
+`CONTESTED_STATE`, read from the harness source), `not_run` (the `MVN`/`MVP`
+states), and the cycle-count and bus-trace matches. A gate is `pass` only if
+the test verdict is green **and** the numbers sit exactly on the baseline (a
+`Fail` count other than the contested states, a panic or a cycle mismatch is
+`fail` even if the harness was run without its strict switch); a sampled run is
+`skipped`, it is not a gate. A CI outcome of `failure` or `cancelled` always
+gives `fail`.
+
+**Where the file comes from.** Each workflow uploads it as the artifact
+`oracle-json`: the `Tom Harte CPU suites` workflow (the Tom Harte gates; the
+others read `skipped` there) and `ci.yml` (golden suite and doc check; the Tom
+Harte gates read `skipped`). A gate counts only where its `result` is not
+`skipped`. The Tom Harte workflow does not run on every push, only when the CPU
+cores change (and weekly): a commit without a run **inherits the last run on
+the same core code**. Compare `core_code_commit` of the commit you ask about
+with the `core_code_commit` (and `commit`) of the latest Tom Harte file: if they
+are equal, no CPU / APU code moved in between and that run still speaks for the
+commit. Whether a file is too old to trust is the consumer's call; the file
+carries `generated_at` and `commit` for that.
+
+**Locally**, for a build you are about to hand over, keep the logs of the runs
+and let the script read them (every input is optional; the gates without a log
+are `skipped`):
+
+```bash
+LUNA_TOM_HARTE_REQUIRE=1 cargo test -p luna-cpu-65c816 --test tom_harte --release -- --ignored --nocapture > th816.log 2>&1
+LUNA_TOM_HARTE_REQUIRE=1 cargo test -p luna-cpu-spc700 --test tom_harte --release -- --ignored --nocapture > thspc.log 2>&1
+tools/oracle-json.py --tom-harte-65816 th816.log --tom-harte-spc700 thspc.log -o ORACLE.json
+```
+
+The generated file is never committed (it is in `.gitignore`).

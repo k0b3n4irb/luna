@@ -97,11 +97,36 @@ jobs:
       - name: Fetch SPC700 dataset (on cache miss)
         if: steps.spc-cache.outputs.cache-hit != 'true'
         run: tools/fetch-tom-harte-spc700.sh
+      # The reports the harnesses print (stderr) are teed to a log: that is
+      # all tools/oracle-json.py needs, the harnesses are unchanged. `shell:
+      # bash` makes `-o pipefail` explicit, so `tee` never hides a failure.
       - name: SPC700 suite (strict)
+        id: spc700
+        shell: bash
         env:
           LUNA_TOM_HARTE_REQUIRE: "1"
-        run: cargo test -p luna-cpu-spc700 --test tom_harte --release -- --ignored --nocapture
+        run: cargo test -p luna-cpu-spc700 --test tom_harte --release -- --ignored --nocapture 2>&1 | tee tom-harte-spc700.log
       - name: 65C816 suite (strict)
+        id: cpu65816
+        shell: bash
         env:
           LUNA_TOM_HARTE_REQUIRE: "1"
-        run: cargo test -p luna-cpu-65c816 --test tom_harte --release -- --ignored --nocapture
+        run: cargo test -p luna-cpu-65c816 --test tom_harte --release -- --ignored --nocapture 2>&1 | tee tom-harte-65816.log
+      # ORACLE.json: which oracles this run validated (book: method/testing,
+      # "ORACLE.json"). Written from the logs, even when a suite failed.
+      - name: ORACLE.json
+        if: always()
+        run: |
+          python3 tools/oracle-json.py \
+            --tom-harte-65816 tom-harte-65816.log \
+            --tom-harte-spc700 tom-harte-spc700.log \
+            --outcome tom-harte-65816=${{ steps.cpu65816.outcome }} \
+            --outcome tom-harte-spc700=${{ steps.spc700.outcome }} \
+            -o ORACLE.json
+          cat ORACLE.json
+      - name: Upload ORACLE.json
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: oracle-json
+          path: ORACLE.json

@@ -7,6 +7,12 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ## [Unreleased]
 
+- `ORACLE.json`: a versioned file (`schema: 1`) that CI writes from the real results of the gates (Tom Harte reports of
+  the 65C816 and the SPC700, the golden ROM suite, the doc check), saying which oracles validated a commit, what is
+  NOT proven (a fixed list) and the last commit that touched the CPU / APU core code, so a commit without a Tom Harte
+  run can be read as inheriting the last run on the same core code. `tools/oracle-json.py` (stdlib only, with a local
+  mode on run logs; tests in `tools/test_oracle_json.py`) produces it; the `tom-harte` workflow and `ci.yml` upload it
+  as the artifact `oracle-json`. The harnesses are unchanged. See the guide, *Testing & validation*.
 - `cargo test -p luna-apu` compiles and passes without `--all-features` (the unit tests need the SPC700 atomic
   oracle: now a dev-dependency). A new S-DSP unit test checks the counter trigger of all 32 envelope rates over a
   full 30720-step cycle against the hardware rule (period and offset rebuilt from ares `sfc/dsp/counter.cpp`), where
