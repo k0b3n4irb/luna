@@ -4096,6 +4096,20 @@ impl SnesBus<'_> {
                 let in_hold = *self.mclk_total < self.cpu_regs.irq_raise_mclk + 4;
                 return self.cpu_regs.read_timeup(in_hold) | (*self.mdr & 0x7F);
             }
+            // Strict mode (R9): the joypad registers are the shift registers
+            // the console is filling while `$4212` bit 0 is set.
+            if (0x4218..=0x421F).contains(&reg_off)
+                && self.cpu_regs.auto_joypad_busy()
+                && let Some(log) = self.hw_faults.as_mut()
+            {
+                log.note(
+                    crate::hw_strict::HwRule::AutoJoypadRegRead,
+                    self.cpu_pc_full,
+                    u32::from(reg_off),
+                    MemOrigin::Cpu,
+                    (self.frame_count, self.ppu_line, self.mcycles_in_line as u16),
+                );
+            }
             if let Some(v) = self.cpu_regs.read(reg_off) {
                 return v;
             }

@@ -341,3 +341,49 @@ fn r8_stays_quiet_without_auto_joypad_and_outside_its_window() {
     let code = [0xA9, 0x01, 0x8D, 0x00, 0x42, 0xAD, 0x12, 0x42];
     assert!(run_journal(rom_looping(&code, 5), 3).is_empty());
 }
+
+/// `LDA #nmitimen ; STA $4200 ; loop: LDA $42<reg>`.
+fn rom_joy_reg_read(nmitimen: u8, reg: u8) -> (Cartridge, u32) {
+    let code = [0xA9, nmitimen, 0x8D, 0x00, 0x42, 0xAD, reg, 0x42];
+    (rom_looping(&code, 5), 0x8005)
+}
+
+#[test]
+fn r9_a_joypad_register_read_during_the_auto_read_is_flagged() {
+    for reg in 0x18..=0x1F {
+        let (cart, pc) = rom_joy_reg_read(0x01, reg);
+        let faults = run_journal(cart, 3);
+        assert!(!faults.is_empty(), "reg {reg:#x}");
+        assert!(
+            faults.iter().all(|f| f.rule == HwRule::AutoJoypadRegRead
+                && f.pc == pc
+                && f.addr == 0x4200 | u32::from(reg)),
+            "reg {reg:#x}: {faults:?}"
+        );
+        // Only in the window after VBlank starts, never on a picture line.
+        assert!(faults.iter().all(|f| f.line >= 225));
+    }
+}
+
+#[test]
+fn r9_stays_quiet_without_auto_joypad_and_for_other_registers() {
+    // Auto-read off: the registers are never being filled.
+    let (cart, _) = rom_joy_reg_read(0x00, 0x18);
+    assert!(run_journal(cart, 3).is_empty());
+    // $4212 alone is how a program waits, not a fault.
+    let (cart, _) = rom_joy_reg_read(0x01, 0x12);
+    assert!(run_journal(cart, 3).is_empty());
+}
+
+#[test]
+fn r9_stays_quiet_when_the_program_waits_for_busy_to_fall() {
+    // Wait for busy to rise, then to fall, then read $4218 (once $4212
+    // bit 0 is clear), and start again.
+    let code = [
+        0xA9, 0x01, 0x8D, 0x00, 0x42, // enable
+        0xAD, 0x12, 0x42, 0x4A, 0x90, 0xFA, // rise: LDA $4212 ; LSR ; BCC rise
+        0xAD, 0x12, 0x42, 0x4A, 0xB0, 0xFA, // fall: LDA $4212 ; LSR ; BCS fall
+        0xAD, 0x18, 0x42, // LDA $4218
+    ];
+    assert!(run_journal(rom_looping(&code, 5), 3).is_empty());
+}

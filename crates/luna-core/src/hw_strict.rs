@@ -44,6 +44,12 @@ pub enum HwRule {
     /// clocked by the console, so the bit read is not the one the program
     /// expects (ares `cpu/io.cpp` `$4212`, `$4016`).
     AutoJoypadRead,
+    /// R9 — a CPU read of `$4218-$421F` while the auto-joypad read is running
+    /// (`$4212` bit 0 set): the registers are the shift registers the console
+    /// is filling, so the program gets a partial word (ares `cpu/io.cpp`
+    /// returns `io.joy1..4` unfiltered; Mesen2 flags the read as
+    /// `SnesReadDuringAutoJoy`). R7 was never issued.
+    AutoJoypadRegRead,
 }
 
 impl HwRule {
@@ -58,6 +64,7 @@ impl HwRule {
             Self::DmaForbiddenA => "R5",
             Self::DmaWramPort => "R6",
             Self::AutoJoypadRead => "R8",
+            Self::AutoJoypadRegRead => "R9",
         }
     }
 
@@ -76,6 +83,9 @@ impl HwRule {
             }
             Self::DmaWramPort => "DMA between WRAM and $2180 (WMDATA): the B side does not happen",
             Self::AutoJoypadRead => "manual $4016/$4017 read during the auto-joypad read",
+            Self::AutoJoypadRegRead => {
+                "$4218-$421F read during the auto-joypad read: a partial word"
+            }
         }
     }
 }
