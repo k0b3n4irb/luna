@@ -1,4 +1,5 @@
-//! R10 / R11 (the INIDISP and SETINI early latch) against the hardware-glitch
+//! R10 / R11 (the INIDISP and SETINI early latch) and R12 (brightness 0 is
+//! not black) against the hardware-glitch
 //! test ROMs of undisbeliever/snes-test-roms (Zlib), built by
 //! `tools/fetch-undisbeliever-roms.sh` into `.luna_tests_undis/` (override:
 //! `LUNA_UNDIS_TEST_DIR`). The ROMs are not in the repository. Absent: the
@@ -123,4 +124,12 @@ fn setini_mode7ex_raises_exactly_r11() {
 #[test]
 fn setini_obj_hdma_driven_is_beyond_the_cpu_write_rules() {
     check("setini-early-read-obj.sfc", &[]);
+}
+
+/// The author's "brightness 0 is not black on a SNES console": a white
+/// backdrop and a checkerboard, display on, `INIDISP = 0`, forever. R12 and
+/// nothing else.
+#[test]
+fn brightness_0_raises_exactly_r12() {
+    check("inidisp_brightness_0.sfc", &["R12"]);
 }

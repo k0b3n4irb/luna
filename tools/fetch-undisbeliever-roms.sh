@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Build the hardware-glitch test ROMs of undisbeliever/snes-test-roms (Zlib)
-# that the `luna strict` early-latch rules R10 / R11 are checked against
+# that the `luna strict` early-latch rules R10 / R11 (and the hardware test
+# of R12, brightness 0) are checked against
 # (crates/luna-cli/tests/strict_undis.rs).
 #
 # The ROMs are not vendored and not downloaded as binaries: upstream ships
@@ -38,6 +39,11 @@ ROMS=(
     inidisp-early-read-glitch/inidisp-d7-glitch-test
     setini-early-read-mode7ex
     setini-early-read-obj
+)
+
+# The hardware tests the tests name (paths under src/hardware-tests/, no .asm).
+HW_ROMS=(
+    inidisp_brightness_0
 )
 
 DEST="${LUNA_UNDIS_TEST_DIR:-$(cd "$(dirname "$0")/.." && pwd)/.luna_tests_undis}"
@@ -102,6 +108,9 @@ targets=()
 for r in "${ROMS[@]}"; do
     targets+=("bin/hardware-glitch-tests/$r.sfc")
 done
+for r in "${HW_ROMS[@]}"; do
+    targets+=("bin/hardware-tests/$r.sfc")
+done
 { make -C "$SRC" directories && make -C "$SRC" -j"$(nproc)" "${targets[@]}"; } >"$DEST/build.log" 2>&1 || {
     echo "error: the build failed, see $DEST/build.log" >&2
     tail -20 "$DEST/build.log" >&2
@@ -112,6 +121,11 @@ echo "ROMs in $DEST (SHA-256):"
 for r in "${ROMS[@]}"; do
     name="$(basename "$r").sfc"
     cp "$SRC/bin/hardware-glitch-tests/$r.sfc" "$DEST/$name"
+    printf '  %s  %s\n' "$(sha256sum "$DEST/$name" | cut -d' ' -f1)" "$name"
+done
+for r in "${HW_ROMS[@]}"; do
+    name="$(basename "$r").sfc"
+    cp "$SRC/bin/hardware-tests/$r.sfc" "$DEST/$name"
     printf '  %s  %s\n' "$(sha256sum "$DEST/$name" | cut -d' ' -f1)" "$name"
 done
 echo "Done. Run: LUNA_UNDIS_TEST_REQUIRE=1 cargo test -p luna-cli --test strict_undis"
