@@ -15,6 +15,14 @@ fast-forwarded to (binaries attached by CI). Format inspired by
   sources, not vendored) and `strict_undis` checks them, in CI; the Peter Lemon corpus (88 ROMs) raises neither rule; of 41 commercial ROMs, two raise R10, a few
   times each, and both are a long-addressed `sta.l $802100` (bank byte `$80` on the bus) in picture time: the very
   pattern the author's test names, so a finding, not a false positive. Rule lists in the CLI, API and MCP now read R1-R6, R8-R11.
+- `luna strict` gets **R12**, "brightness 0 is not black on a console": `INIDISP` brightness 0 with the display on, over a
+  picture that is not black, held for every picture line of one frame. A console draws such a picture faintly; luna, like
+  ares and Mesen2, draws black. An advisory of a fidelity difference, not a hazard. The source is undisbeliever's
+  `inidisp_brightness_0` hardware test, which names neither the level nor the console model, so none is claimed; the
+  fetch script builds it and `strict_undis` checks that it raises exactly R12. A shorter run is deliberately not
+  flagged: measured, a few lines at the top of a frame is what clean commercial ROMs do (22 of 42 files with any lit
+  line, 4 with a whole frame: R12 fires on those four, and on none of the 88 Peter Lemon ROMs). Rule lists in the CLI,
+  API and MCP now read R1-R6, R8-R12.
 - A SPC700 that executes `STOP` no longer freezes the S-DSP and the timers, and the heuristic mailbox stub that took over
   `$2140-$2143` is gone. ares idles the stopped SMP core (`read(PC); idle()`), each idle cycle clocking the timers and
   the DSP, so only the core halts and the ports keep the last value the SPC wrote (the stub echoed the CPU's writes

@@ -1211,6 +1211,7 @@ proves it on any ROM).
 | R9 | Read of `$4218-$421F` while the auto-joypad read runs (`$4212` bit 0): the registers are the shift registers the console is filling, so the value is a partial word (zero at the start, one more bit every 256 master clocks, 4224 in all). Wait for the flag to fall, as the SDK does. | ares `cpu/io.cpp`, `cpu/timing.cpp` `joypadEdge`; Mesen2 `SnesReadDuringAutoJoy` |
 | R10 | CPU write to `$2100` (INIDISP) while the picture is drawn (`HBlank` included) with bit 7 on the data bus just before the write and bit 7 clear in the value: the PPU latches the register early, from the previous bus byte, and on a three-chip console corrupts sprite tile data. Mitigation: a write whose preceding bus byte has bit 7 clear (`sta $0f2100`, not `sta $802100`), or a value with bit 7 set. | the author's hardware tests (`inidisp-d7-glitch-test`, `inidisp-hammer-*`), not a reference emulator |
 | R11 | CPU write to `$2133` (SETINI) while the picture is drawn, where bit 1 or bit 6 of the value differs from the previous bus byte: the PPU may latch the register early and show the old bits (red or blue dots in Mode 7 EXTBG). | the author's hardware test (`setini-early-read-mode7ex`); the exemption of `VBlank` and forced blank is a **hypothesis** carried over from INIDISP, not a measurement |
+| R12 | Brightness 0 (`$2100` bits 0-3 clear) with the display on (force blank clear), over a picture that is not black, **held for every picture line of one frame**. A console does not draw brightness 0 as black but as a faint picture; luna, like ares and Mesen2, draws black. An **advisory** of a fidelity difference, not a hazard: nothing is lost on a console, the picture is simply not the one luna shows. Reported at the last CPU write to `$2100`, once per whole frame. | the author's hardware test (`inidisp_brightness_0`, "a simple test to demonstrate brightness 0 is not black on a SNES console"), which gives neither the level nor the console model: none is claimed |
 
 `VBlank` starts on line 225 (240 with overscan, `$2133` bit 2): a write on
 line 224 is a fault, on line 225 it is not. A DMA is judged byte by byte, at
@@ -1249,6 +1250,23 @@ does not judge here, so `luna strict` stays silent on them. That the glitch need
 byte of the *previous* cycle is the author's measurement; that `VBlank` and forced blank spare
 SETINI as they spare INIDISP is a hypothesis.
 
+**R12 is an advisory, and "held for a whole frame" is a measured choice.** The definition has three parts:
+`$2100 & $8F == 0` (brightness 0, display on), a framebuffer row luna drew that is not pure black (a black
+picture is black on a console too: the usual blank-by-brightness), and a run covering every picture line of a
+frame (224, or 239 with overscan). A shorter run is deliberately not flagged. Measured with the first two parts
+only, the rule fired on one of the 88 Peter Lemon ROMs (single-line blips) and on 22 of 42 local commercial files
+(600 frames each): mostly a few lines (4 to 14) at the top of every frame, a fade begun a little late, which a
+console shows for a few lines only. By run length: 1 line or more 22 commercial files, 8 lines or more 21, 30 or
+more 12, a whole frame 4, and 0 of the 88 Peter Lemon ROMs from 8 lines up. The whole frame fires on four commercial
+ROMs, each a frame (or more) at brightness 0 over a lit picture, which is the difference the rule exists to tell
+you about; one more sits at 223 lines and is not flagged (that is the price of a threshold). Exit code `1` follows
+the other rules: an R12 alone makes `luna strict` exit 1.
+
+```
+$ luna strict inidisp_brightness_0.sfc            # white backdrop and checkerboard, INIDISP = 0
+R12 pc=$80:8691 $2100 cpu x23 (first: frame 7 line 224 h 0)  brightness 0 with the display on over a lit picture, ... (advisory)
+```
+
 Exit code: `0` = no fault, `1` = at least one (or a core panic), `2` = the
 ROM cannot be loaded. `--json` prints `{rom, frames, ok, occurrences,
 overflow, faults: [{rule, what, pc, addr, origin, frame, line, hclock,
@@ -1257,7 +1275,7 @@ faults are kept; `overflow` counts the others. `luna run --strict-hw` prints the
 after the final state (exit 1 on a fault), and the MCP tools `enable_hw_strict` /
 `take_hw_faults` give it to a client (a `load_rom` turns the journal off).
 
-**VRAM provenance: sprite tiles nobody filled.** Besides R1-R6 and R8-R11, `luna strict` and
+**VRAM provenance: sprite tiles nobody filled.** Besides R1-R6 and R8-R12, `luna strict` and
 `luna run --strict-hw` tag every VRAM byte written through `$2118` / `$2119` with its
 writer (the instruction, or the DMA channel and its source, the frame, `OBSEL` at that
 moment; a write the active display drops tags nothing). Once per frame the journal then
