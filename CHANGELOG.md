@@ -7,6 +7,11 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ## [Unreleased]
 
+- Documented: `--until-frame F` stops at the wrap back to line 0, so `--screenshot` shows the picture of the
+  previous lines 1-224 while `--peek` of OAM / PPU / VRAM reads the state the V-blank NMI has already written for
+  the next picture, one frame ahead. The guide (*A frame boundary is one picture behind the memory*) and the
+  `--until-frame` help say so and show how to get a capture and peeks of the same state: `--until-pc` on the NMI
+  handler (`--hit K` = the end of frame `K-1`'s picture), measured on a hand-built ROM.
 - `luna strict` rule **S1** (sprite tile never written) is judged on "drawn and never written", whatever the tile
   holds. It used to need a non-zero pixel, and the default zero power-on VRAM makes a never-written tile blank, so
   the rule was silent unless `--power-on random` was given. A ROM whose visible sprite draws a tile no write

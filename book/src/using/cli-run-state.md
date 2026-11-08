@@ -48,8 +48,9 @@ lands on whatever the ROM is doing after N instructions, so any change to
 the code between boot and the capture — a codegen improvement, a longer
 zero-fill, five bytes more of crt0 — moves the capture onto another
 animation phase and the hash changes without any rendering regression.
-`--until-frame` stops at the start of PPU frame `F` instead, so the same
-game frame is captured before and after the change:
+`--until-frame` stops at the start of PPU frame `F` instead (the wrap back to
+line 0, see *A frame boundary is one picture behind the memory* below), so the
+same game frame is captured before and after the change:
 
 ```bash
 # Visual baseline at PPU frame 200 — stable across codegen changes.
@@ -351,9 +352,43 @@ difference. What reads the screen is refused on the command line
 (`--screenshot`, `--screenshot-frames`, `--print-fbhash`,
 `--native-res`), exit 2, rather than answered with a black frame.
 
+### A frame boundary is one picture behind the memory
+
+`--until-frame F` stops at the wrap back to line 0 of frame `F`. By then the
+picture the run can capture is the one drawn during lines 1-224 of the
+frame before, and the V-blank NMI (line 225) has already run: the game has
+written the OAM, the PPU registers and the VRAM of the *next* picture. So in
+one command, `--screenshot` shows frame `F-1`'s picture while `--peek` of
+`OAM:`, `PPU:` and `VRAM:` (and of the WRAM the NMI updates) reads the state
+that will draw frame `F`'s: the memory is one picture ahead of the capture.
+Comparing a peek with a capture, or with a model indexed by frame, is wrong by
+one frame unless that is known.
+
+To read the state that drew the picture, stop where the picture is complete
+and the NMI has not yet written anything: on the first instruction of the NMI
+handler, with `--until-pc`. `--hit K` is the arrival at the end of frame
+`K-1`'s picture, so the capture and the peeks are of the same state:
+
+```bash
+# A ROM whose NMI increments a counter and writes it as sprite 0's X.
+luna state --force-mapper lorom --until-frame 30 --screenshot f30.png \
+    --peek OAM:0:2 --peek 7E:0100:1 nmi_demo.sfc
+#   OAM   1E 64    counter 1E  (X = 30)   -- but f30.png shows the sprite at x = 29..36
+luna state --force-mapper lorom --until-pc nmi --hit 31 --screenshot p.png \
+    --peek OAM:0:2 --peek 7E:0100:1 nmi_demo.sfc
+# reached nmi ($00:8070), hit 31 -- frame 30, line 225
+#   OAM   1E 64    counter 1E  (X = 30)   -- and p.png shows the sprite at x = 30..37
+```
+
+The stop at the NMI entry is a single instant, so the screenshot there is the
+complete picture of that frame. `--peek-at nmi` gives the same state for every
+frame of a run (`hit N` at frame `N-1`, line 225), one row per picture.
+
 ### Stopping on a routine, not on a frame
 
-`--until-frame N` snapshots at a frame boundary. That is the right place
+`--until-frame N` snapshots at a frame boundary (the wrap back to line 0,
+after the V-blank NMI: the memory is one picture ahead of the screenshot,
+see above). That is the right place
 as long as the game finishes its work inside the frame. Once a game tick
 spans two frames or more, the boundary almost always falls in the middle
 of one: half of the objects updated, the other half not yet. Comparing

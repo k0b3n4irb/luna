@@ -544,7 +544,12 @@ enum Command {
         assert_cgram: Vec<String>,
         /// Run until PPU frame N (then snapshot), instead of stopping at the
         /// `-n` instruction count. Makes input→assert probes land on an exact
-        /// frame rather than a generous `-n`.
+        /// frame rather than a generous `-n`. The stop is at the wrap back to
+        /// line 0: `--screenshot` shows the picture drawn in the previous
+        /// lines 1-224, while `--peek` of OAM / PPU / VRAM reads what the
+        /// V-blank NMI has since written for the NEXT picture, one frame
+        /// ahead. To read the state that drew the picture, stop with
+        /// `--until-pc` on the NMI handler instead (see the guide).
         #[arg(long = "until-frame")]
         until_frame: Option<u64>,
         /// Run until execution reaches this routine (then snapshot): a
