@@ -67,6 +67,18 @@ pub enum HwRule {
     /// dots). That `VBlank` and force blank exempt it is a HYPOTHESIS carried
     /// over from INIDISP, not a measurement.
     SetiniEarlyLatch,
+    /// R12 — brightness 0 (`$2100` bits 0-3 clear) with the display on
+    /// (force blank clear), over a picture that is not black, held for every
+    /// picture line of one frame. A console does not render brightness 0 as
+    /// black but as a faint picture; luna (like ares and Mesen2) draws black.
+    /// Source: undisbeliever's `inidisp_brightness_0.asm` ("a simple test to
+    /// demonstrate brightness 0 is not black on a SNES console"); the file
+    /// states neither the level nor the console model, so none is claimed.
+    /// An ADVISORY of a fidelity difference, not a hazard: the console loses
+    /// nothing, the picture is merely not the one luna shows. A shorter run
+    /// (a fade passing through, a few lines at the top of a frame) is
+    /// deliberately not flagged: measured, it is what clean commercial ROMs do.
+    BrightnessZero,
 }
 
 impl HwRule {
@@ -84,6 +96,7 @@ impl HwRule {
             Self::AutoJoypadRegRead => "R9",
             Self::InidispEarlyLatch => "R10",
             Self::SetiniEarlyLatch => "R11",
+            Self::BrightnessZero => "R12",
         }
     }
 
@@ -110,6 +123,9 @@ impl HwRule {
             }
             Self::SetiniEarlyLatch => {
                 "$2133 write differing from the data bus in bit 1 or 6, picture drawn: early latch (hypothesis)"
+            }
+            Self::BrightnessZero => {
+                "brightness 0 with the display on over a lit picture, a whole frame: a console shows it faintly, luna draws black (advisory)"
             }
         }
     }
@@ -144,6 +160,10 @@ pub const HW_FAULT_MAX_DISTINCT: usize = 4096;
 /// The journal: faults folded by (rule, pc, address), bounded.
 #[derive(Debug, Default)]
 pub struct HwFaultLog {
+    /// Consecutive picture lines that were brightness 0 with a lit row (R12).
+    dark_run: u32,
+    /// Address of the last CPU write to `$2100`, the site R12 is reported at.
+    pub(crate) inidisp_pc: u32,
     faults: Vec<HwFault>,
     index: HashMap<(HwRule, u32, u32), usize>,
     /// New distinct faults not kept because the journal was full.
@@ -179,6 +199,29 @@ impl HwFaultLog {
             hclock: at.2,
             count: 1,
         });
+    }
+
+    /// A picture line was drawn: judge R12 (`dark_lit`: brightness 0, display
+    /// on, a pixel above black on the row). The rule fires once, on the line
+    /// where the run of such lines reaches `last_line`, the last picture
+    /// line, which a run can only do by having started on line 1: one whole
+    /// frame. A shorter run is a blip (a fade-in begun a few lines into the
+    /// frame, a status bar) and is not flagged.
+    pub(crate) fn picture_line(&mut self, dark_lit: bool, line: u16, last_line: u16, frame: u64) {
+        if !dark_lit {
+            self.dark_run = 0;
+            return;
+        }
+        self.dark_run += 1;
+        if self.dark_run == u32::from(last_line) {
+            self.note(
+                HwRule::BrightnessZero,
+                self.inidisp_pc,
+                0x2100,
+                MemOrigin::Cpu,
+                (frame, line, 0),
+            );
+        }
     }
 
     /// Drain the journal (in order of first occurrence) and its overflow.
@@ -362,6 +405,53 @@ mod tests {
         assert_eq!(r11(0x00, 0x40, 100, true), None, "force blank");
         // Other registers are not concerned.
         assert_eq!(early_latch_rule(0x01, 0x80, 0x00, 100, NTSC, false), None);
+    }
+
+    #[test]
+    fn r12_fires_once_when_the_run_covers_every_picture_line() {
+        let mut log = HwFaultLog::default();
+        for line in 1..=224 {
+            log.picture_line(true, line, 224, 7);
+        }
+        let (faults, _) = log.take();
+        assert_eq!(faults.len(), 1);
+        assert_eq!(faults[0].rule, HwRule::BrightnessZero);
+        assert_eq!((faults[0].frame, faults[0].line), (7, 224));
+        // The next frame: line 0 shows nothing (not lit), the run restarts.
+        log.picture_line(false, 0, 224, 8);
+        for line in 1..=224 {
+            log.picture_line(true, line, 224, 8);
+        }
+        assert_eq!(log.take().0[0].count, 1, "a new journal after take");
+    }
+
+    #[test]
+    fn r12_ignores_a_blip_shorter_than_the_frame() {
+        let mut log = HwFaultLog::default();
+        // 223 lines, one short of a frame; then the picture comes up.
+        for line in 1..=223 {
+            log.picture_line(true, line, 224, 1);
+        }
+        log.picture_line(false, 224, 224, 1);
+        log.picture_line(false, 0, 224, 2);
+        // A fade begun a few lines into the frame.
+        for line in 9..=224 {
+            log.picture_line(true, line, 224, 2);
+        }
+        assert!(log.take().0.is_empty());
+    }
+
+    #[test]
+    fn r12_follows_the_overscan_height() {
+        let mut log = HwFaultLog::default();
+        for line in 1..=224 {
+            log.picture_line(true, line, 239, 1);
+        }
+        assert!(log.take().0.is_empty(), "224 lines are short of 239");
+        for line in 225..=239 {
+            log.picture_line(true, line, 239, 1);
+        }
+        assert_eq!(log.take().0.len(), 1);
     }
 
     #[test]

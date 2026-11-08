@@ -1040,6 +1040,19 @@ impl Ppu {
         rows.iter().take(self.frame_height()).any(|&w| w)
     }
 
+    /// Did PPU line `y` (the row `y - 1` of the framebuffer, just rendered)
+    /// put a pixel above black on screen? `false` for line 0, which
+    /// displays nothing, and for a line past the picture.
+    #[must_use]
+    pub fn scanline_has_light(&self, y: u16) -> bool {
+        let Some(row) = usize::from(y).checked_sub(1) else {
+            return false;
+        };
+        self.framebuffer
+            .get(row * FRAME_W..(row + 1) * FRAME_W)
+            .is_some_and(|px| px.iter().any(|p| *p != [0, 0, 0]))
+    }
+
     /// Borrow the current persistent framebuffer: 256 × [`Self::frame_height`]
     /// BGR888 pixels. Cheap accessor — no rendering happens here.
     #[must_use]

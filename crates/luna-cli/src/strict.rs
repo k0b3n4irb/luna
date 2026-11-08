@@ -1,5 +1,5 @@
 //! `luna strict` — run a ROM and list what a real console would have
-//! refused or corrupted (hardware strict mode, rules R1-R6, R8-R11).
+//! refused or corrupted (hardware strict mode, rules R1-R6, R8-R12).
 
 use std::process::ExitCode;
 

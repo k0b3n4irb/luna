@@ -3139,6 +3139,12 @@ impl SnesBus<'_> {
             if self.ppu.inidisp & 0x80 == 0 {
                 self.ppu.frame_visible_content_accum = true;
             }
+            // Strict R12: brightness 0 with the display on over a lit row.
+            let dark_lit =
+                self.ppu.inidisp & 0x8F == 0 && self.ppu.scanline_has_light(self.ppu_line);
+            if let Some(log) = self.hw_faults.as_mut() {
+                log.picture_line(dark_lit, self.ppu_line, vblank_start - 1, self.frame_count);
+            }
         }
 
         // Line `ppu_line`'s HDMA transfer — fired at the END of the line
@@ -3427,6 +3433,12 @@ impl SnesBus<'_> {
             return;
         }
         let off = (offset_of(addr) & 0xFF) as u8;
+        if off == 0
+            && let Some(log) = self.hw_faults.as_mut()
+        {
+            // R12 is reported at the last instruction that set the brightness.
+            log.inidisp_pc = self.cpu_pc_full;
+        }
         let (line, hclock) = (self.ppu_line, self.hclock());
         if let Some(rule) = crate::hw_strict::early_latch_rule(
             off,

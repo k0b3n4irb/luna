@@ -498,3 +498,93 @@ fn r10_and_r11_ignore_a_dma_to_the_registers() {
             .all(|f| f.rule != HwRule::InidispEarlyLatch)
     );
 }
+
+/// Force blank, CGRAM entry 0 = `colour`, then `$2100 <- brightness` (the
+/// instruction reported by R12 is the `STA $2100` at the returned address).
+fn rom_brightness(colour: u16, brightness: u8) -> (Cartridge, u32) {
+    let code = vec![
+        0xA9,
+        0x80,
+        0x8D,
+        0x00,
+        0x21, // force blank
+        0x9C,
+        0x21,
+        0x21, // CGADD = 0
+        0xA9,
+        colour as u8,
+        0x8D,
+        0x22,
+        0x21, // CGDATA low
+        0xA9,
+        (colour >> 8) as u8,
+        0x8D,
+        0x22,
+        0x21, // CGDATA high
+        0xA9,
+        brightness,
+        0x8D,
+        0x00,
+        0x21, // INIDISP
+    ];
+    let at = code.len();
+    (rom_looping(&code, at), 0x8000 + (at as u32 - 3))
+}
+
+fn r12_faults(cart: Cartridge) -> Vec<HwFault> {
+    run_journal(cart, 4)
+        .into_iter()
+        .filter(|f| f.rule == HwRule::BrightnessZero)
+        .collect()
+}
+
+#[test]
+fn r12_brightness_zero_over_a_lit_picture_is_flagged_once_per_frame() {
+    let (cart, pc) = rom_brightness(0x7FFF, 0x00);
+    let faults = r12_faults(cart);
+    assert!(!faults.is_empty());
+    assert!(
+        faults.iter().all(|f| f.pc == pc
+            && f.addr == 0x2100
+            && f.origin == MemOrigin::Cpu
+            && f.line == 224
+            && f.count == 1),
+        "{faults:?} (expected pc {pc:#x})"
+    );
+    // One fresh occurrence per whole frame, never two on the same frame.
+    let frames: BTreeSet<u64> = faults.iter().map(|f| f.frame).collect();
+    assert_eq!(frames.len(), faults.len());
+}
+
+#[test]
+fn r12_stays_quiet_when_the_brightness_is_not_zero() {
+    for b in [0x01, 0x08, 0x0F] {
+        let (cart, _) = rom_brightness(0x7FFF, b);
+        assert!(r12_faults(cart).is_empty(), "brightness {b}");
+    }
+}
+
+#[test]
+fn r12_stays_quiet_in_force_blank() {
+    // Bit 7 set, brightness 0: the screen is blanked, not dim.
+    let (cart, _) = rom_brightness(0x7FFF, 0x80);
+    assert!(r12_faults(cart).is_empty());
+}
+
+#[test]
+fn r12_stays_quiet_over_a_black_picture() {
+    // Brightness 0 over black is black on a console too: the usual
+    // "blank by brightness" of a loading screen.
+    let (cart, _) = rom_brightness(0x0000, 0x00);
+    assert!(r12_faults(cart).is_empty());
+}
+
+#[test]
+fn r12_stays_quiet_when_the_brightness_toggles_every_few_cycles() {
+    // `INIDISP` 0 then 15, forever: no whole frame is dark.
+    let code = [
+        0xA9, 0x80, 0x8D, 0x00, 0x21, 0x9C, 0x21, 0x21, 0xA9, 0xFF, 0x8D, 0x22, 0x21, 0xA9, 0x7F,
+        0x8D, 0x22, 0x21, 0xA9, 0x00, 0x8D, 0x00, 0x21, 0xA9, 0x0F, 0x8D, 0x00, 0x21,
+    ];
+    assert!(r12_faults(rom_looping(&code, 18)).is_empty());
+}
