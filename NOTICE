@@ -1,0 +1,118 @@
+NOTICE
+======
+
+luna is distributed under the Mozilla Public License 2.0 (see LICENSE). It
+was written by studying two open-source emulators, ares and Mesen2, and some
+of its files say, in their own headers or comments, that they port or follow
+code, tables, formats or behaviour of one of them. This file states the
+licence of each origin and lists those files. It makes no judgement on what
+the licences require of luna; it is the inventory the triage works from.
+
+The list is built from what the files declare about themselves (a search of
+the tree for "port", "verbatim", "translated" and "Mesen2's" next to the
+name of a reference). A file that ports without saying so is not in it.
+
+
+1. ares  (ISC licence)
+----------------------
+
+Source: https://github.com/ares-emulator/ares
+Licence text below: the ISC block at the top of the LICENSE file of the ares
+repository (master, fetched 2026-11-08). That file also carries notices for
+MAME-derived code, which is not used by luna and is not reproduced here.
+
+----------------------------------------------------------------------
+ares
+
+Copyright (c) 2004-2025 ares team, Near et al
+
+Permission to use, copy, modify, and/or distribute this software for any
+purpose with or without fee is hereby granted, provided that the above
+copyright notice and this permission notice appear in all copies.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+----------------------------------------------------------------------
+
+Files that say they port (or reproduce a table of) ares code
+(file:line of the declaration):
+
+  crates/luna-apu/src/lib.rs:6                   S-DSP: "cycle-accurate ares port" (the code is crates/luna-apu/src/dsp.rs)
+  crates/luna-apu/src/dsp.rs:5                   S-DSP fields and pipeline mirroring ares dsp.hpp
+  crates/luna-bus/src/sa1.rs:204                 SA-1 timer, "faithful ares port"
+  crates/luna-bus/src/sdd1.rs:41                 S-DD1 Golomb run-length table, "verbatim from ares"
+  crates/luna-bus/src/speed.rs:54                CPU access costs, "faithful port of ares CPU::wait"
+  crates/luna-bus/src/superfx.rs:688             Super FX, "direct port of ares component/processor/gsu"
+  crates/luna-bus/src/types.rs:43                bus mirroring, "faithful port of ares Bus::mirror"
+  crates/luna-cartridge/src/lib.rs:361           header scoring, "a port of ares SuperFamicom::scoreHeader"
+  crates/luna-core/src/dma/mod.rs:3              DMA and HDMA, "ported from ares"
+  crates/luna-core/src/dma/controller.rs:619     HDMA setup, "faithful port (ares hdmaSetup / Mesen2 InitHdmaChannels)"
+  crates/luna-core/src/snes.rs:1047              "ported from ares"
+  crates/luna-core/src/controller.rs:38          SNES Mouse, "faithful port of ares controller/mouse/mouse.cpp"
+  crates/luna-cpu-65c816/src/opcodes.rs:1365     MVN / MVP block move, "ported from ares"
+  crates/luna-cpu-spc700/src/opcodes.rs:1245     DIV YA,X, "ported verbatim from ares SPC700::instructionDIV"
+  crates/luna-cpu-upd96050/src/lib.rs:409        uPD96050 data ports (ares processor/upd96050/memory.cpp)
+  crates/luna-ppu/src/renderer.rs:875            Mode 7, "direct port of ares mode7.cpp"
+
+Files that name ares as the reference they follow without declaring a port
+are described in docs/ (the *_reference.md and *_gaps.md files).
+
+
+2. Mesen2  (GNU GPL, version 3)
+-------------------------------
+
+Source: https://github.com/SourMesen/Mesen2  (licence: GPL-3.0, the LICENSE
+file of that repository).
+
+2a. Files whose header says they port or follow Mesen2's code or tables:
+
+  crates/luna-core/src/dma/controller.rs:619     HDMA setup (ares hdmaSetup / Mesen2 InitHdmaChannels)
+  crates/luna-gui/src/main.rs:2493               PNG save of the on-screen frame, "Ports Mesen2's ..."
+  crates/luna-apu/src/dsp.rs:1264                test oracle: a decoder "translated from Mesen2's ..."
+  crates/luna-core/src/power.rs                  power-on RAM modes (Mesen2 EmuSettings::InitializeRam)
+
+2b. Files that take their behaviour, layout or file format from Mesen2's
+    debugger and tools (their headers say "Mesen2's ..." / "as Mesen2 ..."):
+
+  crates/luna-api/src/access.rs                  access counters
+  crates/luna-api/src/code_log.rs                code / data log
+  crates/luna-api/src/debugger.rs                debugger values, Go To, Find
+  crates/luna-api/src/expr.rs                    expression language and its quirks
+  crates/luna-api/src/label_import.rs            symbol-file import
+  crates/luna-api/src/labels.rs                  .mlb label format
+  crates/luna-api/src/listing.rs                 disassembly listing rows
+  crates/luna-api/src/memory.rs                  memory names
+  crates/luna-api/src/memory_search.rs           Memory Search
+  crates/luna-api/src/memory_view.rs             Memory Viewer behaviour
+  crates/luna-api/src/trace_logger.rs            Trace Logger format tags and default format
+  crates/luna-api/src/video.rs                   video filters and aspect ratios (algorithms; the code is luna's own)
+  crates/luna-api/src/workspace.rs               per-ROM workspace
+  crates/luna-bus/src/access.rs, mapper.rs       access counters, debugger memory access
+  crates/luna-core/src/access.rs                 access counters (S-CPU side)
+  crates/luna-core/src/hw_strict.rs              strict-mode checks (also ares)
+  crates/luna-gui/src/debugger_host.rs, input.rs, memory_host.rs, video.rs
+  crates/luna-gui/src/ui/debugger.rs, memory.rs, memory_search.rs, memory_tools.rs
+                                                 Debugger, Memory Tools and Memory Search windows laid out as Mesen2's
+
+2c. Used as a measuring reference only (reference traces, differential
+    scripts and tests that compare luna with a Mesen2 run; they hold no
+    Mesen2 source):
+
+  tools/mesen-*.lua, tools/snes-*.lua, tools/pitchmod-ref-check.lua,
+  tools/mesen-trace-log.py, tools/trace-diff.py, tools/irq-trace-diff.py,
+  tools/diff-wram-hashes.py, crates/luna-core/tests/dsp1_port_differential.rs,
+  crates/luna-cli/src/wram_trace.rs
+
+
+3. Withdrawn
+------------
+
+crates/luna-api/src/event_viewer.rs and the GUI Event Viewer panel, which
+said they were ported verbatim from Mesen2, have been removed from the tip of
+the repository (they remain in the git history, which has not been rewritten)
+until they are rewritten clean-room.
