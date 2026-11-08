@@ -7,6 +7,10 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ## [Unreleased]
 
+- `cargo test -p luna-apu` compiles and passes without `--all-features` (the unit tests need the SPC700 atomic
+  oracle: now a dev-dependency). A new S-DSP unit test checks the counter trigger of all 32 envelope rates over a
+  full 30720-step cycle against the hardware rule (period and offset rebuilt from ares `sfc/dsp/counter.cpp`), where
+  the PCM goldens missed a wrong rarely-used rate: `COUNTER_OFFSET[2]` 1040 -> 1041 passed every gate before.
 - Documented: `--until-frame F` stops at the wrap back to line 0, so `--screenshot` shows the picture of the
   previous lines 1-224 while `--peek` of OAM / PPU / VRAM reads the state the V-blank NMI has already written for
   the next picture, one frame ahead. The guide (*A frame boundary is one picture behind the memory*) and the

@@ -1229,6 +1229,68 @@ mod tests {
         assert_eq!(dsp.clock.counter, COUNTER_RELOAD - 1);
     }
 
+    /// The envelope rate table, rebuilt from the rule the hardware follows
+    /// (ares `sfc/dsp/counter.cpp:5-36`, `CounterRate` / `CounterOffset`;
+    /// the file says every period divides the 30720-step counter range):
+    /// rates 1-29 come in groups of three, group `g` firing every
+    /// `2048 / 2^g` steps times 1, 3/4, 5/8; rate 30 is 2 and rate 31 is 1
+    /// (the 5/8 rule would give 2.5 there). The counter offset of a rate
+    /// is 0, 1040 or 536 by its place in its group (`(rate - 1) % 3`),
+    /// and 0 for rates 30 and 31. Returns `(period, offset)`.
+    fn expected_rate(rate: usize) -> (u32, u32) {
+        match rate {
+            30 => (2, 0),
+            31 => (1, 0),
+            _ => {
+                let group = (rate as u32 - 1) / 3;
+                let place = (rate - 1) % 3;
+                let period = (2048 >> group) * [8, 6, 5][place] / 8;
+                (period, [0, 1040, 536][place])
+            }
+        }
+    }
+
+    /// Every one of the 32 envelope rates fires at the counter values the
+    /// hardware rule gives, over one full 30720-step cycle: the count, the
+    /// positions and the spacing. PCM goldens only see a wrong rate when a
+    /// note happens to use it (a 1040 -> 1041 offset on rate 2 passed them).
+    #[test]
+    fn every_envelope_rate_fires_where_the_hardware_rule_says() {
+        const RANGE: u32 = 2048 * 5 * 3; // 30720, the counter range
+        assert_eq!(u32::from(COUNTER_RELOAD), RANGE);
+        for rate in 0..32usize {
+            let mut dsp = Dsp::new();
+            dsp.clock.counter = 0; // the first tick reloads to 30719
+            let mut fired_at = Vec::new(); // counter value at each firing
+            for step in 0..RANGE {
+                dsp.counter_tick();
+                if dsp.counter_poll(rate as u32) {
+                    fired_at.push((step, u32::from(dsp.clock.counter)));
+                }
+            }
+            if rate == 0 {
+                assert!(fired_at.is_empty(), "rate 0 never fires");
+                continue;
+            }
+            let (period, offset) = expected_rate(rate);
+            assert_eq!(RANGE % period, 0, "rate {rate}: period {period}");
+            // Firing counter values: c + offset = k * period, 0 <= c < RANGE.
+            let first = (period - offset % period) % period;
+            let expected: Vec<u32> = (0..RANGE / period).map(|k| first + k * period).collect();
+            let mut got: Vec<u32> = fired_at.iter().map(|&(_, c)| c).collect();
+            got.sort_unstable();
+            assert_eq!(
+                got, expected,
+                "rate {rate} (period {period}, offset {offset})"
+            );
+            // The counter counts down by one per step, so consecutive
+            // firings are exactly one period apart in time.
+            for pair in fired_at.windows(2) {
+                assert_eq!(pair[1].0 - pair[0].0, period, "rate {rate} spacing");
+            }
+        }
+    }
+
     #[test]
     fn counter_poll_rate_zero_never_fires() {
         let dsp = Dsp::new();

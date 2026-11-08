@@ -24,5 +24,10 @@ luna-bus        = { workspace = true }
 serde       = { workspace = true, features = ["std", "derive"] }
 serde_bytes = { workspace = true }
 
+# The unit tests step the SPC700 with the atomic oracle (`Apu::run_one_spc`,
+# `cfg(test)`): without this, `cargo test -p luna-apu` alone does not compile.
+[dev-dependencies]
+luna-cpu-spc700 = { workspace = true, features = ["atomic-oracle"] }
+
 [lints]
 workspace = true
