@@ -43,7 +43,7 @@ Measured 2026-10-04 on the full datasets:
 
 | Core | State | Cycles |
 |---|---|---|
-| 65C816 | 5,079,754 / 5,080,000; the 246 others are `(dp,X)` in emulation mode with `D.l != 0` where luna follows ares, Mesen2 and gilyon's console-tested cputest ROM (`CONTESTED_STATE`, counted exactly by the gate) (508 files × 10,000; the 4 MVN/MVP files are not run) | count: 5,040,000 / 5,040,000 (WAI, STP excluded). Per-cycle bus trace: 4,739,736 / 5,040,000 — the rest is exactly the 30 files of `TRACE_RESIDUAL` plus 264 cases of `CONTESTED_STATE` in the harness (emulation-mode read-modify-write opcodes and `WDM`), every case of each. The gate fails on a divergence outside that list **and** on a listed file that stops diverging. |
+| 65C816 | 5,079,754 / 5,120,000 (512 files × 10,000); 40,000 states (the 4 MVN/MVP files) are not run, and the 246 others are `(dp,X)` in emulation mode with `D.l != 0` where luna follows ares, Mesen2 and gilyon's console-tested cputest ROM (`CONTESTED_STATE`, counted exactly by the gate) | count: 5,040,000 / 5,040,000 (WAI, STP excluded). Per-cycle bus trace: 4,739,736 / 5,040,000 — the rest is exactly the 30 files of `TRACE_RESIDUAL` plus 264 cases of `CONTESTED_STATE` in the harness (emulation-mode read-modify-write opcodes and `WDM`), every case of each. The gate fails on a divergence outside that list **and** on a listed file that stops diverging. |
 | SPC700, production core (`step_cycle`) | 256,000 / 256,000 | per-cycle bus trace: 254,000 / 254,000 (SLEEP, STOP excluded) |
 | SPC700, atomic core (`step`) | 256,000 / 256,000 | 254,000 / 254,000 |
 

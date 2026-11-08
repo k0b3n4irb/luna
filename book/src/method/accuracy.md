@@ -11,8 +11,8 @@ A grade only means something if it is backed by a measurement. Luna leans on
 three independent kinds of evidence, each catching what the others miss:
 
 1. **Per-instruction CPU suites** — exhaustive state-transition vectors prove
-   each opcode is correct in isolation. Both cores pass 100%
-   ([Testing & validation](testing.md)).
+   each opcode is correct in isolation. 65C816: 5,079,754 / 5,120,000
+   states, SPC700: 256,000 / 256,000 ([Testing & validation](testing.md)).
 2. **Golden full-system ROM tests** — homebrew hardware-test ROMs exercise the
    CPU, PPU and bus together, catching interaction bugs a single instruction
    never would.
