@@ -22,14 +22,25 @@ fn synthetic_rom(path: &Path) {
     let code: &[u8] = &[
         0xA9, 0x0F, 0x8D, 0x00, 0x21, // 8000 LDA #$0F : STA $2100  screen on
         0xA9, 0x01, 0x8D, 0x00, 0x42, // 8005 LDA #$01 : STA $4200  pad auto-read
-        0xAD, 0x19, 0x42, // 800A LDA $4219
-        0x30, 0xFB, // 800D BMI $800A               B held: wait
-        0x9C, 0x21, 0x21, // 800F STZ $2121
-        0xA5, 0x10, // 8012 LDA $10
-        0x8D, 0x22, 0x21, // 8014 STA $2122
-        0x9C, 0x22, 0x21, // 8017 STZ $2122
-        0xE6, 0x10, // 801A INC $10
-        0x80, 0xEC, // 801C BRA $800A
+        // $4219 is a partial word while the auto-read runs (it starts a few
+        // dots after V-blank): read it only between two checks that busy
+        // is clear.
+        0xAD, 0x12, 0x42, // 800A LDA $4212
+        0x4A, // 800D LSR A
+        0xB0, 0xFA, // 800E BCS $800A             busy: wait
+        0xAD, 0x19, 0x42, // 8010 LDA $4219
+        0x85, 0x11, // 8013 STA $11
+        0xAD, 0x12, 0x42, // 8015 LDA $4212
+        0x4A, // 8018 LSR A
+        0xB0, 0xEF, // 8019 BCS $800A             it started meanwhile
+        0xA5, 0x11, // 801B LDA $11
+        0x30, 0xEB, // 801D BMI $800A               B held: wait
+        0x9C, 0x21, 0x21, // 801F STZ $2121
+        0xA5, 0x10, // 8022 LDA $10
+        0x8D, 0x22, 0x21, // 8024 STA $2122
+        0x9C, 0x22, 0x21, // 8027 STZ $2122
+        0xE6, 0x10, // 802A INC $10
+        0x80, 0xDC, // 802C BRA $800A
     ];
     rom[..code.len()].copy_from_slice(code);
     rom[0x7FC0..0x7FD5].copy_from_slice(b"LUNA RECORD          ".as_ref());

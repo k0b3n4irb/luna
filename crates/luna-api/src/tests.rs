@@ -336,13 +336,13 @@ fn save_state_shape_is_pinned_to_the_version() {
     assert_eq!(
         (SAVE_STATE_VERSION, shapes),
         (
-            9,
+            10,
             [
-                ("LoROM", (447_764, 8_195)),
-                ("SA-1", (447_764, 4_723)),
-                ("Super FX", (447_764, 2_671)),
-                ("S-DD1", (447_764, 2_171)),
-                ("DSP-1", (447_764, 2_129)),
+                ("LoROM", (447_769, 8_195)),
+                ("SA-1", (447_769, 4_723)),
+                ("Super FX", (447_769, 2_671)),
+                ("S-DD1", (447_769, 2_171)),
+                ("DSP-1", (447_769, 2_129)),
             ]
         ),
         "serialized machine shape changed — see this test's doc comment"
@@ -479,6 +479,9 @@ fn a_super_multitap_serves_players_2_to_5() {
     let code = [
         0xA9, 0x01, 0x8D, 0x00, 0x42, // LDA #$01 : STA $4200 (auto-read)
         0xAD, 0x12, 0x42, 0x10, 0xFB, // wait: LDA $4212 : BPL wait (vblank)
+        // The auto-read starts a few dots after VBlank does (H130-H384):
+        // wait for busy to rise, then to fall.
+        0xAD, 0x12, 0x42, 0x4A, 0x90, 0xFA, // rise: LDA $4212 : LSR : BCC
         0xAD, 0x12, 0x42, 0x29, 0x01, 0xD0, 0xF9, // busy: AND #1 : BNE
         0xAD, 0x1A, 0x42, 0x8D, 0x00, 0x00, // JOY2L -> $00
         0xAD, 0x1B, 0x42, 0x8D, 0x01, 0x00, // JOY2H -> $01

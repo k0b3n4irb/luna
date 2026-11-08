@@ -211,7 +211,11 @@ $212C-$212F (TM TS TMW TSW), $2130 CGWSEL, $2131 CGADSUB, $2133 SETINI";
 /// v9 (2026-10): the 5A22 multiplier / divider computes over eight and
 /// sixteen CPU cycles instead of at once, so its counters and shift
 /// register (`CpuRegs::alu_mpyctr`, `alu_divctr`, `alu_shift`) are state.
-pub const SAVE_STATE_VERSION: u32 = 9;
+/// v10 (2026-11): the auto-joypad read is a 4224-clock sequence the
+/// scheduler steps like ares, not a copy made at V-blank entry, so its
+/// position and the word it is shifting in (`CpuRegs::joy_step`,
+/// `joy_pending`) are state, and `$4218-$421F` are the live shift registers.
+pub const SAVE_STATE_VERSION: u32 = 10;
 
 /// On-disk / on-wire save-state container produced by
 /// [`Emulator::save_state`]. `core` is the bincode-encoded `Snes` (the
@@ -793,9 +797,10 @@ pub struct CpuRegsState {
     pub rdmpy: u16,
     /// `$4214/$4215` RDDIV — divide quotient result.
     pub rddiv: u16,
-    /// `$4218/$4219` latched joypad 1 (auto-read).
+    /// `$4218/$4219` joypad 1 (auto-read): the live shift register, so a
+    /// value read while `hvbjoy` bit 0 is set is a partial word.
     pub joy1: u16,
-    /// `$421A/$421B` latched joypad 2 (auto-read).
+    /// `$421A/$421B` joypad 2 (auto-read), live like `joy1`.
     pub joy2: u16,
     /// `$420D` MEMSEL — `FastROM` enable (bit 0).
     pub memsel: u8,
@@ -2566,7 +2571,7 @@ impl Emulator {
             .as_ref()
             .map_or_else(default_cpu_regs_state, |s| CpuRegsState {
                 nmitimen: s.cpu_regs.nmitimen,
-                hvbjoy: s.cpu_regs.hvbjoy,
+                hvbjoy: s.cpu_regs.hvbjoy_now(),
                 nmi_flag: s.cpu_regs.nmi_flag,
                 irq_flag: s.cpu_regs.irq_flag,
                 wrio: s.cpu_regs.wrio,

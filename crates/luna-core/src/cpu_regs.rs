@@ -53,8 +53,10 @@ pub struct CpuRegs {
     /// `[raise, raise+4)` sees the flag SET but does **not** acknowledge
     /// it — the mirror of the RDNMI hold.
     pub irq_raise_mclk: u64,
-    /// `$4212` read side — HVBJOY: bit 7 = V-blank, bit 6 = H-blank,
-    /// bit 0 = joypad auto-read busy.
+    /// `$4212` read side — HVBJOY: bit 7 = V-blank. Bit 0 (joypad auto-read
+    /// busy) is not stored: it is derived from the live `$4200` bit 0 and the
+    /// auto-read sequence ([`Self::auto_joypad_busy`], [`Self::hvbjoy_now`]);
+    /// bit 6 (H-blank) is the bus's, from the beam.
     pub hvbjoy: u8,
 
     /// Result of the multiplication ($4216/$4217) or the division
@@ -77,12 +79,12 @@ pub struct CpuRegs {
     pub joypad1: u16,
     /// Same for player 2.
     pub joypad2: u16,
-    /// `$4218/$4219` — latched player-1 state copied here at the
-    /// start of every `VBlank` when `NMITIMEN.0` is set. Stays put
-    /// between latches, so games that read these registers see a
-    /// stable per-frame snapshot.
+    /// `$4218/$4219` — ares `io.joy1`: zeroed when an auto-read starts, then
+    /// shifted left once per 256 master clocks as the 16 bits come in (see
+    /// [`Self::joypad_edge`]). It stays put between auto-reads, but a read
+    /// *during* one sees the partial word — as on the console.
     pub joypad1_latched: u16,
-    /// `$421A/$421B` — latched player-2 state.
+    /// `$421A/$421B` — player-2 shift register (ares `io.joy2`).
     pub joypad2_latched: u16,
     /// Pads B, C, D of a Super Multitap (players 3-5 when it sits on port 2,
     /// 2-4 on port 1). Pad A is the port's own `joypad1` / `joypad2`. One
@@ -93,6 +95,13 @@ pub struct CpuRegs {
     pub joypad3_latched: u16,
     /// `$421E/$421F` — the auto-read's port-2 d1 line (joypad 4).
     pub joypad4_latched: u16,
+    /// Auto-read sequence position: `0` = idle, otherwise ares'
+    /// `autoJoypadCounter + 1` (so a default-built register file is idle).
+    /// Serialised.
+    pub joy_step: u8,
+    /// What the four shift registers receive, MSB first, over one sequence
+    /// (`joy1`, `joy2`, `joy3`, `joy4`): sampled when the sequence starts.
+    pub joy_pending: [u16; 4],
 
     /// Device on controller port 1 (the auto-read + `$4016` serial path).
     pub port1: PortDevice,
@@ -218,7 +227,7 @@ impl CpuRegs {
     #[must_use]
     pub const fn peek(&self, offset: u16) -> Option<u8> {
         Some(match offset {
-            0x4212 => self.hvbjoy,
+            0x4212 => self.hvbjoy_now(),
             0x4214 => self.rddiv as u8,
             0x4215 => (self.rddiv >> 8) as u8,
             0x4216 => self.rdmpy as u8,
@@ -270,29 +279,77 @@ impl CpuRegs {
         v
     }
 
-    /// Push the current per-frame joypad state into the auto-read
-    /// latches. Called by the scanline scheduler
-    /// (`SnesBus::sched_one_line`) when it crosses the `VBlank` entry
-    /// line, IF `NMITIMEN.0` is set.
-    /// Also raises `HVBJOY.0` (auto-read busy) for the few
-    /// scanlines the hardware spends in the auto-read sequence — see
-    /// [`Self::clear_joypad_busy`].
+    /// `$4212` bit 0: the auto-read sequence is running (ares `io.cpp:34`,
+    /// `autoJoypadPoll && autoJoypadCounter < 33`). Live in `$4200` bit 0:
+    /// clearing it mid-sequence drops the flag at once.
+    #[must_use]
+    pub const fn auto_joypad_busy(&self) -> bool {
+        self.nmitimen & 0x01 != 0 && self.joy_step != 0
+    }
+
+    /// `$4212` without the H-blank bit (the bus adds it): V-blank as latched
+    /// by the scheduler, busy as [`Self::auto_joypad_busy`].
+    #[must_use]
+    pub const fn hvbjoy_now(&self) -> u8 {
+        (self.hvbjoy & 0x80) | self.auto_joypad_busy() as u8
+    }
+
+    /// One edge of the auto-read sequence, ares `CPU::joypadEdge`
+    /// (`cpu/timing.cpp:144-196`): the scheduler calls it at every multiple
+    /// of 128 master clocks, `start` being true at the edge that begins a
+    /// sequence (first multiple of 256 at or after H130 of the first V-blank
+    /// line). 33 edges of 128 clocks (4224) follow:
     ///
-    /// D-pad opposing-direction quirk: per ares' `gamepad.cpp`
-    /// `latch()`, real hardware physically prevents `up + down` and
-    /// `left + right` from being asserted simultaneously. We resolve
-    /// the case by clearing both opposing bits — keyboard players
-    /// who hit conflicting keys see a "no-direction" outcome rather
-    /// than a glitched latch.
-    pub fn latch_joypad_auto_read(&mut self) {
-        if self.nmitimen & 0x01 == 0 {
+    /// - counter 0: the pads are latched; with `$4200` bit 0 set `joy1..4`
+    ///   are zeroed;
+    /// - counter 1: the latch is released (the only counter that survives
+    ///   `$4200` bit 0 being off — otherwise the sequence ends at once);
+    /// - odd counters 3..=33: one bit shifts in, MSB first (ares reads the
+    ///   port on the even counter and shifts on the odd one; luna samples
+    ///   every pad at counter 0, a deviation noted in
+    ///   `docs/luna_65c816_gaps.md` #6).
+    ///
+    /// D-pad opposing-direction quirk (ares `gamepad.cpp` `latch()`):
+    /// `clean_dpad` clears both of an opposing pair. A Mouse feeds its first
+    /// 16 protocol bits instead of a pad.
+    pub fn joypad_edge(&mut self, start: bool) {
+        let counter = if start {
+            0
+        } else if self.joy_step == 0 {
+            return;
+        } else {
+            self.joy_step
+        };
+        if counter == 0 && self.nmitimen & 0x01 != 0 {
+            self.sample_auto_read();
+            self.joypad1_latched = 0;
+            self.joypad2_latched = 0;
+            self.joypad3_latched = 0;
+            self.joypad4_latched = 0;
+        }
+        if counter != 1 && self.nmitimen & 0x01 == 0 {
+            // `$4200` bit 0 is off at this point: the sequence is skipped.
+            self.joy_step = 0;
             return;
         }
+        if counter >= 3 && counter & 1 == 1 {
+            let bit = 15 - u32::from((counter - 3) / 2);
+            let pick = |w: u16| (w >> bit) & 1;
+            self.joypad1_latched = self.joypad1_latched << 1 | pick(self.joy_pending[0]);
+            self.joypad2_latched = self.joypad2_latched << 1 | pick(self.joy_pending[1]);
+            self.joypad3_latched = self.joypad3_latched << 1 | pick(self.joy_pending[2]);
+            self.joypad4_latched = self.joypad4_latched << 1 | pick(self.joy_pending[3]);
+        }
+        self.joy_step = if counter >= 33 { 0 } else { counter + 1 };
+    }
+
+    /// What the four data lines will deliver this sequence.
+    fn sample_auto_read(&mut self) {
         // A Mouse on a port feeds the auto-read its first 16 protocol bits
         // (signature + buttons + speed) instead of the pad's button mask —
         // that is how the SDK's `mouseInit` detects it.
         let (mut d1_port1, mut d1_port2) = (0, 0);
-        self.joypad1_latched = match self.port1 {
+        let p1 = match self.port1 {
             PortDevice::Mouse => self.mouse.auto_read_16(),
             PortDevice::SuperScope => self.super_scope.auto_read_16(),
             PortDevice::Multitap => {
@@ -304,7 +361,7 @@ impl CpuRegs {
             PortDevice::None => 0,
             PortDevice::Pad => clean_dpad(self.joypad1),
         };
-        self.joypad2_latched = match self.port2 {
+        let p2 = match self.port2 {
             PortDevice::Mouse => self.mouse.auto_read_16(),
             PortDevice::SuperScope => self.super_scope.auto_read_16(),
             PortDevice::Multitap => {
@@ -316,16 +373,7 @@ impl CpuRegs {
             PortDevice::None => 0,
             PortDevice::Pad => clean_dpad(self.joypad2),
         };
-        self.joypad3_latched = d1_port1;
-        self.joypad4_latched = d1_port2;
-        self.hvbjoy |= 0x01;
-    }
-
-    /// Drop the auto-read busy bit. Called a few scanlines after
-    /// [`Self::latch_joypad_auto_read`] so games polling
-    /// `$4212 & 0x01` see it clear before they continue.
-    pub const fn clear_joypad_busy(&mut self) {
-        self.hvbjoy &= !0x01;
+        self.joy_pending = [p1, p2, d1_port1, d1_port2];
     }
 
     /// Set the current button bitmask for controller `idx` (`0` or
@@ -383,6 +431,12 @@ impl CpuRegs {
                 // `write_inner`, which sees the previous NMITIMEN.7.)
                 if value & 0x30 == 0 {
                     self.irq_flag = false;
+                }
+                // ares `io.cpp:135`: switching auto-read off from the third
+                // counter on ends the sequence for good (counter = 33);
+                // `joy_step` is the NEXT counter, so "counter >= 2" is `>= 3`.
+                if value & 0x01 == 0 && self.joy_step >= 3 {
+                    self.joy_step = 0;
                 }
             }
             0x4201 => self.wrio = value,
@@ -583,7 +637,7 @@ mod tests {
         r.set_joypad(0, 0x0000); // an idle pad on port 1
         r.set_joypad(1, 0xFFFF); // ...on the empty port, must be ignored
 
-        r.latch_joypad_auto_read();
+        run_auto_read(&mut r);
         assert_eq!(r.joypad1_latched, 0x0000, "idle pad");
         assert_eq!(
             r.joypad2_latched, 0x0000,
@@ -704,14 +758,13 @@ mod tests {
         r.write(0x4200, 0x01); // NMITIMEN.0 = auto-read enable
         r.set_joypad(0, 0xAA55);
         r.set_joypad(1, 0x1234);
-        r.latch_joypad_auto_read();
+        run_auto_read(&mut r);
         // Latched mirrors live; reads expose them at $4218-$421B.
         assert_eq!(r.read(0x4218).unwrap(), 0x55);
         assert_eq!(r.read(0x4219).unwrap(), 0xAA);
         assert_eq!(r.read(0x421A).unwrap(), 0x34);
         assert_eq!(r.read(0x421B).unwrap(), 0x12);
-        // HVBJOY.0 = busy raised.
-        assert_eq!(r.hvbjoy & 0x01, 0x01);
+        assert!(!r.auto_joypad_busy(), "the sequence is over");
     }
 
     #[test]
@@ -719,11 +772,11 @@ mod tests {
         let mut r = CpuRegs::new();
         r.write(0x4200, 0x00); // bit 0 cleared
         r.set_joypad(0, 0xFFFF);
-        r.latch_joypad_auto_read();
+        run_auto_read(&mut r);
         // Latches stay at their default 0; reads see no buttons.
         assert_eq!(r.read(0x4218).unwrap(), 0x00);
         assert_eq!(r.read(0x4219).unwrap(), 0x00);
-        assert_eq!(r.hvbjoy & 0x01, 0x00);
+        assert!(!r.auto_joypad_busy());
     }
 
     #[test]
@@ -735,12 +788,123 @@ mod tests {
         }
     }
 
+    /// Play one whole auto-read sequence: the start edge, then 33 more.
+    fn run_auto_read(r: &mut CpuRegs) {
+        r.joypad_edge(true);
+        for _ in 0..33 {
+            r.joypad_edge(false);
+        }
+    }
+
     #[test]
-    fn clear_joypad_busy_drops_hvbjoy_0_only() {
+    fn auto_read_fills_the_registers_progressively_like_ares() {
         let mut r = CpuRegs::new();
-        r.hvbjoy = 0xFF;
-        r.clear_joypad_busy();
-        assert_eq!(r.hvbjoy, 0xFE, "only bit 0 should clear");
+        r.write(0x4200, 0x01);
+        r.set_joypad(0, 0x8000);
+        r.joypad1_latched = 0xFFFF; // the previous frame's value
+        assert!(!r.auto_joypad_busy(), "idle before the sequence");
+        // Counter 0: pads latched, registers zeroed, busy.
+        r.joypad_edge(true);
+        assert_eq!(r.joypad1_latched, 0);
+        assert!(r.auto_joypad_busy());
+        // Counters 1 and 2: nothing shifts yet.
+        for counter in 1..=2 {
+            r.joypad_edge(false);
+            assert_eq!(r.joypad1_latched, 0, "counter {counter}");
+            assert!(r.auto_joypad_busy());
+        }
+        // Odd counters 3..=33 shift one bit each, MSB first: after n shifts
+        // the pad's bit 15 sits at bit n-1. Even counters change nothing.
+        let mut expect = 0u16;
+        for counter in 3..=33u32 {
+            r.joypad_edge(false);
+            if counter % 2 == 1 {
+                expect = 1 << ((counter - 3) / 2);
+            }
+            assert_eq!(r.joypad1_latched, expect, "counter {counter}");
+            assert_eq!(
+                r.auto_joypad_busy(),
+                counter < 33,
+                "busy at counter {counter}"
+            );
+        }
+        assert_eq!(r.joypad1_latched, 0x8000, "the whole word after 16 shifts");
+        // Idle: further edges change nothing.
+        r.joypad_edge(false);
+        assert_eq!(r.joypad1_latched, 0x8000);
+        assert!(!r.auto_joypad_busy());
+    }
+
+    #[test]
+    fn auto_read_first_shift_is_after_counter_3_with_the_msb_first() {
+        let mut r = CpuRegs::new();
+        r.write(0x4200, 0x01);
+        r.set_joypad(0, 0x8000);
+        r.joypad_edge(true);
+        for _ in 0..3 {
+            r.joypad_edge(false); // counters 1, 2, 3
+        }
+        assert_eq!(r.joypad1_latched, 0x0001);
+        r.joypad_edge(false); // counter 4: no shift
+        assert_eq!(r.joypad1_latched, 0x0001);
+        r.joypad_edge(false); // counter 5
+        assert_eq!(r.joypad1_latched, 0x0002);
+    }
+
+    #[test]
+    fn auto_read_with_nmitimen_0_off_at_the_start_leaves_the_registers() {
+        let mut r = CpuRegs::new();
+        r.set_joypad(0, 0xFFFF);
+        r.joypad1_latched = 0x1234;
+        run_auto_read(&mut r);
+        assert_eq!(r.joypad1_latched, 0x1234);
+        assert!(!r.auto_joypad_busy());
+    }
+
+    #[test]
+    fn auto_read_ends_when_nmitimen_0_goes_off_after_counter_1() {
+        let mut r = CpuRegs::new();
+        r.write(0x4200, 0x01);
+        r.set_joypad(0, 0xFFFF);
+        r.joypad_edge(true);
+        r.joypad_edge(false); // counter 1
+        r.joypad_edge(false); // counter 2
+        r.write(0x4200, 0x00);
+        assert!(!r.auto_joypad_busy(), "busy is live in $4200 bit 0");
+        r.joypad_edge(false); // counter 3: skipped, sequence over
+        assert_eq!(r.joypad1_latched, 0);
+        r.write(0x4200, 0x01);
+        r.joypad_edge(false);
+        assert_eq!(r.joypad1_latched, 0, "the sequence did not resume");
+    }
+
+    #[test]
+    fn auto_read_switched_off_and_on_between_two_edges_does_not_resume() {
+        // ares `io.cpp:135`: off from counter 2 on ends the sequence at once,
+        // so a quick off/on pair cannot revive it.
+        let mut r = CpuRegs::new();
+        r.write(0x4200, 0x01);
+        r.set_joypad(0, 0xFFFF);
+        r.joypad_edge(true);
+        for _ in 0..3 {
+            r.joypad_edge(false); // counters 1, 2, 3
+        }
+        r.write(0x4200, 0x00);
+        r.write(0x4200, 0x01);
+        assert!(!r.auto_joypad_busy());
+        let word = r.joypad1_latched;
+        r.joypad_edge(false);
+        assert_eq!(r.joypad1_latched, word);
+    }
+
+    #[test]
+    fn hvbjoy_keeps_the_vblank_bit_and_derives_busy() {
+        let mut r = CpuRegs::new();
+        r.hvbjoy = 0x80;
+        r.write(0x4200, 0x01);
+        assert_eq!(r.peek(0x4212), Some(0x80));
+        r.joypad_edge(true);
+        assert_eq!(r.peek(0x4212), Some(0x81));
     }
 
     #[test]
@@ -751,19 +915,19 @@ mod tests {
         r.write(0x4200, 0x01); // auto-read enable
         // Up + Down + B held → keep B, drop both Up + Down.
         r.set_joypad(0, 0x8000 | 0x0800 | 0x0400);
-        r.latch_joypad_auto_read();
+        run_auto_read(&mut r);
         assert_eq!(r.joypad1_latched & 0x0C00, 0, "up + down lockout");
         assert_eq!(r.joypad1_latched & 0x8000, 0x8000, "B preserved");
 
         // Left + Right + Start held → keep Start, drop L + R.
         r.set_joypad(0, 0x1000 | 0x0200 | 0x0100);
-        r.latch_joypad_auto_read();
+        run_auto_read(&mut r);
         assert_eq!(r.joypad1_latched & 0x0300, 0, "left + right lockout");
         assert_eq!(r.joypad1_latched & 0x1000, 0x1000, "Start preserved");
 
         // Only Up held (no opposing) → passes through.
         r.set_joypad(0, 0x0800);
-        r.latch_joypad_auto_read();
+        run_auto_read(&mut r);
         assert_eq!(r.joypad1_latched, 0x0800);
     }
 

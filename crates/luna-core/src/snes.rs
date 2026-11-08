@@ -1394,7 +1394,7 @@ impl Snes {
             cpu_cycles: self.cpu_cycles,
             nmi_flag: self.cpu_regs.nmi_flag,
             irq_flag: self.cpu_regs.irq_flag,
-            hvbjoy: self.cpu_regs.hvbjoy,
+            hvbjoy: self.cpu_regs.hvbjoy_now(),
         }
     }
 
@@ -3010,6 +3010,11 @@ impl SnesBus<'_> {
             if lo < refresh_pos && refresh_pos <= hi {
                 refresh += DRAM_REFRESH_CYCLES;
             }
+            self.joypad_edges(
+                line_start + u64::from(lo),
+                line_start + u64::from(hi),
+                line_start,
+            );
             self.mcycles_in_line += chunk;
             remaining -= chunk;
             self.wrap_overhang.1 = u64::from(remaining);
@@ -3019,6 +3024,24 @@ impl SnesBus<'_> {
             }
         }
         (refresh, hdma)
+    }
+
+    /// The auto-joypad sequencer over the master clocks `(from, to]` of the
+    /// current scanline (ares `CPU::step`: `joypadCounter() == 0` →
+    /// `joypadEdge()`, `cpu/timing.cpp:18`): one edge at every multiple of
+    /// 128 absolute master clocks, and the one that begins a sequence is the
+    /// first multiple of 256 within H130..=H384 of the first V-blank line
+    /// (`timing.cpp:145`; Mesen2 `SetAutoJoypadReadClock` has the same
+    /// grid). `line_start` is the absolute clock the line began at.
+    fn joypad_edges(&mut self, from: u64, to: u64, line_start: u64) {
+        let vblank_line = self.ppu_line == self.vblank_start_line();
+        let mut edge = (from / 128 + 1) * 128;
+        while edge <= to {
+            let h = edge - line_start;
+            let start = vblank_line && edge.is_multiple_of(256) && (130..=384).contains(&h);
+            self.cpu_regs.joypad_edge(start);
+            edge += 128;
+        }
     }
 
     /// Dot-precise H/V-counter IRQ poll over the half-open master-cycle
@@ -3223,8 +3246,8 @@ impl SnesBus<'_> {
             if self.ppu.inidisp & 0x80 == 0 {
                 self.ppu.oam.reload_address_from_latch();
             }
-            // Joypad auto-read latch + manual-mode shift reload.
-            self.cpu_regs.latch_joypad_auto_read();
+            // Manual-mode shift reload. (The auto-read itself is not started
+            // here: it begins on the 128-clock grid, see `joypad_edges`.)
             if self.cpu_regs.nmitimen & 0x01 != 0 {
                 // The hardware auto-read strobes and clocks BOTH controllers
                 // 16 times, leaving their shift registers EXHAUSTED. A
@@ -3241,8 +3264,6 @@ impl SnesBus<'_> {
                 *self.joypad1_shift = 0xFFFF;
                 *self.joypad2_shift = 0xFFFF;
             }
-        } else if self.ppu_line == vblank_start + 3 {
-            self.cpu_regs.clear_joypad_busy();
         }
 
         // H/V-counter IRQ is now polled dot-precisely per bus access in
@@ -3495,7 +3516,7 @@ impl SnesBus<'_> {
             cpu_cycles: *self.cpu_cycles,
             nmi_flag: self.cpu_regs.nmi_flag,
             irq_flag: self.cpu_regs.irq_flag,
-            hvbjoy: self.cpu_regs.hvbjoy,
+            hvbjoy: self.cpu_regs.hvbjoy_now(),
         }
     }
 
@@ -3955,7 +3976,7 @@ impl SnesBus<'_> {
         if let Some(offset) = Self::is_joypad_serial(addr) {
             // $4016/$4017 manual serial read.
             // Strict mode: the console is clocking the pads itself.
-            if self.cpu_regs.hvbjoy & 0x01 != 0
+            if self.cpu_regs.auto_joypad_busy()
                 && let Some(log) = self.hw_faults.as_mut()
             {
                 log.note(
@@ -4050,7 +4071,7 @@ impl SnesBus<'_> {
                 let hblank_bit = if in_hblank { 0x40 } else { 0x00 };
                 // Bits 1-5 are CPU open bus (ares io.cpp:33-37 only
                 // drives bits 0, 6, 7 of the incoming MDR).
-                return (self.cpu_regs.hvbjoy & 0x81) | hblank_bit | (*self.mdr & 0x3E);
+                return self.cpu_regs.hvbjoy_now() | hblank_bit | (*self.mdr & 0x3E);
             }
             if reg_off == 0x4210 {
                 // RDNMI — see `RDNMI_RAISE_HCLOCK` / `RDNMI_HOLD_HCLOCK`. Both

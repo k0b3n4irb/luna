@@ -699,17 +699,25 @@ fn pad_log_rom(dir: &Path, work: u8) -> PathBuf {
         0x8D, 0x00, 0x42, // 8003 STA $4200      NMI + auto-read
         0xCB, // 8006 WAI               wait:
         0xA6, 0x10, // 8007 LDX $10         tick:
-        0xAD, 0x18, 0x42, // 8009 LDA $4218
-        0x95, 0x20, // 800C STA $20,X
-        0xE6, 0x10, // 800E INC $10
-        0xA0, work, // 8010 LDY #work
-        0xA2, 0x00, // 8012 LDX #$00
-        0xCA, // 8014 DEX
-        0xD0, 0xFD, // 8015 BNE $8014
-        0x88, // 8017 DEY
-        0xD0, 0xF8, // 8018 BNE $8012
-        0x80, 0xEA, // 801A BRA $8006
-        0x40, // 801C RTI               nmi:
+        // The auto-read starts a few dots after V-blank and fills $4218 as
+        // it goes: wait for busy to rise, then to fall, before reading.
+        0xAD, 0x12, 0x42, // 8009 LDA $4212      rise:
+        0x4A, // 800C LSR A
+        0x90, 0xFA, // 800D BCC $8009
+        0xAD, 0x12, 0x42, // 800F LDA $4212      fall:
+        0x4A, // 8012 LSR A
+        0xB0, 0xFA, // 8013 BCS $800F
+        0xAD, 0x18, 0x42, // 8015 LDA $4218
+        0x95, 0x20, // 8018 STA $20,X
+        0xE6, 0x10, // 801A INC $10
+        0xA0, work, // 801C LDY #work
+        0xA2, 0x00, // 801E LDX #$00
+        0xCA, // 8020 DEX
+        0xD0, 0xFD, // 8021 BNE $8020
+        0x88, // 8023 DEY
+        0xD0, 0xF8, // 8024 BNE $801E
+        0x80, 0xDE, // 8026 BRA $8006
+        0x40, // 8028 RTI               nmi:
     ];
     let mut r = vec![0u8; 0x1_0000];
     r[..prog.len()].copy_from_slice(&prog);
@@ -719,14 +727,14 @@ fn pad_log_rom(dir: &Path, work: u8) -> PathBuf {
     r[0x7FFC] = 0x00;
     r[0x7FFD] = 0x80;
     for off in [0x7FEA, 0x7FFA] {
-        r[off] = 0x1C;
+        r[off] = 0x28;
         r[off + 1] = 0x80;
     }
     let rom = dir.join("game.sfc");
     std::fs::write(&rom, &r).expect("write rom");
     std::fs::write(
         dir.join("game.sym"),
-        "[labels]\n00:8000 main\n00:8007 tick\n00:801c nmi\n7e:0010 ticks\n7e:0020 seen\n",
+        "[labels]\n00:8000 main\n00:8007 tick\n00:8028 nmi\n7e:0010 ticks\n7e:0020 seen\n",
     )
     .unwrap();
     rom
@@ -760,11 +768,12 @@ fn input_clocked_by_a_routine_drives_two_builds_through_the_same_ticks() {
         let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
         v["peeks"][0]["bytes_hex"].as_str().unwrap().to_string()
     };
-    // A held for arrivals 3..6: the controller changes at the arrival,
-    // the game reads it at the next one — in both builds.
+    // A held for arrivals 3..6: the controller changes at the arrival, the
+    // auto-read that follows (a few dots into V-blank) takes it, and the
+    // game reads it once the read is over — in the same tick, in both builds.
     let by_tick = ["--input-at", "tick", "--input", "3:0x0080,6:0"];
-    assert_eq!(seen(&slow, &by_tick), "000000808080000000");
-    assert_eq!(seen(&fast, &by_tick), "000000808080000000");
+    assert_eq!(seen(&slow, &by_tick), "000080808000000000");
+    assert_eq!(seen(&fast, &by_tick), "000080808000000000");
     // The same press by frame number lands in other ticks once the code
     // is faster: this is what the option is for.
     let by_frame = ["--input", "8:0x0080,17:0"];
@@ -774,9 +783,9 @@ fn input_clocked_by_a_routine_drives_two_builds_through_the_same_ticks() {
     let manifest = "rom = \"game.sfc\"\nforce_mapper = \"lorom\"\nframes = 60\n\
                     input_at = \"tick\"\ninput = \"3:0x0080,6:0\"\n\
                     [[checkpoint]]\nat_symbol = \"tick\"\nhit = 5\n[checkpoint.values]\n\
-                    \"seen+3\" = 0x80\n\"seen+2\" = { eq = 0, width = 1 }\n\
+                    \"seen+2\" = 0x80\n\"seen+1\" = { eq = 0, width = 1 }\n\
                     [[checkpoint]]\nat_symbol = \"tick\"\nhit = 9\ninput = \"7:0x0080\"\n\
-                    [checkpoint.values]\n\"seen+6\" = 0\n\"seen+7\" = 0x80\n";
+                    [checkpoint.values]\n\"seen+5\" = 0\n\"seen+6\" = 0x80\n";
     for dir in [&slow_dir, &fast_dir] {
         let out = luna_test(dir, "pad.toml", manifest, &[]);
         assert!(out.status.success(), "{}", text(&out));
@@ -796,7 +805,7 @@ fn input_clocked_by_a_routine_drives_two_builds_through_the_same_ticks() {
     // a routine to count arrivals on, on the command line and in a
     // manifest alike.
     let plus_zero = ["--input-at", "tick", "--input", "3+0:0x0080,6+0:0"];
-    assert_eq!(seen(&slow, &plus_zero), "000000808080000000");
+    assert_eq!(seen(&slow, &plus_zero), "000080808000000000");
     // A tick of the slow build lasts three frames: four frames after
     // arrivals 3 and 6, the press and the release each land one tick later.
     let later = ["--input-at", "tick", "--input", "3+4:0x0080,6+4:0"];

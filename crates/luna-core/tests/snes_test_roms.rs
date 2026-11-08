@@ -1326,7 +1326,7 @@ spc_test!(
 spc_test!(
     spc_play_two_song,
     "PlayTwoSong/PlayTwoSong.sfc",
-    "26e9a4e69810f679ce8e3a593b067ff50f3edfa462303bed7a9d7f23d37ef5c5",
+    "30bc23273d3e36325d74e11a43d26761b2c149635537900b0aa57f62800d22a0",
     hold = PAD_A
 );
 

@@ -2081,3 +2081,68 @@ fn dma_trace_walks_the_bytes_across_lines_and_stamps_the_end() {
     // Crossing the frame return bumps the frame stamp of the later bytes.
     assert_eq!(vram[351].frame, vram[0].frame + 1);
 }
+
+// ---------------------------------------------------------------
+// Joypad auto-read on the beam (audit C2): `$4218-$421F` fill while
+// `$4212` bit 0 is set, the window being 4224 master clocks.
+// ---------------------------------------------------------------
+
+/// A `LoROM` running `program` from `$8000`, with auto-read on `$4200` bit 0
+/// and pad 1 holding `pad`; run until `STP`, returns the machine.
+fn run_auto_read_program(program: &[u8], pad: u16) -> Snes {
+    let mut rom = demo_lorom().rom;
+    rom[..program.len()].copy_from_slice(program);
+    let mut snes = Snes::from_cartridge(Cartridge::from_bytes(rom).unwrap());
+    snes.reset();
+    snes.set_joypad(0, pad);
+    for _ in 0..600_000 {
+        snes.step();
+        if snes.cpu.stopped {
+            return snes;
+        }
+    }
+    panic!("the program never reached STP (frame {})", snes.frame_count);
+}
+
+/// `LDA #1 ; STA $4200 ; w1: LDA $4212 ; LSR ; BCC w1` — wait for busy.
+const WAIT_BUSY: [u8; 11] = [
+    0xA9, 0x01, 0x8D, 0x00, 0x42, 0xAD, 0x12, 0x42, 0x4A, 0x90, 0xFA,
+];
+
+#[test]
+fn auto_read_registers_read_zero_when_busy_rises_and_full_when_it_falls() {
+    let mut program = WAIT_BUSY.to_vec();
+    program.extend_from_slice(&[
+        0xAD, 0x18, 0x42, 0x8D, 0x00, 0x01, // LDA $4218 ; STA $0100
+        0xAD, 0x19, 0x42, 0x8D, 0x01, 0x01, // LDA $4219 ; STA $0101
+        // w2: LDA $4212 ; LSR ; BCS w2
+        0xAD, 0x12, 0x42, 0x4A, 0xB0, 0xFA, //
+        0xAD, 0x18, 0x42, 0x8D, 0x02, 0x01, // LDA $4218 ; STA $0102
+        0xAD, 0x19, 0x42, 0x8D, 0x03, 0x01, // LDA $4219 ; STA $0103
+        0xDB, // STP
+    ]);
+    let snes = run_auto_read_program(&program, 0x8000);
+    assert_eq!(
+        &snes.wram[0x100..0x104],
+        &[0x00, 0x00, 0x00, 0x80],
+        "joy1 is zero when busy rises, the whole word once it falls"
+    );
+}
+
+#[test]
+fn auto_read_mid_window_read_sees_a_partial_word() {
+    let mut program = WAIT_BUSY.to_vec();
+    program.extend_from_slice(&[
+        0xA2, 0x28, // LDX #40
+        0xCA, 0xD0, 0xFD, // d: DEX ; BNE d
+        0xAD, 0x18, 0x42, 0x8D, 0x00, 0x01, // LDA $4218 ; STA $0100
+        0xAD, 0x19, 0x42, 0x8D, 0x01, 0x01, // LDA $4219 ; STA $0101
+        0xDB,
+    ]);
+    let snes = run_auto_read_program(&program, 0x8000);
+    let word = u16::from_le_bytes([snes.wram[0x100], snes.wram[0x101]]);
+    assert!(
+        word != 0 && word != 0x8000 && word.is_power_of_two(),
+        "a read inside the window sees the bits shifted in so far, got {word:#06x}"
+    );
+}
