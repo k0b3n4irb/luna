@@ -1217,7 +1217,7 @@ lines (the ones the console loses, and luna loses too), and a burst that
 begins on the last picture lines is reported only on the bytes before line
 225. `--dma-trace` shows the end of each burst (`end_line`, `end_hclock`). Two rules were left out
 because no reference settles them: the effect of a DMA to a B-bus register
-with no device, and open-bus values.
+with no device, and open-bus values. There is no R7: that number was never issued, the first commit goes from R6 to R8.
 
 Exit code: `0` = no fault, `1` = at least one (or a core panic), `2` = the
 ROM cannot be loaded. `--json` prints `{rom, frames, ok, occurrences,
