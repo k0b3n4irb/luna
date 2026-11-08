@@ -336,13 +336,13 @@ fn save_state_shape_is_pinned_to_the_version() {
     assert_eq!(
         (SAVE_STATE_VERSION, shapes),
         (
-            10,
+            11,
             [
-                ("LoROM", (447_769, 8_195)),
-                ("SA-1", (447_769, 4_723)),
-                ("Super FX", (447_769, 2_671)),
-                ("S-DD1", (447_769, 2_171)),
-                ("DSP-1", (447_769, 2_129)),
+                ("LoROM", (447_758, 8_195)),
+                ("SA-1", (447_758, 4_723)),
+                ("Super FX", (447_758, 2_671)),
+                ("S-DD1", (447_758, 2_171)),
+                ("DSP-1", (447_758, 2_129)),
             ]
         ),
         "serialized machine shape changed — see this test's doc comment"

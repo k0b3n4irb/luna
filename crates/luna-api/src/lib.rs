@@ -215,7 +215,12 @@ $212C-$212F (TM TS TMW TSW), $2130 CGWSEL, $2131 CGADSUB, $2133 SETINI";
 /// scheduler steps like ares, not a copy made at V-blank entry, so its
 /// position and the word it is shifting in (`CpuRegs::joy_step`,
 /// `joy_pending`) are state, and `$4218-$421F` are the live shift registers.
-pub const SAVE_STATE_VERSION: u32 = 10;
+/// v11 (2026-11): `Snes::apu_panicked` and `Snes::apu_stub_fallback` are
+/// gone. A SPC700 that executed `STOP` no longer swaps in a heuristic
+/// mailbox stub nor freezes the S-DSP and the timers (ares idles it), so
+/// there is no latch to save and no stub state. A v10 state taken after a
+/// `STOP` could not be restored faithfully anyway.
+pub const SAVE_STATE_VERSION: u32 = 11;
 
 /// On-disk / on-wire save-state container produced by
 /// [`Emulator::save_state`]. `core` is the bincode-encoded `Snes` (the

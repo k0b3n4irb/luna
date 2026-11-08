@@ -8,7 +8,6 @@
 //! crate directly (see `.claude/rules/api-first.md`).
 
 pub mod access;
-pub mod apu_stub;
 pub mod breakpoints;
 pub mod controller;
 pub mod coproc;
@@ -20,7 +19,6 @@ pub mod power;
 pub mod snes;
 
 pub use access::{CountedMemory, CpuAccessCounters, locate};
-pub use apu_stub::{ApuStub, Phase as ApuPhase};
 pub use breakpoints::{
     BREAK_SOURCE_ID, BreakCpu, BreakHit, BreakKind, BreakpointInfo, BreakpointSet, ForbidRange,
     WatchSpace,

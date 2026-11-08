@@ -1,12 +1,9 @@
 //! Top-level [`Snes`] machine struct.
 //!
 //! Wires together the `Cpu` (65C816) main CPU, 128 KB of WRAM, the cartridge
-//! mapper, the `Ppu`, the real APU (`apu_real`: SPC700 + S-DSP, with an
-//! [`ApuStub`] that answers the mailbox once the SPC700 has executed
-//! `STOP`), and the DMA / HDMA and coprocessor subsystems — all driven by
+//! mapper, the `Ppu`, the real APU (`apu_real`: SPC700 + S-DSP), and the DMA / HDMA and coprocessor subsystems — all driven by
 //! the master-clock scheduler.
 
-use crate::apu_stub::ApuStub;
 use crate::cpu_regs::CpuRegs;
 use luna_apu::Apu;
 use luna_bus::hirom::HiRomMapper;
@@ -114,15 +111,6 @@ pub struct Snes {
     /// Real SPC700 + 64 KB ARAM + IPL ROM + mailboxes. Runs in
     /// parallel with the main CPU at a 21 mclk : 1 spc-cycle ratio.
     pub apu_real: Apu,
-    /// `true` once the SPC700 has executed `STOP` (despite the name, no
-    /// panic is involved). From then on the real APU is no longer stepped
-    /// and reads of `$2140-$2143` are served by `apu_stub_fallback`.
-    /// Cleared by reset. Open row: `docs/luna_apu_gaps.md` #8.
-    pub apu_panicked: bool,
-    /// Heuristic mailbox stub, written before luna had a real SPC700. It
-    /// mirrors every CPU write to `$2140-$2143` and answers the reads once
-    /// `apu_panicked` is set.
-    pub apu_stub_fallback: ApuStub,
 
     // ------------- Scanline-accurate scheduler -------------
     /// Current PPU scanline (0..=261 NTSC, 0..=311 PAL). Line 0 is the
@@ -1179,8 +1167,6 @@ impl Snes {
             total_mclk: 0,
             mclk_acc: MclkAccounting::default(),
             apu_real: apu_for_region(region),
-            apu_panicked: false,
-            apu_stub_fallback: ApuStub::new(),
             ppu_line: 0,
             mcycles_in_line: 0,
             frame_count: 0,
@@ -1642,8 +1628,6 @@ impl Snes {
         );
         self.apu_real = apu_for_region(self.region);
         self.apu_real.aram = aram;
-        self.apu_panicked = false;
-        self.apu_stub_fallback = ApuStub::new();
         // Controller ports are host configuration, not console state: the
         // Reset button does not unplug a Mouse / Super Scope (Mesen2
         // `InternalRegisters::Reset` only clears the register file). Carry
@@ -2063,13 +2047,6 @@ struct SnesBus<'a> {
     /// Real SPC700 + ARAM + IPL ROM. CPU mailbox reads pull from
     /// `apu_real.to_cpu_ports`; writes land in `apu_real.to_spc_ports`.
     apu_real: &'a mut Apu,
-    /// Heuristic stub — answers mailbox reads when [`Snes::apu_panicked`]
-    /// is `true` (i.e. the real SPC700 has executed `STOP`).
-    apu_stub_fallback: &'a mut ApuStub,
-    /// Live handle to `Snes::apu_panicked`. Phase 1 advances the real APU
-    /// inside [`Bus::io_cycle`], so this must be a mutable borrow (not a
-    /// snapshot) to propagate the SPC700 "stopped" transition back.
-    apu_panicked: &'a mut bool,
     /// Live handle to `Snes::fast_rom` so a `$420D` write persists past the
     /// instruction that made it (a by-value copy was silently discarded).
     fast_rom: &'a mut bool,
@@ -2313,8 +2290,6 @@ impl Snes {
             dma,
             cpu_regs,
             apu_real,
-            apu_stub_fallback,
-            apu_panicked,
             wram,
             mapper,
             fast_rom,
@@ -2350,8 +2325,6 @@ impl Snes {
             dma,
             cpu_regs,
             apu_real,
-            apu_stub_fallback,
-            apu_panicked,
             fast_rom,
             nmi: nmi_pending,
             irq: irq_pending,
@@ -2475,10 +2448,6 @@ struct DmaBusView<'a> {
     /// on the B-bus exactly like the CPU port — ares routes a DMA B-bus
     /// access through the same `bus.read/write(0x2100 | addr)`.
     apu: &'a mut Apu,
-    /// Fallback mailbox, consulted only once the SPC700 has executed `STOP`
-    /// (the CPU path's rule, mirrored).
-    apu_stub: &'a mut ApuStub,
-    apu_panicked: bool,
     /// Optional DMA→VRAM transfer-time trace (moved in from the [`Dma`]
     /// controller for the duration of one MDMA burst). `None` = off.
     dma_trace: Option<&'a mut DmaTraceLog>,
@@ -2666,13 +2635,9 @@ impl DmaBus for DmaBusView<'_> {
             value
         } else if (0x40..=0x7F).contains(&b_offset) {
             // APU mailbox, 4 ports mirrored across $2140-$217F — the CPU
-            // path's `apu_port` rule and stub fallback.
+            // path's `apu_port` rule.
             let port = usize::from(b_offset & 0x03);
-            if self.apu_panicked {
-                self.apu_stub.read(port)
-            } else {
-                self.apu.cpu_read_port(port)
-            }
+            self.apu.cpu_read_port(port)
         } else if b_offset == 0x80 {
             let a = (*self.wm_addr & 0x1FFFF) as usize;
             let v = self.wram[a];
@@ -2783,11 +2748,9 @@ impl DmaBus for DmaBusView<'_> {
             self.ppu.write(b_offset, value);
             self.drain_ppu_accesses();
         } else if (0x40..=0x7F).contains(&b_offset) {
-            // APU mailbox — both the real APU and the fallback stub, as the
-            // CPU path does.
+            // APU mailbox, as the CPU path does.
             let port = usize::from(b_offset & 0x03);
             self.apu.cpu_write_port(port, value);
-            self.apu_stub.write(port, value);
         } else if matches!(b_offset, 0x80..=0x83) {
             // WRAM port ($2180-$2183), mirroring the CPU path: $80 WMDATA
             // writes WRAM[WMADD]++ ; $81-$83 set the 17-bit WMADD. Games
@@ -3203,8 +3166,6 @@ impl SnesBus<'_> {
                 wm_addr: &mut *self.wm_addr,
                 mdr: &mut *self.mdr,
                 apu: &mut *self.apu_real,
-                apu_stub: &mut *self.apu_stub_fallback,
-                apu_panicked: *self.apu_panicked,
                 dma_trace: trace.as_mut(),
                 last_a_addr: 0,
                 scpu_mar: &mut self.scpu_mar,
@@ -3301,8 +3262,6 @@ impl SnesBus<'_> {
                 wm_addr: &mut *self.wm_addr,
                 mdr: &mut *self.mdr,
                 apu: &mut *self.apu_real,
-                apu_stub: &mut *self.apu_stub_fallback,
-                apu_panicked: *self.apu_panicked,
                 // hdma_init only reads table headers/pointers (A-bus); it makes
                 // no B-bus register writes, so there is nothing to trace here.
                 // The per-scanline transfers below are what the trace
@@ -3553,18 +3512,13 @@ impl SnesBus<'_> {
             }
             // APU in lockstep with the CPU at bus-access granularity.
             // `Apu::step` carries the fractional clock remainder itself, so
-            // stepping per bus access loses no time. Once the SPC700 has
-            // executed `STOP` the APU is no longer stepped at all (open
-            // row: `docs/luna_apu_gaps.md` #8).
-            if !*self.apu_panicked {
-                if self.apu_real.dsp.write_log.is_some() {
-                    self.apu_real.dsp.trace_frame = self.frame_count;
-                }
-                self.apu_real.step(step as u32);
-                if self.apu_real.cpu.stopped {
-                    *self.apu_panicked = true;
-                }
+            // stepping per bus access loses no time. A SPC700 that has
+            // executed `STOP` still idles its cycles (ares `read(PC);
+            // idle()`), so the timers and the S-DSP run on.
+            if self.apu_real.dsp.write_log.is_some() {
+                self.apu_real.dsp.trace_frame = self.frame_count;
             }
+            self.apu_real.step(step as u32);
             // PPU scanline scheduler + cartridge coprocessor. Gated by
             // `sched_enabled` so debug peeks / mapping tests don't tick
             // emulation forward.
@@ -3689,8 +3643,6 @@ impl SnesBus<'_> {
                     wm_addr: self.wm_addr,
                     mdr: self.mdr,
                     apu: &mut *self.apu_real,
-                    apu_stub: &mut *self.apu_stub_fallback,
-                    apu_panicked: *self.apu_panicked,
                     dma_trace: trace.as_mut(),
                     last_a_addr: 0,
                     scpu_mar: &mut self.scpu_mar,
@@ -3764,8 +3716,6 @@ impl SnesBus<'_> {
                     wm_addr: self.wm_addr,
                     mdr: self.mdr,
                     apu: &mut *self.apu_real,
-                    apu_stub: &mut *self.apu_stub_fallback,
-                    apu_panicked: *self.apu_panicked,
                     dma_trace: trace.as_mut(),
                     last_a_addr: 0,
                     scpu_mar: &mut self.scpu_mar,
@@ -3939,14 +3889,9 @@ impl SnesBus<'_> {
             return value;
         }
         if let Some(port) = Self::apu_port(addr) {
-            // Mailbox reads come from the real SPC700. The heuristic
-            // stub answers instead once the SPC has executed `STOP`
-            // (`apu_panicked`).
-            let value = if *self.apu_panicked {
-                self.apu_stub_fallback.read(port)
-            } else {
-                self.apu_real.cpu_read_port(port)
-            };
+            // Mailbox reads come from the real SPC700 (its output
+            // ports hold the last value it wrote, `STOP`ped or not).
+            let value = self.apu_real.cpu_read_port(port);
             if let Some(log) = self
                 .mailbox_log
                 .as_mut()
@@ -4256,12 +4201,9 @@ impl SnesBus<'_> {
             return;
         }
         if let Some(port) = Self::apu_port(addr) {
-            // CPU writes the byte to BOTH the real APU's to_spc port
-            // (so the SPC700 reads it at $F4-$F7) and the fallback
-            // stub, which answers the reads once the SPC has executed
-            // `STOP` (`apu_panicked`).
+            // The byte lands in the real APU's to_spc port (the SPC700
+            // reads it at $F4-$F7).
             self.apu_real.cpu_write_port(port, value);
-            self.apu_stub_fallback.write(port, value);
             if let Some(log) = self
                 .mailbox_log
                 .as_mut()

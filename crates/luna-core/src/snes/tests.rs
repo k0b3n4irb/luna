@@ -2231,3 +2231,64 @@ fn a_stopped_cpu_does_not_freeze_the_master_clock() {
         assert!(span.abs_diff(FRAME_MCLK) < 8, "span {span}");
     }
 }
+
+/// `SEI ; CLC ; XCE ; REP #$10 ; LDX #$2000 ; DEX ; BNE -3` (a delay of about a frame),
+/// then `LDA #$77 ; STA $2140` (write a mailbox port), `LDA $2140 ;
+/// STA $0000` (read it back into WRAM) and `STP`.
+fn mailbox_echo_lorom() -> Cartridge {
+    let mut rom = idle_lorom().rom;
+    rom[..32].fill(0xEA);
+    let prog = [
+        0x78, 0x18, 0xFB, 0xC2, 0x10, 0xA2, 0x00, 0x20, 0xCA, 0xD0, 0xFD, 0xA9, 0x77, 0x8D, 0x40,
+        0x21, 0xAD, 0x40, 0x21, 0x8D, 0x00, 0x00, 0xDB,
+    ];
+    rom[..prog.len()].copy_from_slice(&prog);
+    Cartridge::from_bytes(rom).unwrap()
+}
+
+#[test]
+fn a_stopped_spc700_leaves_the_dsp_the_timers_and_the_ports_alone() {
+    // ares `instructionStop`: `while(r.stop && ...) { read(PC); idle(); }`.
+    // Only the SMP core is halted: each idle cycle clocks the timers and
+    // the DSP like any other, and the SMP's output ports keep what the
+    // program last wrote, so a CPU write to `$2140` is never echoed back.
+    let mut snes = Snes::from_cartridge(mailbox_echo_lorom());
+    snes.reset();
+    // mov $FA,#1 ; mov $F1,#1 ; mov $F4,#$42 ; stop
+    let prog = [0x8F, 0x01, 0xFA, 0x8F, 0x01, 0xF1, 0x8F, 0x42, 0xF4, 0xFF];
+    snes.apu_real.aram[0x200..0x200 + prog.len()].copy_from_slice(&prog);
+    snes.apu_real.cpu.pc = 0x0200;
+    let mut guard = 0u32;
+    while !snes.cpu.stopped {
+        snes.step();
+        guard += 1;
+        assert!(
+            guard < 4_000_000,
+            "the S-CPU program never reached STP: pc={:04X} x={:04X} p={:02X}",
+            snes.cpu.pc,
+            snes.cpu.x,
+            snes.cpu.p.bits()
+        );
+    }
+    assert!(snes.apu_real.cpu.stopped, "the SPC700 executed STOP");
+    assert_eq!(
+        snes.wram[0], 0x42,
+        "the port keeps the SPC's last write, not the CPU's $77"
+    );
+
+    // The machine runs on: between one and two more frames (about 534 samples each).
+    snes.apu_real.audio_queue.clear();
+    let target = snes.frame_count + 2;
+    while snes.frame_count < target {
+        snes.step();
+    }
+    assert!(
+        snes.apu_real.audio_queue.len() > 500,
+        "the DSP keeps producing samples after STOP, got {}",
+        snes.apu_real.audio_queue.len()
+    );
+    assert!(
+        snes.apu_real.timer_subdivider != 0 || snes.apu_real.timer_internal[0] != 0,
+        "the timers keep counting"
+    );
+}

@@ -7,6 +7,13 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ## [Unreleased]
 
+- A SPC700 that executes `STOP` no longer freezes the S-DSP and the timers, and the heuristic mailbox stub that took over
+  `$2140-$2143` is gone. ares idles the stopped SMP core (`read(PC); idle()`), each idle cycle clocking the timers and
+  the DSP, so only the core halts and the ports keep the last value the SPC wrote (the stub echoed the CPU's writes
+  back). The `ApuStub` module and `Snes::apu_panicked` / `apu_stub_fallback` are removed. **Save-state format v11:** a
+  v10 state is refused (the layout lost two fields). The audio goldens are unchanged (149/149); `spc_pitchmod`, which
+  stays `#[ignore]`, now yields all its samples instead of stopping short. `docs/luna_apu_gaps.md` #8 and
+  `docs/luna_spc700_gaps.md` #3 closed; the SPC700 and S-DSP grades are restored (A−, A).
 - A stopped S-CPU (`STP`) no longer freezes the machine. Until now `STP` ended all time: `frame_count`, the PPU, the DRAM
   refresh, HDMA, the auto-joypad read and the APU stood still. ares loops `idle()` on it (each one a full 6-mclk step of
   the machine), so now the frames go on, `$4210` bit 7 rises at every VBlank, the NMI is latched and never serviced (ares' stopped loop is `L idle()`), and

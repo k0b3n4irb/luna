@@ -862,12 +862,6 @@ impl Apu {
         // `-1` matches Mesen (`Spc.Instructions.cpp`): each step advances 2.
         let target = self.cpu_target_2x.saturating_sub(1);
         while self.spc_pos_2x < target {
-            if self.cpu.stopped {
-                // STOP/SLEEP: execution is frozen forever (no resume path);
-                // keep the counter synced so we don't busy-loop.
-                self.spc_pos_2x = self.cpu_target_2x;
-                break;
-            }
             if !self.cpu.in_instruction {
                 // The call stack first: a stop at this instruction already
                 // shows the call that led to it.
