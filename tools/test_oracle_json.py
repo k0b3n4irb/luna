@@ -5,8 +5,10 @@
 """
 import importlib.util
 import json
+import os
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -70,6 +72,11 @@ class Oracle(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
+        # The tests run inside CI too, where GITHUB_* is set: they must not read it.
+        clean = {k: v for k, v in os.environ.items() if not k.startswith("GITHUB_")}
+        patcher = mock.patch.dict(os.environ, clean, clear=True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def write(self, name, text):
         p = Path(self.tmp.name) / name
