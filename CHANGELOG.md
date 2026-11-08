@@ -7,6 +7,16 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ## [Unreleased]
 
+- The golden ROM suite now reads the reference PNG shipped with each test ROM and compares luna's stable picture with
+  it at tolerance 0 (the hashes only said luna agreed with itself). 22 ROMs are pixel-exact, 21 are within one LSB (a
+  named class: the reference's colour conversion differs, bounded at 1, provenance unverified), 12 are listed
+  exceptions with a pixel ceiling and a reason that stays a hypothesis, and an exception that starts to match fails
+  until promoted. The hi-res and interlace references are compared at the native 512x448 (`InterlaceRPG` is exact).
+  A coverage test names every ROM of the corpus; the check is shown to go red on a flipped pixel and a faulted render.
+  `Perspective.png` turned out to be a BMP under a `.png` name (read by hand). `docs/test_corpora.md` has the table.
+- The settle-runner presses reset when a ROM ends on `STP` (CPUMSC: "Please Reset To PASS STP"); its golden changes
+  (`5a64e306...` to `8e54d665...`): the old picture lacked the WAI PASS and the STP row, the new one matches the
+  reference within 1 LSB. Test harness only, no emulation change.
 - `ORACLE.json`: a versioned file (`schema: 1`) that CI writes from the real results of the gates (Tom Harte reports of
   the 65C816 and the SPC700, the golden ROM suite, the doc check), saying which oracles validated a commit, what is
   NOT proven (a fixed list) and the last commit that touched the CPU / APU core code, so a commit without a Tom Harte

@@ -45,8 +45,12 @@ asserts a hash of the result:
 
 Unlike the Tier-1 vectors, these hashes are captured from **Luna's own output**,
 so they are **regression baselines**, not an independent oracle. Each ROM ships
-a reference image from real hardware; a Luna render is eyeballed against it
-before a baseline is blessed, and re-blessed after any intended render change.
+a reference picture (an emulator capture of unverified provenance, not a console
+photograph). A second group of tests compares Luna's stable picture with it pixel by
+pixel at tolerance 0: 22 ROMs are exact, 21 are within one LSB of colour conversion (a
+named class, bounded at 1), 12 are listed exceptions with their reason, and a listed
+exception that starts to match fails until it is promoted (details in
+`docs/test_corpora.md`). A baseline is re-blessed after any intended render change.
 
 The ROM corpus is **not vendored** — it is fetched on demand and the tests
 skip cleanly if it is absent, so a plain build never depends on it.

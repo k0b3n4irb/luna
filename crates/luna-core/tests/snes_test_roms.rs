@@ -82,6 +82,8 @@ const SAMPLE_FRAMES: u64 = 30;
 /// explicitly — so it has no settle heuristic to get wrong and stays in
 /// instructions.
 const SPC_POLL_EVERY: u64 = 100_000;
+/// Pictures to run after the reset that follows an `STP` (see `settle`).
+const STP_RESET_FRAMES: u64 = 120;
 /// Consecutive identical samples that count as "settled".
 const STABLE_SAMPLES: u32 = 8;
 
@@ -189,10 +191,19 @@ fn fb_bytes(snes: &Snes) -> Vec<u8> {
 ///   A truncated table has no assertion value; NTSC keeps it, and the final
 ///   screen being static makes the golden timing-invariant.
 fn run_to_stable(rom: Vec<u8>, hold: u16, region: luna_cartridge::Region) -> Vec<u8> {
+    fb_bytes(&settle(rom, hold, region, false))
+}
+
+/// The settle-runner behind [`run_to_stable`]; hands back the machine so a
+/// caller can read the native 512x448 buffer (`native` switches that capture on
+/// before the run; it does not change the 256-wide picture the settle test
+/// hashes).
+fn settle(rom: Vec<u8>, hold: u16, region: luna_cartridge::Region, native: bool) -> Snes {
     let mut cart = Cartridge::from_bytes_forced(rom, MapperKind::LoRom).expect("forced LoROM load");
     cart.header.region = region;
     let mut snes = Snes::from_cartridge(cart);
     snes.reset();
+    snes.ppu.set_native_capture(native);
 
     // Hold a controller-1 button for the whole run (e.g. the Mosaic demos
     // ramp the mosaic size while R is held). `LUNA_SNES_TEST_HOLD` (hex)
@@ -241,6 +252,27 @@ fn run_to_stable(rom: Vec<u8>, hold: u16, region: luna_cartridge::Region) -> Vec
         }
     }
 
+    // A ROM that ends in `STP` is waiting for the RESET button: CPUMSC's own
+    // banner reads "Please Reset To PASS STP", and it prints the STP row's PASS
+    // only after it finds, at boot, that the last run ended on a stop. The
+    // reference capture shipped with the ROM is taken after that reset, so the
+    // harness presses it too (a stopped CPU also freezes luna's clock, so the
+    // picture at the stop is a half-scanned one).
+    if snes.cpu.stopped {
+        snes.reset();
+        if hold != 0 {
+            snes.set_joypad(0, hold);
+        }
+        let target = snes.frame_count + STP_RESET_FRAMES;
+        let mut n = 0u64;
+        while snes.frame_count < target && n < STEP_CAP && !snes.cpu.stopped {
+            if catch_unwind(AssertUnwindSafe(|| snes.step())).is_err() {
+                break;
+            }
+            n += 1;
+        }
+    }
+
     std::panic::set_hook(prev_hook);
     eprintln!(
         "[settle] frame={} executed={} stable={}",
@@ -269,7 +301,7 @@ fn run_to_stable(rom: Vec<u8>, hold: u16, region: luna_cartridge::Region) -> Vec
             bg2.h_scroll,
         );
     }
-    fb_bytes(&snes)
+    snes
 }
 
 fn dump_png(bytes: &[u8], path: &Path) {
@@ -504,10 +536,12 @@ cpu_test!(
     "MOV",
     "e4ac2da27999979f098956f8ffbf72ff65691d24ce78370cf88c4b3c3352f4ab"
 );
+// CPUMSC ends in STP and is captured after the reset it asks for (see
+// `settle`): the hash is of the picture with every PASS row drawn.
 cpu_test!(
     cpu_msc,
     "MSC",
-    "5a64e3067d54d0351ff8c84194e5530a306fd7e2b3cbcf3c75aec329b5343485"
+    "8e54d6650fc4b4ac61765184e49ac964e4093a701de7e77dd70341c9aae330a1"
 );
 cpu_test!(
     cpu_ora,
@@ -1490,3 +1524,519 @@ game_test!(
     4801,
     "d7434531cc2f5d7f4fa766991e20fa746c77235ae9bdefe29bc0e7b0dc95db5d"
 );
+
+// =============================================================================
+// Reference PNGs shipped with the corpus
+// =============================================================================
+
+/// Decode a reference picture to `(width, height, RGB888)`. The corpus has one
+/// reference (`Mode7/Perspective/Perspective.png`) that is really a 24-bit BMP
+/// under a `.png` name, and the `image` crate here is built with PNG only, so
+/// that format is read by hand (bottom-up BGR rows padded to 4 bytes); the
+/// format is told by the file's magic, never by its extension.
+fn load_reference(path: &Path) -> Result<(usize, usize, Vec<u8>), String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    if bytes.starts_with(b"BM") {
+        let u32at = |o: usize| u32::from_le_bytes(bytes[o..o + 4].try_into().unwrap());
+        let (off, w, h) = (u32at(10) as usize, u32at(18) as usize, u32at(22) as i32);
+        let bpp = u16::from_le_bytes([bytes[28], bytes[29]]);
+        if bpp != 24 || h <= 0 || bytes.len() < off + ((w * 3).div_ceil(4) * 4) * h as usize {
+            return Err(format!(
+                "{}: unsupported BMP (bpp {bpp}, height {h})",
+                path.display()
+            ));
+        }
+        let (h, stride) = (h as usize, (w * 3).div_ceil(4) * 4);
+        let mut rgb = Vec::with_capacity(w * h * 3);
+        for y in (0..h).rev() {
+            for x in 0..w {
+                let p = off + y * stride + x * 3;
+                rgb.extend_from_slice(&[bytes[p + 2], bytes[p + 1], bytes[p]]);
+            }
+        }
+        return Ok((w, h, rgb));
+    }
+    let img = image::load_from_memory(&bytes)
+        .map_err(|e| format!("{}: {e}", path.display()))?
+        .to_rgb8();
+    Ok((img.width() as usize, img.height() as usize, img.into_raw()))
+}
+
+/// Every `.sfc` under `root`, sorted.
+fn all_roms(root: &Path) -> Vec<PathBuf> {
+    fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+        let mut entries: Vec<_> = std::fs::read_dir(dir)
+            .expect("read corpus dir")
+            .map(|e| e.expect("dir entry").path())
+            .collect();
+        entries.sort();
+        for p in entries {
+            if p.is_dir() {
+                walk(&p, out);
+            } else if p.extension().is_some_and(|e| e == "sfc") {
+                out.push(p);
+            }
+        }
+    }
+    let mut v = Vec::new();
+    walk(root, &mut v);
+    v
+}
+
+/// The reference picture of a ROM: the `.png` of the same directory with the
+/// same name, compared case-insensitively (`RedspaceHDMA.png` belongs to
+/// `RedSpaceHDMA.sfc`).
+fn find_reference(rom: &Path) -> Option<PathBuf> {
+    let stem = rom.file_stem()?.to_string_lossy().to_lowercase();
+    std::fs::read_dir(rom.parent()?)
+        .ok()?
+        .map(|e| e.expect("dir entry").path())
+        .find(|p| {
+            p.extension().is_some_and(|e| e == "png")
+                && p.file_stem()
+                    .is_some_and(|s| s.to_string_lossy().to_lowercase() == stem)
+        })
+}
+
+/// How far a captured picture is from its reference.
+#[derive(Debug, PartialEq, Eq)]
+struct PicDiff {
+    /// Pixels where at least one channel differs.
+    pixels: usize,
+    /// Largest per-channel difference.
+    max: u8,
+}
+
+/// Compare two RGB888 buffers of the same size, pixel by pixel.
+fn diff_rgb(got: &[u8], want: &[u8]) -> PicDiff {
+    assert_eq!(got.len(), want.len(), "diff_rgb needs equal sizes");
+    let mut d = PicDiff { pixels: 0, max: 0 };
+    for (g, w) in got.chunks_exact(3).zip(want.chunks_exact(3)) {
+        let m = (0..3).map(|c| g[c].abs_diff(w[c])).max().unwrap_or(0);
+        if m > 0 {
+            d.pixels += 1;
+            d.max = d.max.max(m);
+        }
+    }
+    d
+}
+
+/// What a ROM's capture is expected to be, against its reference picture.
+#[derive(Debug)]
+enum RefClass {
+    /// Not one pixel differs (tolerance 0).
+    Exact,
+    /// Named class "colour conversion off by one LSB": every pixel within one
+    /// LSB per channel, and the picture otherwise identical. The reference
+    /// PNGs of these ROMs have a background of 248 where luna draws 247; they
+    /// come from a capture chain with another RGB555 to RGB888 conversion
+    /// (provenance unverified). luna expands with `(c << 3) | (c >> 2)`.
+    OneLsb,
+    /// A known difference. It may only shrink: more than `max_pixels` pixels
+    /// differing fails (a regression), and so does an exact match or one within
+    /// the 1-LSB bound (the entry has rotted: promote it). `why` is the
+    /// hypothesis, unverified unless it says otherwise.
+    Exception {
+        max_pixels: usize,
+        why: &'static str,
+    },
+}
+
+/// Judge a measured difference against the class the ROM is listed under.
+fn judge(rel: &str, class: &RefClass, d: &PicDiff) -> Result<(), String> {
+    match class {
+        RefClass::Exact if d.pixels == 0 => Ok(()),
+        RefClass::Exact => Err(format!(
+            "{rel}: {} pixels differ from the reference (max channel diff {}), tolerance is 0",
+            d.pixels, d.max
+        )),
+        RefClass::OneLsb if d.pixels > 0 && d.max <= 1 => Ok(()),
+        RefClass::OneLsb if d.pixels == 0 => Err(format!(
+            "{rel}: now matches the reference exactly: list it as Exact"
+        )),
+        RefClass::OneLsb => Err(format!(
+            "{rel}: max channel diff {} on {} pixels, the 1-LSB class allows 1",
+            d.max, d.pixels
+        )),
+        RefClass::Exception { .. } if d.pixels == 0 => Err(format!(
+            "{rel}: now matches the reference exactly: remove it from the exceptions"
+        )),
+        RefClass::Exception { .. } if d.max <= 1 => Err(format!(
+            "{rel}: now within 1 LSB of the reference: move it to the OneLsb class"
+        )),
+        RefClass::Exception { max_pixels, why } if d.pixels > *max_pixels => Err(format!(
+            "{rel}: {} pixels differ, more than the {max_pixels} recorded ({why})",
+            d.pixels
+        )),
+        RefClass::Exception { .. } => Ok(()),
+    }
+}
+
+/// Region and held button a ROM is run with: the same as its golden test
+/// (the `CPUTest` family NTSC, the PPU demos PAL, A held for the latency ROM,
+/// R for the Mosaic demos).
+fn run_config(rel: &str) -> (u16, luna_cartridge::Region) {
+    let region = if rel.starts_with("CPUTest/CPU/") {
+        luna_cartridge::Region::Ntsc
+    } else {
+        luna_cartridge::Region::Pal
+    };
+    let hold = if rel.contains("ControllerLatency") {
+        PAD_A
+    } else if rel.contains("/Mosaic/") {
+        PAD_R
+    } else {
+        0
+    };
+    (hold, region)
+}
+
+/// Run `rel` to its stable picture and return it as `(width, height, RGB888)`:
+/// the 256-wide picture, or the native 512-wide one (`native`).
+fn capture(root: &Path, rel: &str, native: bool) -> (usize, usize, Vec<u8>) {
+    let (hold, region) = run_config(rel);
+    let rom = std::fs::read(root.join(rel)).expect("read rom");
+    let snes = settle(rom, hold, region, native);
+    if native {
+        let bytes: Vec<u8> = snes
+            .ppu
+            .native_framebuffer()
+            .iter()
+            .flat_map(|px| px.iter().copied())
+            .collect();
+        (512, bytes.len() / 3 / 512, bytes)
+    } else {
+        let bytes = fb_bytes(&snes);
+        (FRAME_W, bytes.len() / 3 / FRAME_W, bytes)
+    }
+}
+
+/// Compare the capture of `rel` with its reference picture under `class`.
+/// `native` compares at the native 512x448 resolution (the references of the
+/// hi-res and interlace ROMs are that size).
+fn check_reference(rel: &str, class: &RefClass, native: bool) {
+    let Some(root) = corpus_root() else {
+        skip(CORPUS_REQUIRE, "SNES test corpus not found");
+        return;
+    };
+    let rom = root.join(rel);
+    if !rom.is_file() {
+        skip(
+            CORPUS_REQUIRE,
+            &format!("{rel}: not present under {}", root.display()),
+        );
+        return;
+    }
+    let Some(png) = find_reference(&rom) else {
+        skip(
+            CORPUS_REQUIRE,
+            &format!("{rel}: no reference picture next to it"),
+        );
+        return;
+    };
+    let (rw, rh, want) = load_reference(&png).expect("decode reference");
+    let (gw, gh, got) = capture(&root, rel, native);
+    assert_eq!(
+        (gw, gh),
+        (rw, rh),
+        "{rel}: capture is {gw}x{gh}, the reference {rw}x{rh}: not comparable"
+    );
+    let d = diff_rgb(&got, &want);
+    println!(
+        "REFERENCE {rel}: {} pixels differ, max channel diff {}",
+        d.pixels, d.max
+    );
+    if let Err(e) = judge(rel, class, &d) {
+        panic!("{e}");
+    }
+}
+
+/// One test per ROM compared with its reference picture, and the list the
+/// coverage test checks the corpus against.
+macro_rules! reference_tests {
+    ($($name:ident: $rel:literal, $native:literal, $class:expr;)*) => {
+        /// Every ROM compared with its reference picture.
+        const REFERENCE_ROMS: &[&str] = &[$($rel),*];
+        $(
+            #[test]
+            fn $name() {
+                check_reference($rel, &$class, $native);
+            }
+        )*
+    };
+}
+
+// The reference pictures shipped with the corpus, at tolerance 0 (see
+// `RefClass`). Measured 2026-11-08; the numbers are pixel counts of the
+// 256x224 (or native 512x448) picture.
+reference_tests! {
+    // Exact.
+    png_cpu_dec: "CPUTest/CPU/DEC/CPUDEC.sfc", false, RefClass::Exact;
+    png_cpu_inc: "CPUTest/CPU/INC/CPUINC.sfc", false, RefClass::Exact;
+    png_cpu_mov: "CPUTest/CPU/MOV/CPUMOV.sfc", false, RefClass::Exact;
+    png_controller_latency: "INPUT/ControllerLatency/ControllerLatency.sfc", false, RefClass::Exact;
+    png_bg1_2bpp: "PPU/BGMAP/8x8/2BPP/8x8BG1Map2BPP32x328PAL/8x8BG1Map2BPP32x328PAL.sfc", false, RefClass::Exact;
+    png_bg2_2bpp: "PPU/BGMAP/8x8/2BPP/8x8BG2Map2BPP32x328PAL/8x8BG2Map2BPP32x328PAL.sfc", false, RefClass::Exact;
+    png_bg3_2bpp: "PPU/BGMAP/8x8/2BPP/8x8BG3Map2BPP32x328PAL/8x8BG3Map2BPP32x328PAL.sfc", false, RefClass::Exact;
+    png_bg4_2bpp: "PPU/BGMAP/8x8/2BPP/8x8BG4Map2BPP32x328PAL/8x8BG4Map2BPP32x328PAL.sfc", false, RefClass::Exact;
+    png_bg_4bpp: "PPU/BGMAP/8x8/4BPP/8x8BGMap4BPP32x328PAL/8x8BGMap4BPP32x328PAL.sfc", false, RefClass::Exact;
+    png_tile_flip: "PPU/BGMAP/8x8/8BPP/TileFlip/8x8BGMapTileFlip.sfc", false, RefClass::Exact;
+    png_green_space: "PPU/GreenSpace/GreenSpace.sfc", false, RefClass::Exact;
+    png_rings: "PPU/Rings/Rings.sfc", false, RefClass::Exact;
+    png_hicolor_3840: "PPU/Blend/HiColor/HiColor3840/HiColor3840.sfc", false, RefClass::Exact;
+    png_hicolor_575myst: "PPU/Blend/HiColor/HiColor575Myst/HiColor575Myst.sfc", false, RefClass::Exact;
+    png_hicolor_128: "PPU/HDMA/HiColor128PerTileRow/HiColor128PerTileRow.sfc", false, RefClass::Exact;
+    png_hicolor_64: "PPU/HDMA/HiColor64PerTileRow/HiColor64PerTileRow.sfc", false, RefClass::Exact;
+    png_mode7_hdma: "PPU/HDMA/Mode7HDMA/Mode7HDMA.sfc", false, RefClass::Exact;
+    png_redspace_hdma: "PPU/HDMA/RedSpaceHDMA/RedSpaceHDMA.sfc", false, RefClass::Exact;
+    png_redspace_indirect_hdma: "PPU/HDMA/RedSpaceIndirectHDMA/RedSpaceIndirectHDMA.sfc", false, RefClass::Exact;
+    png_window_hdma: "PPU/Window/WindowHDMA/WindowHDMA.sfc", false, RefClass::Exact;
+    // Exact, found by the first measurement: a reference that is a BMP under a
+    // `.png` name, and the one interlace ROM whose native picture matches.
+    png_mode7_perspective: "PPU/Mode7/Perspective/Perspective.sfc", false, RefClass::Exact;
+    png_interlace_rpg: "PPU/Interlace/InterlaceRPG/InterlaceRPG.sfc", true, RefClass::Exact;
+
+    // Named class: colour conversion off by one LSB.
+    png_cpu_adc: "CPUTest/CPU/ADC/CPUADC.sfc", false, RefClass::OneLsb;
+    png_cpu_and: "CPUTest/CPU/AND/CPUAND.sfc", false, RefClass::OneLsb;
+    png_cpu_asl: "CPUTest/CPU/ASL/CPUASL.sfc", false, RefClass::OneLsb;
+    png_cpu_bit: "CPUTest/CPU/BIT/CPUBIT.sfc", false, RefClass::OneLsb;
+    png_cpu_bra: "CPUTest/CPU/BRA/CPUBRA.sfc", false, RefClass::OneLsb;
+    png_cpu_cmp: "CPUTest/CPU/CMP/CPUCMP.sfc", false, RefClass::OneLsb;
+    png_cpu_eor: "CPUTest/CPU/EOR/CPUEOR.sfc", false, RefClass::OneLsb;
+    png_cpu_jmp: "CPUTest/CPU/JMP/CPUJMP.sfc", false, RefClass::OneLsb;
+    png_cpu_ldr: "CPUTest/CPU/LDR/CPULDR.sfc", false, RefClass::OneLsb;
+    png_cpu_lsr: "CPUTest/CPU/LSR/CPULSR.sfc", false, RefClass::OneLsb;
+    png_cpu_msc: "CPUTest/CPU/MSC/CPUMSC.sfc", false, RefClass::OneLsb;
+    png_cpu_ora: "CPUTest/CPU/ORA/CPUORA.sfc", false, RefClass::OneLsb;
+    png_cpu_phl: "CPUTest/CPU/PHL/CPUPHL.sfc", false, RefClass::OneLsb;
+    png_cpu_psr: "CPUTest/CPU/PSR/CPUPSR.sfc", false, RefClass::OneLsb;
+    png_cpu_ret: "CPUTest/CPU/RET/CPURET.sfc", false, RefClass::OneLsb;
+    png_cpu_rol: "CPUTest/CPU/ROL/CPUROL.sfc", false, RefClass::OneLsb;
+    png_cpu_ror: "CPUTest/CPU/ROR/CPUROR.sfc", false, RefClass::OneLsb;
+    png_cpu_sbc: "CPUTest/CPU/SBC/CPUSBC.sfc", false, RefClass::OneLsb;
+    png_cpu_str: "CPUTest/CPU/STR/CPUSTR.sfc", false, RefClass::OneLsb;
+    png_cpu_trn: "CPUTest/CPU/TRN/CPUTRN.sfc", false, RefClass::OneLsb;
+    png_redspace_9bit_hdma: "PPU/HDMA/RedSpace9BitHDMA/RedSpace9BitHDMA.sfc", false, RefClass::OneLsb;
+
+    // Exceptions: real differences, named, never silently tolerated.
+    png_rot_zoom: "PPU/Mode7/RotZoom/RotZoom.sfc", false, RefClass::Exception {
+        max_pixels: 47_565,
+        why: "hypothesis: the animation phase of the capture differs from the reference's",
+    };
+    png_wave_hdma: "PPU/HDMA/WaveHDMA/WaveHDMA.sfc", false, RefClass::Exception {
+        max_pixels: 53_805,
+        why: "hypothesis: the animation phase of the capture differs from the reference's",
+    };
+    png_window_multi_hdma: "PPU/Window/WindowMultiHDMA/WindowMultiHDMA.sfc", false, RefClass::Exception {
+        max_pixels: 30_798,
+        why: "hypothesis: the animation phase of the capture differs from the reference's",
+    };
+    png_star_wars: "PPU/Mode7/StarWars/StarWars.sfc", false, RefClass::Exception {
+        max_pixels: 5669,
+        why: "hypothesis: the animation phase of the capture differs from the reference's",
+    };
+    png_mosaic_mode3: "PPU/Mosaic/Mode3/MosaicMode3.sfc", false, RefClass::Exception {
+        max_pixels: 48_676,
+        why: "hypothesis: the mosaic ramp is at another step than the reference's",
+    };
+    png_mosaic_mode5: "PPU/Mosaic/Mode5/MosaicMode5.sfc", true, RefClass::Exception {
+        max_pixels: 17_664,
+        why: "hypothesis: the mosaic ramp is at another step than the reference's",
+    };
+    png_interlace_scroll: "PPU/Interlace/InterlaceScroll/InterlaceScroll.sfc", true, RefClass::Exception {
+        max_pixels: 222_208,
+        why: "hypothesis: the scroll position of the capture differs from the reference's",
+    };
+    png_interlace_font: "PPU/Interlace/InterlaceFont/InterlaceFont.sfc", true, RefClass::Exception {
+        max_pixels: 9850,
+        why: "unexplained: 4.3 % of the pixels differ, up to 255 on a channel (not a few-LSB offset)",
+    };
+    png_interlace_moogle: "PPU/Interlace/InterlaceMoogle/InterlaceMoogle.sfc", true, RefClass::Exception {
+        max_pixels: 209_667,
+        why: "unexplained: 91 % of the pixels differ, up to 70 on a channel",
+    };
+    png_interlace_myst_hdma: "PPU/Interlace/InterlaceMystHDMA/InterlaceMystHDMA.sfc", true, RefClass::Exception {
+        max_pixels: 229_376,
+        why: "hypothesis: another colour conversion in the capture chain (every pixel differs, by at most 6)",
+    };
+    png_interlace_simpsons_hdma: "PPU/Interlace/InterlaceSimpsonsHDMA/InterlaceSimpsonsHDMA.sfc", true, RefClass::Exception {
+        max_pixels: 229_376,
+        why: "hypothesis: another colour conversion in the capture chain (every pixel differs, by at most 7)",
+    };
+    png_hicolor_64_pseudo_hires: "PPU/HDMA/HiColor64PerTileRowPseudoHiRes/HiColor64PerTileRowPseudoHiRes.sfc", true, RefClass::Exception {
+        max_pixels: 64_924,
+        why: "unexplained: 28 % of the pixels differ, up to 91 on a channel",
+    };
+}
+
+/// ROMs that have a picture next to them yet cannot be compared, and why.
+const NOT_COMPARABLE: &[(&str, &str)] = &[
+    (
+        "PPU/Blend/HiColor/HiColor1241DLair/HiColor1241DLair.sfc",
+        "its reference is 256x225, luna's picture 256x224",
+    ),
+    (
+        "INPUT/XBandKeyboard/XBandKeyboard.sfc",
+        "needs the XBand keyboard, which luna does not model; no display golden either",
+    ),
+];
+
+/// ROMs the corpus ships without any reference picture.
+const NO_REFERENCE: &[&str] = &[
+    "PPU/BGMAP/8x8/8BPP/32x32/8x8BGMap8BPP32x32.sfc",
+    "PPU/BGMAP/8x8/8BPP/32x64/8x8BGMap8BPP32x64.sfc",
+    "PPU/BGMAP/8x8/8BPP/64x32/8x8BGMap8BPP64x32.sfc",
+    "PPU/BGMAP/8x8/8BPP/64x64/8x8BGMap8BPP64x64.sfc",
+];
+
+/// The list above is the whole corpus: every ROM is compared, or named as not
+/// comparable, or named as having no reference, and each of those claims is
+/// still true. A new ROM or PNG in the corpus fails here until it is
+/// classified. The SPC700 ROMs (audio: mailbox protocol or PCM hash) and the
+/// `TEST/` input images are not display tests.
+#[test]
+fn png_reference_coverage() {
+    let Some(root) = corpus_root() else {
+        skip(CORPUS_REQUIRE, "SNES test corpus not found");
+        return;
+    };
+    let mut problems = Vec::new();
+    for rom in all_roms(&root) {
+        let rel = rom
+            .strip_prefix(&root)
+            .expect("under root")
+            .to_string_lossy()
+            .replace('\\', "/");
+        if rel.contains("/TEST/")
+            || rel.starts_with("CPUTest/SPC700/")
+            || rel.starts_with("SPC700/")
+        {
+            continue;
+        }
+        let compared = REFERENCE_ROMS.contains(&rel.as_str());
+        let not_comparable = NOT_COMPARABLE.iter().any(|(r, _)| *r == rel);
+        let no_ref = NO_REFERENCE.contains(&rel.as_str());
+        if [compared, not_comparable, no_ref]
+            .iter()
+            .filter(|b| **b)
+            .count()
+            != 1
+        {
+            problems.push(format!("{rel}: not in exactly one of the three lists"));
+        }
+        let has_png = find_reference(&rom).is_some();
+        if no_ref && has_png {
+            problems.push(format!("{rel}: listed without a reference, yet one exists"));
+        }
+        if (compared || not_comparable) && !has_png {
+            problems.push(format!("{rel}: listed with a reference, yet none exists"));
+        }
+    }
+    for rel in REFERENCE_ROMS
+        .iter()
+        .chain(NO_REFERENCE)
+        .chain(NOT_COMPARABLE.iter().map(|(r, _)| r))
+    {
+        if !root.join(rel).is_file() {
+            problems.push(format!("{rel}: listed, but absent from the corpus"));
+        }
+    }
+    // A "not comparable" reason must still hold where it is a size.
+    let lair = root.join(NOT_COMPARABLE[0].0);
+    if let Some(png) = find_reference(&lair) {
+        let (w, h, _) = load_reference(&png).expect("decode");
+        if (w, h) == (FRAME_W, FRAME_H) {
+            problems.push(format!(
+                "{}: its reference is now {w}x{h}: compare it",
+                NOT_COMPARABLE[0].0
+            ));
+        }
+    }
+    assert!(
+        problems.is_empty(),
+        "reference pictures out of step:\n{}",
+        problems.join("\n")
+    );
+}
+
+/// The comparison itself can go red: a single flipped pixel fails an exact
+/// match, a 2-LSB pixel fails the 1-LSB class, and the exception list
+/// notices a ROM that starts matching.
+#[test]
+fn png_comparison_detects_faults() {
+    let want: Vec<u8> = (0..FRAME_W * FRAME_H * 3)
+        .map(|i| (i % 251) as u8)
+        .collect();
+    let mut got = want.clone();
+    assert_eq!(diff_rgb(&got, &want), PicDiff { pixels: 0, max: 0 });
+    assert!(judge("t", &RefClass::Exact, &diff_rgb(&got, &want)).is_ok());
+
+    // One channel of one pixel, one LSB off.
+    got[12_345] = got[12_345].wrapping_add(1);
+    let d = diff_rgb(&got, &want);
+    assert_eq!(d, PicDiff { pixels: 1, max: 1 });
+    assert!(
+        judge("t", &RefClass::Exact, &d).is_err(),
+        "one pixel must fail Exact"
+    );
+    assert!(judge("t", &RefClass::OneLsb, &d).is_ok());
+    let exception = RefClass::Exception {
+        max_pixels: 10,
+        why: "t",
+    };
+    assert!(
+        judge("t", &exception, &d).is_err(),
+        "within 1 LSB: the entry has rotted"
+    );
+
+    // Two LSB off: out of the 1-LSB class.
+    got[12_345] = want[12_345].wrapping_add(2);
+    let d = diff_rgb(&got, &want);
+    assert_eq!(d.max, 2);
+    assert!(judge("t", &RefClass::OneLsb, &d).is_err());
+    assert!(judge("t", &exception, &d).is_ok());
+    // More pixels than the exception recorded.
+    for i in 0..11 {
+        got[3 * i] = want[3 * i].wrapping_add(9);
+    }
+    assert!(judge("t", &exception, &diff_rgb(&got, &want)).is_err());
+    // An exception that matches exactly has rotted.
+    assert!(judge("t", &exception, &diff_rgb(&want, &want)).is_err());
+}
+
+/// The same, end to end on a real ROM: with the PPU faulted after the ROM has
+/// settled (main-screen layers switched off), the next picture no longer
+/// matches the reference, and the check says so.
+#[test]
+fn png_comparison_detects_a_faulted_render() {
+    let Some(root) = corpus_root() else {
+        skip(CORPUS_REQUIRE, "SNES test corpus not found");
+        return;
+    };
+    let rel = "PPU/BGMAP/8x8/2BPP/8x8BG1Map2BPP32x328PAL/8x8BG1Map2BPP32x328PAL.sfc";
+    let path = root.join(rel);
+    let Some(png) = path.is_file().then(|| find_reference(&path)).flatten() else {
+        skip(CORPUS_REQUIRE, &format!("{rel}: absent"));
+        return;
+    };
+    let (_, _, want) = load_reference(&png).expect("decode reference");
+    let (hold, region) = run_config(rel);
+    let mut snes = settle(std::fs::read(&path).expect("read rom"), hold, region, false);
+    assert_eq!(
+        diff_rgb(&fb_bytes(&snes), &want).pixels,
+        0,
+        "unfaulted run must match"
+    );
+    snes.ppu.tm = 0;
+    let target = snes.frame_count + 2;
+    while snes.frame_count < target {
+        snes.step();
+    }
+    let d = diff_rgb(&fb_bytes(&snes), &want);
+    assert!(
+        d.pixels > 0,
+        "a faulted render must differ from the reference"
+    );
+    assert!(judge(rel, &RefClass::Exact, &d).is_err());
+}
