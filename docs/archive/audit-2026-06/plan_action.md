@@ -82,7 +82,7 @@
 - **Validation** : test unitaire open-bus ; non-régression golden.
 - **Effort** : 🟡 (touche le chemin chaud) · **Dépendances** : aucune.
 
-### 1.4 — Cartouche : scoring de détection mapper + bon octet SA-1 🟡
+### 1.4 — Cartridge : scoring de détection mapper + bon octet SA-1 🟡
 - **Objectif** : remplacer « premier checksum-pass gagne » par un **scoring
   pondéré multi-offset** ; détecter SA-1 par le hi-nibble du RomType `$FFD6`.
 - **Où** : `crates/luna-cartridge/src/lib.rs:~179` (`detect_and_parse`), `:~243`

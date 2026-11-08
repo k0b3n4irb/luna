@@ -14,7 +14,7 @@ implementation in both references and understand it fully.
 | **ares** | gold standard | `https://raw.githubusercontent.com/ares-emulator/ares/master/ares/sfc/` |
 | **Mesen2** | independent second source | `https://raw.githubusercontent.com/SourMesen/Mesen2/master/Core/SNES/` |
 
-1. **Ask Cartouche first** (`snes_search`): the corpus already held the
+1. **Ask the local SNES documentation index first** (its search tool): the corpus already held the
    answer twice. Ares core and Mesen2 are indexed as code.
 2. **Fetch** both sources into `/tmp/luna-ref/` (`/reference-fetch <subsys>`;
    listing: `gh api repos/ares-emulator/ares/contents/ares/sfc/<subsys>`).
