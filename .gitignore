@@ -41,6 +41,7 @@ book/book/
 # Peter Lemon SNES test ROMs (crates/luna-core/tests/snes_test_roms.rs),
 # fetched by tools/fetch-snes-test-roms.sh — locally and in CI.
 /.luna_tests/
+/.luna_tests_undis/
 
 # Python bytecode (tools/*.py)
 __pycache__/
