@@ -89,3 +89,18 @@ reference.
 > The same harnesses underpin Luna's CPU cores (the per-cycle bus-trace oracle),
 > its coprocessors (byte-exact trajectory replays), and its renderer (the golden
 > ROM suite). See [Testing & determinism](testing.md).
+
+## Sound: Mesen2's wave recorder
+
+The same native core records sound. `tools/mesen-wave.py` starts Mesen2's
+own wave recorder at the reset vector and writes a WAV (48 kHz, in real
+time, so compare envelopes and events, not sample indices):
+
+```bash
+tools/mesen-wave.py game.sfc /tmp/mesen.wav --seconds 9
+luna state game.sfc --until-frame 450 --audio-out /tmp/luna.wav
+```
+
+Cut both into 5 ms windows and print the peak of each: a divergence shows
+as the first window where the two rows part. `luna state --dsp-trace` then
+names the register write behind it.
