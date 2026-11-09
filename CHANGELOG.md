@@ -19,7 +19,7 @@ fast-forwarded to (binaries attached by CI). Format inspired by
   on the cycle; EDL is latched at step 29, so an EDL write at phase 30 or 31 lands one sample later. Found on PitchMod
   (`MOV $F3,#$0F` at phase 30): the echo buffer sat one slot ahead of Mesen2's. New `Dsp::step_one` / `Dsp::step`;
   `Dsp::main()` stays as 32 steps for tests; the wait-state accesses step `SPC_SAMPLE_WAIT[ws]` times as in ares.
-  **Audible, to be listened to before any re-record:** four of the 149 `snes_test_roms` goldens move (`spc_axel_f`, `spc_ffvii_prelude`, `spc_speech`, `spc_play_two_song`, by at most 99 LSB, under 0.03 % RMS after 3 s); none is re-recorded yet. Measured: with the same DSP phase as Mesen2 the PitchMod echo buffer matches it slot for slot (69 ARAM bytes differ, 27 253 before); the 720-cycle gap in the IPL upload handshake that sets that phase is a separate difference. **Save-state format
+  **Audible, listened to by the owner (accepted 2026-11-09):** four of the `snes_test_roms` audio goldens were re-recorded (`spc_axel_f`, `spc_ffvii_prelude`, `spc_speech`, `spc_play_two_song`: at most 99 LSB, under 0.03 % RMS), and each fails on the previous block-stepped DSP (checked). `spc_play_two_song` now spans 7 s instead of 3 (it is mute for its first ~4 s, so the old golden hashed silence, peak 99 LSB), through a new `samples = N` option of `spc_test!`. `spc_pitchmod` is un-ignored with a 6 s golden. Measured on PitchMod (PAL both sides): the echo buffer equals Mesen2's slot for slot (27 253 ARAM bytes differed before). **Save-state format
   v12:** a v11 state is refused (the DSP phase is state; the 32-cycle accumulator is gone). `docs/luna_apu_gaps.md` #10;
   SPC700 and S-DSP grades stay B+.
 - **`TnOUT` power on at `$F`, as on Anomie's and Mesen2's SPC700.** The three timer outputs (`$FD-$FF`) held 0 at power-on
@@ -29,8 +29,7 @@ fast-forwarded to (binaries attached by CI). Format inspired by
   Mesen2 and a measurement: on PitchMod (PAL) the SPC700 instruction stream equals Mesen2's over 61 487 events (the first
   difference was `AND1 C,/$00FE.1`, a T1OUT read with timer 1 never enabled), the audible restart of voice 1 (`KON $02`) at
   1.72 s is gone and the waveform envelope tracks Mesen2's within about 1 %. With the S-DSP stepping above this closes the
-  PitchMod sound parting (`docs/luna_spc700_gaps.md` #4). No save-state bump: the outputs were already saved. Some audio
-  goldens may move further; none is re-recorded. SPC700 and S-DSP grades stay B+.
+  PitchMod sound parting (`docs/luna_spc700_gaps.md` #4). No save-state bump: the outputs were already saved. SPC700 and S-DSP grades stay B+.
 - **Forcing an interrupt before an instruction**: `--inject-nmi-at SPEC[:N]` and `--inject-irq-at SPEC[:N]` (`state`,
   `record`, `profile`, `strict`), the `inject_nmi_at` / `inject_irq_at` keys of a `luna test` manifest, the MCP tool
   `inject_interrupt_at` and `luna_api::Emulator::inject_interrupt` / `inject_interrupt_at`. The NMI or IRQ is latched in

@@ -1102,11 +1102,11 @@ const PAD_R: u16 = 0x0010;
 /// for ROMs that only start playing on a button press (e.g. `PlayTwoSong`'s
 /// A = song 1). `0` means no input. The `LUNA_SNES_TEST_HOLD` env var
 /// (hex) overrides it for ad-hoc experimentation.
-fn run_audio(rom: Vec<u8>, hold: u16) -> Vec<(i16, i16)> {
+fn run_audio(rom: Vec<u8>, hold: u16, samples: usize) -> Vec<(i16, i16)> {
     let want: usize = std::env::var("LUNA_SNES_TEST_AUDIO_N")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(AUDIO_SAMPLES);
+        .unwrap_or(samples);
     let mut cart = Cartridge::from_bytes_forced(rom, MapperKind::LoRom).expect("forced LoROM load");
     cart.header.region = luna_cartridge::Region::Pal;
     let mut snes = Snes::from_cartridge(cart);
@@ -1223,7 +1223,7 @@ fn write_wav(path: &Path, samples: &[(i16, i16)]) {
 
 /// Boot `rel`, capture its audio, and compare the PCM SHA-256 to
 /// `expected`. Skips gracefully if the corpus / ROM is absent.
-fn test_audio(rel: &str, expected: &str, hold: u16) {
+fn test_audio(rel: &str, expected: &str, hold: u16, window: usize) {
     let Some(root) = corpus_root() else {
         skip(
             CORPUS_REQUIRE,
@@ -1241,7 +1241,7 @@ fn test_audio(rel: &str, expected: &str, hold: u16) {
     }
 
     let rom = std::fs::read(&path).expect("read rom");
-    let samples = run_audio(rom, hold);
+    let samples = run_audio(rom, hold, window);
     let got = hex(&Sha256::digest(audio_bytes(&samples)));
     let nonsilent = samples.iter().filter(|(l, r)| *l != 0 || *r != 0).count();
 
@@ -1260,8 +1260,8 @@ fn test_audio(rel: &str, expected: &str, hold: u16) {
 
     assert_eq!(
         samples.len(),
-        AUDIO_SAMPLES,
-        "{rel}: produced only {} of {AUDIO_SAMPLES} samples (ROM did not play?)",
+        window,
+        "{rel}: produced only {} of {window} samples (ROM did not play?)",
         samples.len()
     );
     assert!(nonsilent > 0, "{rel}: APU output was pure silence");
@@ -1280,44 +1280,45 @@ macro_rules! spc_test {
     ($fn:ident, $path:literal, $hash:literal) => {
         #[test]
         fn $fn() {
-            test_audio(concat!("SPC700/", $path), $hash, 0);
+            test_audio(concat!("SPC700/", $path), $hash, 0, AUDIO_SAMPLES);
         }
     };
     ($fn:ident, $path:literal, $hash:literal, hold = $mask:expr) => {
         #[test]
         fn $fn() {
-            test_audio(concat!("SPC700/", $path), $hash, $mask);
+            test_audio(concat!("SPC700/", $path), $hash, $mask, AUDIO_SAMPLES);
         }
     };
-    // Ignored audio golden. Now used only by PitchMod — a real SPC700 STOP
-    // halt under the correct cycles that Mesen2 reproduces too (see the
-    // `project_pitchmod_spc700_crash` memory + tools/pitchmod-ref-check.lua), so
-    // its golden is intentionally parked. (The Phase-2/3 stale-waveform goldens
-    // that used to live here were auditioned + re-baselined 2026-06-23.)
-    ($fn:ident, $path:literal, $hash:literal, ignore = $reason:literal) => {
+    // A longer window, for a ROM whose music starts late: the 3 s of the
+    // others would hash silence (PlayTwoSong is mute for its first ~4 s).
+    ($fn:ident, $path:literal, $hash:literal, hold = $mask:expr, samples = $n:expr) => {
         #[test]
-        #[ignore = $reason]
         fn $fn() {
-            test_audio(concat!("SPC700/", $path), $hash, 0);
+            test_audio(concat!("SPC700/", $path), $hash, $mask, $n);
         }
     };
 }
 
-// Golden hashes of luna's 32 kHz PCM output (first 3 s, loaded as PAL).
+// Golden hashes of luna's 32 kHz PCM output (first 3 s, loaded as PAL; PlayTwoSong 7 s, its music starts after ~4 s).
+// Axel-F, FFVIIPrelude, SpeechSynth and PlayTwoSong re-recorded 2026-11-09 after the step-granular S-DSP (listened to by the owner).
 // All 8 auditioned (recognisable, clean) and re-baselined 2026-06-23 after the
 // Phase-2/3 SPC700 cycle-accuracy waveform shift; the multi-block-upload music
-// ROMs play thanks to the IPL-ROM byte fix. PitchMod stays ignored (a real,
-// ares-matching STOP halt — see its reason).
+// ROMs play thanks to the IPL-ROM byte fix. PitchMod (6 s) was parked until 2026-11-09: its
+// SPC runs off its code and halts on a STOP like Mesen2's, and its golden predates the fix.
 spc_test!(
     spc_italo,
     "ItaloTest/ItaloTest.sfc",
     "cffc62b5d0800b88f445eefebeeedfbd573dea63a2e5c65fcfe4805e7b4ec791"
 );
+// PitchMod is the ROM that found the S-DSP scheduling defect (2026-11-09): its SPC runs off its code
+// after the first KON and the echo buffer it executes must be stored where the references store it. The
+// golden spans the STOP at ~1.77 s and the DSP playing on after it. Window 6 s.
 spc_test!(
     spc_pitchmod,
     "PitchMod/PitchMod.sfc",
-    "2d0b4cf14f382dff76f4e77a016e98827c70e36c3fcc6b9016ac92ec75bc529e",
-    ignore = "PitchMod is a knife-edge timing ROM — Mesen2 ALSO halts its SPC700 on STOP ~1.8s in (frame 108), so luna is correct; golden was captured with pre-8ffb323 wrong cycles (project_pitchmod_spc700_crash)"
+    "fd13eeef32d1007ecc0e996e9d63672309052b77111b250dc4551b0d9736aa19",
+    hold = 0,
+    samples = 192_000
 );
 spc_test!(
     spc_play_brr,
@@ -1338,24 +1339,25 @@ spc_test!(
 spc_test!(
     spc_axel_f,
     "Axel-F/Axel-F.sfc",
-    "4f67124261fb0054f371786389e4a0fb5bdb78e2947f4977e3ed83eac44358df"
+    "4a98ab83cb12558c05cf78de2bce3742e9b3bb39f6aa21e141cc795dd5ada7a1"
 );
 spc_test!(
     spc_ffvii_prelude,
     "FFVIIPrelude/FFVIIPrelude.sfc",
-    "07b55afcd3b98f530f3bca104832cb8652d0aebec3ffef6af54c0c9d5ec6569b"
+    "6f395c05f6887b291c5c23e39ddc6f7174227870459865203cc1cd89f0532298"
 );
 spc_test!(
     spc_speech,
     "SpeechSynth/SpeechSynth.sfc",
-    "67a2b75791014584f0e8fcce25cf5c64bab1ac477402cefcc8c82c1999d12b11"
+    "767102e87b080074d766d8418760c3335ab85ed7d0973dd7595a9ad02394b624"
 );
 // Plays only on a button press — hold A (song 1) until the driver boots.
 spc_test!(
     spc_play_two_song,
     "PlayTwoSong/PlayTwoSong.sfc",
-    "30bc23273d3e36325d74e11a43d26761b2c149635537900b0aa57f62800d22a0",
-    hold = PAD_A
+    "8e6e4685cd18e1e07f777235f24f95d7277d1d64142254d1d452a530e63c69e1",
+    hold = PAD_A,
+    samples = 224_000
 );
 
 /// Declare a representative commercial-title golden — one eyeball-validated

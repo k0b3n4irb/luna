@@ -123,11 +123,15 @@ trusting a number written here.
   **last** sub-test's pass value — i.e. the ROM ran to completion.
 - **`spc_test!` — `SPC700/*`** audio ROMs: these play music / sounds rather
   than draw a screen, so they assert a SHA-256 of the APU's **PCM output**
-  (the first `AUDIO_SAMPLES` stereo samples, about 3 s) instead of the
-  framebuffer (`test_audio`). They were auditioned by ear before blessing.
-  One, `spc_pitchmod`, is `#[ignore]`d: its SPC program executes `STOP`
+  (the first `AUDIO_SAMPLES` stereo samples, about 3 s; a ROM whose music starts
+  late takes a longer window, `samples = N`) instead of the
+  framebuffer (`test_audio`). They were auditioned by ear before blessing, and a golden
+  is also measured (level, `nonsilent`): `PlayTwoSong` is mute for its first ~4 s, so
+  its window is 7 s, not 3. `spc_pitchmod` (6 s) is the ROM that found the S-DSP
+  scheduling defect of 2026-11-09: its SPC program runs off its code, executes `STOP`
   (Mesen2 halts on it as well; see [`luna_apu_gaps.md`](luna_apu_gaps.md)
-  #8 for what luna does after a `STOP`). `PlayTwoSong` only plays on a
+  #8 for what luna does after a `STOP`) and the echo buffer it executes must be stored
+  where the references store it. `PlayTwoSong` only plays on a
   button press, so its test holds **A** until the driver boots, then
   releases (`hold = PAD_A`). NB: these surfaced the IPL-ROM multi-block bug
   (the `$FFEE` byte) — see `luna_spc700_gaps.md`.
