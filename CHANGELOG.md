@@ -7,6 +7,27 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ## [Unreleased]
 
+## [1.43.0] — 2026-11-09
+
+The S-DSP now steps once per SPC cycle, as ares and Mesen2 do, which settles
+the PitchMod sound (listened to and accepted). `rmcp` moves to 3.9.0 for the
+three advisories that had turned `cargo-deny` red. Two new tools for the
+people who test on luna: forcing an NMI or an IRQ before a given instruction,
+and two more `luna strict` rules. A stopped CPU (`STP`) or SPC700 (`STOP`) no
+longer freezes the machine.
+
+**Upgrading from 1.42.0:**
+
+- **Save states of 1.42.0 are refused** (formats 10, 11 and 12 each changed the
+  layout: the auto-joypad read, the stopped APU, the DSP phase). A script that
+  keeps `luna state` files across versions must save them again; `luna state`
+  itself computes its state on the fly and is unaffected.
+- **Audio moves slightly**: four audio goldens were re-recorded (at most 99 LSB,
+  under 0.03 % RMS), and `spc_pitchmod` plays on past its `STOP` instead of
+  cutting out.
+- **The SPC700, S-DSP and 65C816 grades read B+** until a hardware reference
+  judges them (see the accuracy scorecard).
+
 - **rmcp 3.1.1 → 3.9.0** (security: cargo-deny went red on `main` on three advisories, RUSTSEC-2026-0457 OAuth client SSRF,
   -0461 unbounded tool schema cache, -0462 unbounded response buffering; none is reachable from luna, which serves MCP over stdio
   only, but the audit gate is the contract). `ServerInfo` is deprecated for `ServerConfig` (same type). rmcp 3.9 no longer answers an
