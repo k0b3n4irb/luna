@@ -1628,6 +1628,9 @@ impl Snes {
         );
         self.apu_real = apu_for_region(self.region);
         self.apu_real.aram = aram;
+        // Reset, unlike power-on, leaves TnOUT at 0 (Anomie spc700.txt:241;
+        // Mesen2 `Spc::Reset` zeroes them).
+        self.apu_real.timer_output = [0; 3];
         // Controller ports are host configuration, not console state: the
         // Reset button does not unplug a Mouse / Super Scope (Mesen2
         // `InternalRegisters::Reset` only clears the register file). Carry

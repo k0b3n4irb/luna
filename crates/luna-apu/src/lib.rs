@@ -612,7 +612,13 @@ impl Apu {
             audio_right: 0,
             audio_queue: std::collections::VecDeque::with_capacity(8192),
             timer_reload: [0; 3],
-            timer_output: [0; 3],
+            // TnOUT power-on = $F (Anomie spc700.txt:241: "On power on,
+            // all three TnOUT have the value $F. On reset, they are $0.";
+            // Mesen2 SpcTimer.h `_output = 0x0F`). Departs from ares, which
+            // zeroes stage 3 at power-on: the PitchMod SPC700 instruction
+            // stream equals Mesen2's over 61 487 events only with $F. The
+            // console reset (`Snes::reset`) zeroes them again.
+            timer_output: [0x0F; 3],
             timer_internal: [0; 3],
             timer_enabled: [false; 3],
             timer_subdivider: 0,
@@ -1800,7 +1806,24 @@ mod tests {
         // boundaries below are counted from a known phase.
         assert_eq!(apu.timer_subdivider, 2, "power-on divider phase moved");
         apu.timer_subdivider = 0;
+        // The boundary tests count ticks from zero; TnOUT's own power-on
+        // value is pinned by `timer_outputs_power_on_at_f`.
+        apu.timer_output = [0; 3];
         apu
+    }
+
+    #[test]
+    fn timer_outputs_power_on_at_f() {
+        let mut apu = Apu::new();
+        assert_eq!(apu.timer_output, [0x0F; 3]);
+        // `MOV A,$FD` at $0200: reading TnOUT returns it and clears it,
+        // the other two stay put.
+        apu.aram[0x0200] = 0xE4;
+        apu.aram[0x0201] = 0xFD;
+        apu.cpu.pc = 0x0200;
+        run_spc_cycles(&mut apu, 3);
+        assert_eq!(apu.cpu.a, 0x0F);
+        assert_eq!(apu.timer_output, [0, 0x0F, 0x0F]);
     }
 
     /// Advance `n` SPC cycles through the PRODUCTION path

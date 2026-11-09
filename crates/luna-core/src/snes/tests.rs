@@ -2292,3 +2292,13 @@ fn a_stopped_spc700_leaves_the_dsp_the_timers_and_the_ports_alone() {
         "the timers keep counting"
     );
 }
+
+/// `TnOUT` power on at $F but a console reset leaves them at 0 (Anomie
+/// spc700.txt:241; Mesen2 `Spc::Reset`).
+#[test]
+fn soft_reset_zeroes_the_timer_outputs() {
+    let mut snes = Snes::from_cartridge(demo_lorom());
+    assert_eq!(snes.apu_real.timer_output, [0x0F; 3]);
+    snes.reset();
+    assert_eq!(snes.apu_real.timer_output, [0; 3]);
+}

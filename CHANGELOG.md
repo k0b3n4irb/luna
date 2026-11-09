@@ -21,8 +21,16 @@ fast-forwarded to (binaries attached by CI). Format inspired by
   `Dsp::main()` stays as 32 steps for tests; the wait-state accesses step `SPC_SAMPLE_WAIT[ws]` times as in ares.
   **Audible, to be listened to before any re-record:** four of the 149 `snes_test_roms` goldens move (`spc_axel_f`, `spc_ffvii_prelude`, `spc_speech`, `spc_play_two_song`, by at most 99 LSB, under 0.03 % RMS after 3 s); none is re-recorded yet. Measured: with the same DSP phase as Mesen2 the PitchMod echo buffer matches it slot for slot (69 ARAM bytes differ, 27 253 before); the 720-cycle gap in the IPL upload handshake that sets that phase is a separate difference. **Save-state format
   v12:** a v11 state is refused (the DSP phase is state; the 32-cycle accumulator is gone). `docs/luna_apu_gaps.md` #10;
-  the PitchMod sound parting was this scheduling, not the SPC core (`docs/luna_spc700_gaps.md` #4 stays open). SPC700 and
-  S-DSP grades stay B+.
+  SPC700 and S-DSP grades stay B+.
+- **`TnOUT` power on at `$F`, as on Anomie's and Mesen2's SPC700.** The three timer outputs (`$FD-$FF`) held 0 at power-on
+  (ares zeroes stage 3 there; the snesdev wiki says 0); Anomie `spc700.txt:241` says "on power on, all three TnOUT have the
+  value $F; on reset, they are $0" and Mesen2 `SpcTimer.h` starts `_output = 0x0F`, `Spc::Reset()` zeroing them. luna now
+  does the same: `$F` in `Apu::new`, 0 after `Snes::reset`. A deliberate departure from ares, on the strength of Anomie,
+  Mesen2 and a measurement: on PitchMod (PAL) the SPC700 instruction stream equals Mesen2's over 61 487 events (the first
+  difference was `AND1 C,/$00FE.1`, a T1OUT read with timer 1 never enabled), the audible restart of voice 1 (`KON $02`) at
+  1.72 s is gone and the waveform envelope tracks Mesen2's within about 1 %. With the S-DSP stepping above this closes the
+  PitchMod sound parting (`docs/luna_spc700_gaps.md` #4). No save-state bump: the outputs were already saved. Some audio
+  goldens may move further; none is re-recorded. SPC700 and S-DSP grades stay B+.
 - **Forcing an interrupt before an instruction**: `--inject-nmi-at SPEC[:N]` and `--inject-irq-at SPEC[:N]` (`state`,
   `record`, `profile`, `strict`), the `inject_nmi_at` / `inject_irq_at` keys of a `luna test` manifest, the MCP tool
   `inject_interrupt_at` and `luna_api::Emulator::inject_interrupt` / `inject_interrupt_at`. The NMI or IRQ is latched in
