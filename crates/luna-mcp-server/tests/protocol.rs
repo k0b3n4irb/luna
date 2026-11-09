@@ -204,8 +204,11 @@ async fn load_step_and_screenshot_round_trip() {
     let _ = std::fs::remove_file(&path);
 }
 
-/// Raw `tools/list` result after an `initialize` that negotiates
-/// `version` — the bytes a client parses, not rmcp's typed view of them.
+/// Raw `tools/list` result for a client speaking `version` — the bytes a
+/// client parses, not rmcp's typed view of them. 2026-07-28 has no
+/// `initialize` (rmcp 3.9 answers one with 2025-11-25): a client states its
+/// version in the `_meta` of every request. Older versions negotiate it
+/// through `initialize`.
 async fn raw_tools_list(version: &str) -> serde_json::Value {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
@@ -217,19 +220,33 @@ async fn raw_tools_list(version: &str) -> serde_json::Value {
     });
     let (read, mut write) = tokio::io::split(client_io);
     let mut lines = BufReader::new(read).lines();
-    let init = serde_json::json!({
-        "jsonrpc": "2.0", "id": 1, "method": "initialize",
-        "params": {
-            "protocolVersion": version,
-            "capabilities": {},
-            "clientInfo": { "name": "raw", "version": "0" },
-        },
-    });
-    for msg in [
-        init,
-        serde_json::json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }),
-        serde_json::json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {} }),
-    ] {
+    let stateless = version >= "2026-07-28";
+    let list = if stateless {
+        serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "method": "tools/list",
+            "params": { "_meta": {
+                "io.modelcontextprotocol/protocolVersion": version,
+                "io.modelcontextprotocol/clientInfo": { "name": "raw", "version": "0" },
+                "io.modelcontextprotocol/clientCapabilities": {},
+            } },
+        })
+    } else {
+        serde_json::json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {} })
+    };
+    let mut msgs = Vec::new();
+    if !stateless {
+        msgs.push(serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {
+                "protocolVersion": version,
+                "capabilities": {},
+                "clientInfo": { "name": "raw", "version": "0" },
+            },
+        }));
+        msgs.push(serde_json::json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }));
+    }
+    msgs.push(list);
+    for msg in msgs {
         let line = format!("{msg}\n");
         write.write_all(line.as_bytes()).await.expect("write");
     }

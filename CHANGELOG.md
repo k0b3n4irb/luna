@@ -7,6 +7,11 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ## [Unreleased]
 
+- **rmcp 3.1.1 → 3.9.0** (security: cargo-deny went red on `main` on three advisories, RUSTSEC-2026-0457 OAuth client SSRF,
+  -0461 unbounded tool schema cache, -0462 unbounded response buffering; none is reachable from luna, which serves MCP over stdio
+  only, but the audit gate is the contract). `ServerInfo` is deprecated for `ServerConfig` (same type). rmcp 3.9 no longer answers an
+  `initialize` that asks for 2026-07-28 (it replies 2025-11-25): that version is stateless, a client states it in the `_meta` of each
+  request, and the `ttlMs` / `cacheScope` hints follow from it. The protocol test now speaks it that way.
 - **Forcing an interrupt before an instruction**: `--inject-nmi-at SPEC[:N]` and `--inject-irq-at SPEC[:N]` (`state`,
   `record`, `profile`, `strict`), the `inject_nmi_at` / `inject_irq_at` keys of a `luna test` manifest, the MCP tool
   `inject_interrupt_at` and `luna_api::Emulator::inject_interrupt` / `inject_interrupt_at`. The NMI or IRQ is latched in

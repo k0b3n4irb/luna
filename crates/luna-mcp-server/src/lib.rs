@@ -5853,10 +5853,10 @@ pub struct EmptyOk {
 
 #[rmcp::tool_handler]
 impl ServerHandler for LunaServer {
-    // rmcp's ServerInfo/Implementation are #[non_exhaustive], so a
+    // rmcp's ServerConfig/Implementation are #[non_exhaustive], so a
     // struct expression cannot compile — mutate a Default instead.
-    fn get_info(&self) -> rmcp::model::ServerInfo {
-        let mut info = rmcp::model::ServerInfo::default();
+    fn get_info(&self) -> rmcp::model::ServerConfig {
+        let mut info = rmcp::model::ServerConfig::default();
         let mut implementation = rmcp::model::Implementation::default();
         implementation.name = "luna".into();
         implementation.version = luna_api::VERSION.into();
