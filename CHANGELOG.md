@@ -7,6 +7,14 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ## [Unreleased]
 
+- **Forcing an interrupt before an instruction**: `--inject-nmi-at SPEC[:N]` and `--inject-irq-at SPEC[:N]` (`state`,
+  `record`, `profile`, `strict`), the `inject_nmi_at` / `inject_irq_at` keys of a `luna test` manifest, the MCP tool
+  `inject_interrupt_at` and `luna_api::Emulator::inject_interrupt` / `inject_interrupt_at`. The NMI or IRQ is latched in
+  the CPU at the instruction boundary of the N-th arrival, so it is taken before that instruction (the pushed return
+  address is its own) and a race can be swept instruction by instruction, reproducibly. A **synthetic extra edge, not
+  hardware**: the VBlank NMI still comes (a frame can see two) and `RDNMI` is raised as a real edge raises it. Refused
+  with a reason, exit 0, when `NMITIMEN.7` is clear (NMI) or the I flag is set (IRQ); an arrival never reached is an
+  error. No save-state change, no cost when unused.
 - `luna strict` gets two rules, **R10** and **R11**: the early latch of `$2100` (INIDISP) and `$2133` (SETINI). A CPU
   write to `$2100` with bit 7 on the data bus and bit 7 clear in the value, or to `$2133` over a bus byte that differs in
   bit 1 or 6, while the picture is drawn. The source is the hardware tests of undisbeliever/snes-test-roms, not a

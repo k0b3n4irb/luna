@@ -2156,6 +2156,97 @@ fn an_interrupt_taken_as_an_irq_before_the_watched_instruction_is_not_an_arrival
     assert_eq!(e.cpu_state().unwrap().pc, 0x8001);
 }
 
+/// `NOP`; `NOP`; `BRA` loop at `$8006` with the NMI enabled by the program
+/// and a handler at `$8010` that counts itself in `$10`.
+fn demo_nmi_loop(nmi_on: bool) -> Emulator {
+    let mut code = vec![0xEA; 0x13];
+    code[..9].copy_from_slice(&[
+        0x78, // 8000 SEI
+        0xA9,
+        if nmi_on { 0x80 } else { 0x00 }, // 8001 LDA #nmi
+        0x8D,
+        0x00,
+        0x42, // 8003 STA $4200
+        0xEA, // 8006 NOP     watched
+        0x80,
+        0xFD, // 8007 BRA $8006
+    ]);
+    code[0x10..].copy_from_slice(&[0xE6, 0x10, 0x40]); // 8010 INC $10; RTI
+    let mut e = Emulator::new();
+    e.load_rom_bytes(demo_lorom_with(&code, Some(0x8010)))
+        .unwrap();
+    e
+}
+
+/// An injected NMI is taken before the next instruction, once.
+#[test]
+fn an_injected_nmi_is_taken_at_the_next_boundary() {
+    let mut e = demo_nmi_loop(true);
+    assert!(e.run_until_pc(0x00_8006, 100).unwrap());
+    let out = e.inject_interrupt(InterruptKind::Nmi).unwrap();
+    assert!(out.delivered && out.reason.is_none(), "{out:?}");
+    assert_eq!(handler_runs(&mut e), 0, "nothing runs at the injection");
+    e.step(3).unwrap();
+    assert_eq!(handler_runs(&mut e), 1, "taken once");
+    // RDNMI is raised, as by a real edge; the liveness counters are not.
+    let snes = e.snes.as_ref().unwrap();
+    assert!(snes.cpu_regs.nmi_flag);
+    assert_eq!(snes.nmis_serviced, 0);
+}
+
+/// With `NMITIMEN.7` clear nothing is injected, and the reason says so.
+#[test]
+fn an_nmi_is_refused_while_nmitimen_bit_7_is_clear() {
+    let mut e = demo_nmi_loop(false);
+    assert!(e.run_until_pc(0x00_8006, 100).unwrap());
+    let out = e.inject_interrupt(InterruptKind::Nmi).unwrap();
+    assert!(!out.delivered, "{out:?}");
+    assert!(out.reason.unwrap().contains("NMITIMEN.7 clear"));
+    e.step(3).unwrap();
+    assert_eq!(handler_runs(&mut e), 0);
+}
+
+/// An IRQ follows the I flag.
+#[test]
+fn an_injected_irq_follows_the_i_flag() {
+    let mut masked = demo_interrupt_loop(false);
+    let out = masked.inject_interrupt(InterruptKind::Irq).unwrap();
+    assert!(!out.delivered, "{out:?}");
+    assert!(out.reason.unwrap().contains("I flag set"));
+    masked.step(4).unwrap();
+    assert_eq!(handler_runs(&mut masked), 0);
+
+    let mut open = demo_interrupt_loop(true);
+    assert!(open.cpu_state().unwrap().p & 0x04 == 0, "I is clear");
+    let out = open.inject_interrupt(InterruptKind::Irq).unwrap();
+    assert!(out.delivered, "{out:?}");
+    open.step(3).unwrap();
+    assert_eq!(handler_runs(&mut open), 1);
+}
+
+/// `inject_interrupt_at` runs to the N-th arrival and injects before it.
+#[test]
+fn the_interrupt_lands_before_the_nth_arrival() {
+    let never = std::sync::atomic::AtomicBool::new(false);
+    let mut e = demo_nmi_loop(true);
+    let found = e
+        .inject_interrupt_at(InterruptKind::Nmi, 0x00_8006, 3, 1, &never)
+        .unwrap();
+    assert!(found.reached && found.hits_seen == 3, "{found:?}");
+    assert!(found.outcome.unwrap().delivered);
+    assert_eq!(e.cpu_state().unwrap().pc, 0x8006, "before the instruction");
+    assert_eq!(handler_runs(&mut e), 0);
+    e.step(3).unwrap();
+    assert_eq!(handler_runs(&mut e), 1);
+
+    // An arrival that never comes is reported, not injected.
+    let mut e = demo_nmi_loop(true);
+    let found = e
+        .inject_interrupt_at(InterruptKind::Nmi, 0x00_9000, 1, 1, &never)
+        .unwrap();
+    assert!(!found.reached && found.outcome.is_none(), "{found:?}");
+}
+
 /// A frame boundary falling exactly on the watched instruction must
 /// neither lose nor double its arrival: the `Frame` stop pre-empts the
 /// `Pc` stop on the same boundary, and the arrival is reported by the next

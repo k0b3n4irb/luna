@@ -23,6 +23,8 @@
 //! - `poke_memory { bank, offset, data }` → inject WRAM bytes.
 //! - `search_memory { pattern }` → find a byte pattern in WRAM.
 //! - `run_until_pc { pc, max_steps }` → step to a target PC.
+//! - `inject_interrupt_at { kind, address|symbol, hit, max_frames }` → run to
+//!   an arrival and force an NMI / IRQ before it.
 //! - `run_until_gsu_stop` / `run_until_gsu_go { max_steps }` → step to a
 //!   Super FX job boundary.
 //! - `set_cpu_register { reg, val }` → set a CPU register.
@@ -376,6 +378,34 @@ pub struct RunUntilPcParams {
     pub symbol: Option<String>,
     /// Maximum instructions to step before giving up.
     pub max_steps: u64,
+}
+
+/// `inject_interrupt_at` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct InjectInterruptAtParams {
+    /// `nmi` or `irq`.
+    pub kind: luna_api::InterruptKind,
+    /// 24-bit address (`pb << 16 | pc`) of the instruction the interrupt
+    /// lands before. Ignored when `symbol` is given.
+    #[serde(default)]
+    pub address: u32,
+    /// A loaded WLA-DX symbol instead of `address`.
+    #[serde(default)]
+    pub symbol: Option<String>,
+    /// The arrival to inject at (default 1, the first).
+    #[serde(default = "default_hit")]
+    pub hit: u64,
+    /// Give up after this many frames (default 60).
+    #[serde(default = "default_inject_frames")]
+    pub max_frames: u64,
+}
+
+const fn default_hit() -> u64 {
+    1
+}
+
+const fn default_inject_frames() -> u64 {
+    60
 }
 
 /// `run_until_gsu_stop` / `run_until_gsu_go` parameters.
@@ -734,6 +764,25 @@ pub struct PokeResult {
 pub struct SearchResult {
     /// 24-bit `$7E-$7F` addresses of every match.
     pub addresses: Vec<u32>,
+}
+
+/// `inject_interrupt_at` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct InjectInterruptResult {
+    /// The asked arrival was reached within `max_frames`.
+    pub reached: bool,
+    /// The interrupt is latched and the next instruction takes it.
+    pub delivered: bool,
+    /// Why nothing was injected: a refusal (`NMITIMEN.7` clear, `I` set,
+    /// `STP`) or the arrival never reached.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// Arrivals seen before the run ended.
+    pub hits_seen: u64,
+    /// PPU frame where the run ended.
+    pub frame: u64,
+    /// Scanline where the run ended.
+    pub line: u16,
 }
 
 /// `run_until_pc` result.
@@ -2778,6 +2827,56 @@ impl LunaServer {
                 .map_err(|e| api_err_to_mcp(&e))?
         };
         Ok(rmcp::Json(RunUntilResult { hit }))
+    }
+
+    #[rmcp::tool(
+        description = "Run to the `hit`-th arrival (default 1) on `address` / `symbol` \
+                                and force an NMI or an IRQ (`kind`) BEFORE that instruction, \
+                                so a race the game wins by luck can be swept deterministically. \
+                                A synthetic extra edge, not hardware: a frame can see two NMIs. \
+                                Returns `{reached, delivered, reason, hits_seen, frame, line}`; \
+                                `delivered` is false with a `reason` when `NMITIMEN.7` is clear \
+                                (NMI), the I flag is set (IRQ) or the CPU is stopped, and when \
+                                the arrival is not reached within `max_frames` (default 60)."
+    )]
+    async fn inject_interrupt_at(
+        &self,
+        Parameters(params): Parameters<InjectInterruptAtParams>,
+    ) -> Result<rmcp::Json<InjectInterruptResult>, ErrorData> {
+        if params.hit == 0 {
+            return Err(ErrorData::invalid_params("hit counts from 1", None));
+        }
+        self.interrupt.store(false, Ordering::Relaxed);
+        let found = {
+            let mut em = self.emulator.lock().await;
+            let pc = resolve_addr(&em, params.symbol.as_deref(), params.address)?;
+            em.inject_interrupt_at(
+                params.kind,
+                pc,
+                params.hit,
+                params.max_frames,
+                &self.interrupt,
+            )
+            .map_err(|e| api_err_to_mcp(&e))?
+        };
+        let (delivered, reason) = match found.outcome {
+            Some(o) => (o.delivered, o.reason),
+            None => (
+                false,
+                Some(format!(
+                    "arrival {} not reached within {} frame(s) (reached {} time(s))",
+                    params.hit, params.max_frames, found.hits_seen
+                )),
+            ),
+        };
+        Ok(rmcp::Json(InjectInterruptResult {
+            reached: found.reached,
+            delivered,
+            reason,
+            hits_seen: found.hits_seen,
+            frame: found.frame,
+            line: found.line,
+        }))
     }
 
     #[rmcp::tool(

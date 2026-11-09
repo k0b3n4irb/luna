@@ -180,7 +180,8 @@ fn in_front(a: luna_api::Layer, b: luna_api::Layer, a_n: u32, b_n: u32) -> Strin
     }
 }
 
-/// The `--poke`s to write at one arrival on `--poke-at`.
+/// The `--poke`s to write, or the interrupt to force
+/// (`--inject-nmi-at`, `--inject-irq-at`), at one arrival on a routine.
 #[derive(serde::Serialize, schemars::JsonSchema)]
 pub(crate) struct PokeAt {
     /// The `--poke-at` spec verbatim.
@@ -193,6 +194,14 @@ pub(crate) struct PokeAt {
     pub(crate) hits_seen: u64,
     /// The bytes were written. `false` = the run ended first.
     pub(crate) applied: bool,
+    /// `--inject-nmi-at` / `--inject-irq-at`: the interrupt forced at the
+    /// arrival instead of bytes written.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) inject: Option<luna_api::InterruptKind>,
+    /// With `inject`: the interrupt was latched. `false` = refused (the
+    /// reason went to stderr); absent until the arrival.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) delivered: Option<bool>,
     /// `(address, bytes)` of each `--poke`.
     #[serde(skip)]
     writes: Vec<(u32, Vec<u8>)>,
@@ -224,11 +233,18 @@ impl PokeAt {
                     .collect::<Result<Vec<_>, String>>()?;
                 Ok(Self {
                     spec: spec.to_string(),
-                    addr: crate::test_cmd::resolve_key(em, spec)
-                        .map_err(|e| format!("--poke-at `{spec}`: {e}"))?,
+                    addr: crate::test_cmd::resolve_key(em, spec).map_err(|e| {
+                        let flag = group.inject.map_or("--poke-at", |k| match k {
+                            luna_api::InterruptKind::Nmi => "--inject-nmi-at",
+                            luna_api::InterruptKind::Irq => "--inject-irq-at",
+                        });
+                        format!("{flag} `{spec}`: {e}")
+                    })?,
                     hit: group.hit,
                     hits_seen: 0,
                     applied: false,
+                    inject: group.inject,
+                    delivered: None,
                     writes,
                 })
             })
@@ -240,6 +256,36 @@ impl PokeAt {
     pub(crate) fn on_arrival(&mut self, em: &mut luna_api::Emulator) {
         self.hits_seen += 1;
         if self.hits_seen != self.hit {
+            return;
+        }
+        if let Some(kind) = self.inject {
+            self.applied = true;
+            let (frame, line) = (
+                em.frame_count().unwrap_or(0),
+                em.beam().map_or(0, |(line, _)| line),
+            );
+            match em.inject_interrupt(kind) {
+                Ok(o) if o.delivered => {
+                    self.delivered = Some(true);
+                    eprintln!(
+                        "injected {} before {} hit {} — frame {frame}, line {line}",
+                        kind.name(),
+                        self.spec,
+                        self.hit
+                    );
+                }
+                Ok(o) => {
+                    self.delivered = Some(false);
+                    eprintln!(
+                        "{} not injected before {} hit {} — frame {frame}, line {line}: {}",
+                        kind.name(),
+                        self.spec,
+                        self.hit,
+                        o.reason.unwrap_or_default()
+                    );
+                }
+                Err(e) => eprintln!("error: inject {}: {e}", kind.name()),
+            }
             return;
         }
         for (at, bytes) in &self.writes {
@@ -260,6 +306,17 @@ impl PokeAt {
 
     /// The error line of a `--poke-at` the run never reached.
     pub(crate) fn missed(&self, end_frame: u64) -> String {
+        if let Some(kind) = self.inject {
+            let flag = match kind {
+                luna_api::InterruptKind::Nmi => "--inject-nmi-at",
+                luna_api::InterruptKind::Irq => "--inject-irq-at",
+            };
+            return format!(
+                "{flag} {}: hit {} not reached by frame {end_frame} (reached {} time(s)); \
+                 nothing was injected",
+                self.spec, self.hit, self.hits_seen
+            );
+        }
         format!(
             "--poke-at {}: hit {} not reached by frame {end_frame} (reached {} time(s)); \
              nothing was written",
@@ -380,9 +437,56 @@ pub(crate) struct PokeGroup {
     pub at: String,
     pub hit: u64,
     pub pokes: Vec<String>,
+    /// An interrupt to force at the arrival, instead of `pokes`.
+    pub inject: Option<luna_api::InterruptKind>,
 }
 
 impl PokeGroup {
+    /// The groups of `--inject-nmi-at` / `--inject-irq-at`: each value is
+    /// `SPEC` or `SPEC:N` (the N-th arrival, default 1). `SPEC` is a
+    /// symbol, `symbol+N`, or `BANK:OFFSET`; a lone `XX:YYYY` (2 and 4 hex
+    /// digits) is an address, so its arrival is given as `BANK:OFFSET:N`.
+    pub(crate) fn injections(
+        kind: luna_api::InterruptKind,
+        specs: &[String],
+    ) -> Result<Vec<Self>, String> {
+        let flag = match kind {
+            luna_api::InterruptKind::Nmi => "--inject-nmi-at",
+            luna_api::InterruptKind::Irq => "--inject-irq-at",
+        };
+        specs
+            .iter()
+            .map(|text| {
+                let is_hex =
+                    |t: &str, n: usize| t.len() == n && t.bytes().all(|b| b.is_ascii_hexdigit());
+                let (at, hit) = match text.rsplit_once(':') {
+                    Some((left, right))
+                        if !left.is_empty()
+                            && !right.is_empty()
+                            && right.bytes().all(|b| b.is_ascii_digit())
+                            && (left.contains(':') || !is_hex(left, 2) || !is_hex(right, 4)) =>
+                    {
+                        let n = right
+                            .parse::<u64>()
+                            .ok()
+                            .filter(|&n| n >= 1)
+                            .ok_or_else(|| {
+                                format!("{flag} `{text}`: the arrival after `:` counts from 1")
+                            })?;
+                        (left, n)
+                    }
+                    _ => (text.as_str(), 1),
+                };
+                Ok(Self {
+                    at: at.to_string(),
+                    hit,
+                    pokes: Vec::new(),
+                    inject: Some(kind),
+                })
+            })
+            .collect()
+    }
+
     /// Group the three flags by their place on the command line: each
     /// value comes with its argument index, and a `--poke-hit` or a
     /// `--poke` belongs to the nearest `--poke-at` before it. With a
@@ -400,6 +504,7 @@ impl PokeGroup {
                     at: at.clone(),
                     hit: 1,
                     pokes: Vec::new(),
+                    inject: None,
                 };
                 (group, false)
             })
@@ -425,7 +530,7 @@ impl PokeGroup {
         groups
             .into_iter()
             .map(|(group, _)| {
-                if group.pokes.is_empty() {
+                if group.pokes.is_empty() && group.inject.is_none() {
                     Err(format!("--poke-at {}: no --poke follows it", group.at))
                 } else {
                     Ok(group)

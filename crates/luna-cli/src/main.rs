@@ -638,6 +638,20 @@ enum Command {
         /// order, so a 16-bit `$0140` is `4001`. Repeatable.
         #[arg(long = "poke", requires = "poke_at")]
         poke: Vec<String>,
+        /// Force an NMI just BEFORE the instruction at this routine
+        /// (`SPEC` or `SPEC:N`: a `.sym` label, `label+N`, or `BANK:OFFSET`;
+        /// `N` = the arrival, default 1; with a bare `BANK:OFFSET` write
+        /// `BANK:OFFSET:N`). A synthetic extra edge, not hardware: the real
+        /// `VBlank` NMI still comes, so a frame can see two. Not injected, with
+        /// the reason, when `NMITIMEN.7` is clear. Never reached: an error.
+        /// Repeatable; sweep a race by running once per `N`.
+        #[arg(long = "inject-nmi-at", value_name = "SPEC[:N]")]
+        inject_nmi_at: Vec<String>,
+        /// Force an IRQ just BEFORE the instruction at this routine (same
+        /// `SPEC[:N]` as `--inject-nmi-at`). A single edge, `$4211` untouched.
+        /// Not injected, with the reason, while the I flag is set.
+        #[arg(long = "inject-irq-at", value_name = "SPEC[:N]")]
+        inject_irq_at: Vec<String>,
         /// Index every input script (`--input` … `--input5`, `--mouse`,
         /// `--superscope`) by **arrivals on this routine** instead of by
         /// frame: entry `N:` applies the N-th time execution reaches it
@@ -1023,6 +1037,20 @@ enum Command {
         /// `BANK:OFFSET=HEX`, hex bytes in memory order. Repeatable.
         #[arg(long = "poke", requires = "poke_at")]
         poke: Vec<String>,
+        /// Force an NMI just BEFORE the instruction at this routine
+        /// (`SPEC` or `SPEC:N`: a `.sym` label, `label+N`, or `BANK:OFFSET`;
+        /// `N` = the arrival, default 1; with a bare `BANK:OFFSET` write
+        /// `BANK:OFFSET:N`). A synthetic extra edge, not hardware: the real
+        /// `VBlank` NMI still comes, so a frame can see two. Not injected, with
+        /// the reason, when `NMITIMEN.7` is clear. Never reached: an error.
+        /// Repeatable; sweep a race by running once per `N`.
+        #[arg(long = "inject-nmi-at", value_name = "SPEC[:N]")]
+        inject_nmi_at: Vec<String>,
+        /// Force an IRQ just BEFORE the instruction at this routine (same
+        /// `SPEC[:N]` as `--inject-nmi-at`). A single edge, `$4211` untouched.
+        /// Not injected, with the reason, while the I flag is set.
+        #[arg(long = "inject-irq-at", value_name = "SPEC[:N]")]
+        inject_irq_at: Vec<String>,
         /// Symbol file naming the routines and variables of `--poke-at`,
         /// `--poke` and `--input-at`. Default: the `.sym` beside the ROM.
         #[arg(long)]
@@ -1258,6 +1286,20 @@ enum Command {
         /// `BANK:OFFSET=HEX`, hex bytes in memory order. Repeatable.
         #[arg(long = "poke", requires = "poke_at")]
         poke: Vec<String>,
+        /// Force an NMI just BEFORE the instruction at this routine
+        /// (`SPEC` or `SPEC:N`: a `.sym` label, `label+N`, or `BANK:OFFSET`;
+        /// `N` = the arrival, default 1; with a bare `BANK:OFFSET` write
+        /// `BANK:OFFSET:N`). A synthetic extra edge, not hardware: the real
+        /// `VBlank` NMI still comes, so a frame can see two. Not injected, with
+        /// the reason, when `NMITIMEN.7` is clear. Never reached: an error.
+        /// Repeatable; sweep a race by running once per `N`.
+        #[arg(long = "inject-nmi-at", value_name = "SPEC[:N]")]
+        inject_nmi_at: Vec<String>,
+        /// Force an IRQ just BEFORE the instruction at this routine (same
+        /// `SPEC[:N]` as `--inject-nmi-at`). A single edge, `$4211` untouched.
+        /// Not injected, with the reason, while the I flag is set.
+        #[arg(long = "inject-irq-at", value_name = "SPEC[:N]")]
+        inject_irq_at: Vec<String>,
         /// End the profile when execution reaches this routine (a `.sym`
         /// label, `label+N`, or `BANK:OFFSET` in hex), just before its
         /// first instruction: a window of N game ticks rather than N
@@ -1559,6 +1601,20 @@ enum Command {
         /// Bytes to write at the `--poke-at`: `NAME=HEX` or `BANK:OFFSET=HEX`.
         #[arg(long = "poke", requires = "poke_at")]
         poke: Vec<String>,
+        /// Force an NMI just BEFORE the instruction at this routine
+        /// (`SPEC` or `SPEC:N`: a `.sym` label, `label+N`, or `BANK:OFFSET`;
+        /// `N` = the arrival, default 1; with a bare `BANK:OFFSET` write
+        /// `BANK:OFFSET:N`). A synthetic extra edge, not hardware: the real
+        /// `VBlank` NMI still comes, so a frame can see two. Not injected, with
+        /// the reason, when `NMITIMEN.7` is clear. Never reached: an error.
+        /// Repeatable; sweep a race by running once per `N`.
+        #[arg(long = "inject-nmi-at", value_name = "SPEC[:N]")]
+        inject_nmi_at: Vec<String>,
+        /// Force an IRQ just BEFORE the instruction at this routine (same
+        /// `SPEC[:N]` as `--inject-nmi-at`). A single edge, `$4211` untouched.
+        /// Not injected, with the reason, while the I flag is set.
+        #[arg(long = "inject-irq-at", value_name = "SPEC[:N]")]
+        inject_irq_at: Vec<String>,
         /// Symbol file naming `--poke-at`, `--poke` and `--input-at`.
         /// Default: the `.sym` beside the ROM.
         #[arg(long)]
@@ -1680,6 +1736,23 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    let mut poke_groups = poke_groups;
+    for (kind, id) in [
+        (luna_api::InterruptKind::Nmi, "inject_nmi_at"),
+        (luna_api::InterruptKind::Irq, "inject_irq_at"),
+    ] {
+        let specs: Vec<String> = indexed::<String>(&matches, id)
+            .into_iter()
+            .map(|(_, v)| v)
+            .collect();
+        match state::PokeGroup::injections(kind, &specs) {
+            Ok(groups) => poke_groups.extend(groups),
+            Err(e) => {
+                eprintln!("error: {e}");
+                return ExitCode::from(2);
+            }
+        }
+    }
     match cli.command {
         Command::Run {
             rom,
@@ -1779,6 +1852,8 @@ fn main() -> ExitCode {
             poke_at: _,
             poke_hit: _,
             poke: _,
+            inject_nmi_at: _,
+            inject_irq_at: _,
             screenshot_frames,
             screenshot_dir,
             vram_writers,
@@ -1977,6 +2052,8 @@ fn main() -> ExitCode {
             poke_at: _,
             poke_hit: _,
             poke: _,
+            inject_nmi_at: _,
+            inject_irq_at: _,
             sym,
         } => record::run_record(&record::RecordOptions {
             rom: &rom,
@@ -2139,6 +2216,8 @@ fn main() -> ExitCode {
             poke_at: _,
             poke_hit: _,
             poke: _,
+            inject_nmi_at: _,
+            inject_irq_at: _,
             until_pc,
             hit,
             frames_out,

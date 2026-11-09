@@ -1990,6 +1990,50 @@ impl Snes {
         (out, unmapped)
     }
 
+    /// Force an NMI to be taken **before** the instruction the CPU stands
+    /// on, at an instruction boundary (the hook of `--inject-nmi-at`).
+    ///
+    /// A synthetic extra edge, not something the console does: the real
+    /// NMI line only rises once per `VBlank` (`NMITIMEN.7` and the `RDNMI`
+    /// flag), and the `VBlank` edge of the scanline scheduler stays independent, so a
+    /// frame can see two NMIs. The CPU's own latch is set, not
+    /// [`Snes::nmi_pending`]: that one is only polled at the last cycle of
+    /// the *next* instruction, which would land the NMI after it.
+    /// `RDNMI` (`$4210.7`) is raised as the real edge raises it. The
+    /// `nmis_serviced` / `last_nmi_frame` liveness counters keep counting
+    /// real `VBlank` edges only.
+    ///
+    /// `Err(reason)` when nothing was injected.
+    pub const fn inject_nmi(&mut self) -> Result<(), &'static str> {
+        if self.cpu.stopped {
+            return Err("CPU stopped (STP), nothing can wake it");
+        }
+        if self.cpu_regs.nmitimen & 0x80 == 0 {
+            return Err("NMITIMEN.7 clear, the NMI is disabled");
+        }
+        self.cpu_regs.nmi_flag = true;
+        self.cpu.trigger_nmi();
+        Ok(())
+    }
+
+    /// Force an IRQ to be taken before the instruction the CPU stands on
+    /// (the hook of `--inject-irq-at`), by the CPU's own latch like
+    /// [`Snes::inject_nmi`]. A single edge: `TIMEUP` (`$4211`) is not
+    /// raised, so nothing holds the line afterwards. A `WAI` is woken.
+    ///
+    /// Refused while `I` is set, as the poll refuses it. ares' `irqLock`
+    /// (see `last_cycle` of the bus) is not modelled, as for real IRQs.
+    pub const fn inject_irq(&mut self) -> Result<(), &'static str> {
+        if self.cpu.stopped {
+            return Err("CPU stopped (STP), nothing can wake it");
+        }
+        if self.cpu.p.contains(luna_cpu_65c816::flags::bit::I) {
+            return Err("I flag set, IRQs are masked");
+        }
+        self.cpu.trigger_irq();
+        Ok(())
+    }
+
     /// Debug poke: write `data` to WRAM (`$7E-$7F` or the `$00-3F`/`$80-BF`
     /// low-RAM mirror) directly, bypassing the bus. For injecting a test
     /// state without a full save-state. Addresses outside WRAM are ignored

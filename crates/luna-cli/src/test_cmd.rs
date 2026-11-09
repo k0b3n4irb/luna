@@ -155,8 +155,33 @@ struct Manifest {
     /// the game in a state it does not reach by itself.
     #[serde(default)]
     poke: Vec<Poke>,
+    /// Force an NMI just before the instruction at a routine, `"SYM"` or
+    /// `"SYM:N"` (the N-th arrival, default 1; `luna state
+    /// --inject-nmi-at`), one string or a list. A synthetic extra edge,
+    /// not hardware. Needs `frames`. Unlike the CLI, a refusal (`NMITIMEN.7`
+    /// clear) fails the test: the scenario was not played.
+    inject_nmi_at: Option<OneOrMany>,
+    /// Force an IRQ the same way (refused while the I flag is set).
+    inject_irq_at: Option<OneOrMany>,
     #[serde(default)]
     asserts: Asserts,
+}
+
+/// A manifest value given as one string or a list of strings.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum OneOrMany {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl OneOrMany {
+    fn to_vec(&self) -> Vec<String> {
+        match self {
+            Self::One(s) => vec![s.clone()],
+            Self::Many(v) => v.clone(),
+        }
+    }
 }
 
 /// One `[[poke]]`: values written at the `hit`-th arrival on `at_symbol`,
@@ -189,6 +214,8 @@ struct PendingPoke {
     /// `poke@symbol#hit`, for the failure line.
     label: String,
     writes: Vec<(u32, Vec<u8>)>,
+    /// An interrupt forced at the arrival instead of `writes`.
+    inject: Option<luna_api::InterruptKind>,
     done: bool,
 }
 
@@ -1186,11 +1213,13 @@ fn run_one(path: &Path) -> Result<TestOutcome, String> {
     // clock — makes the whole run a watching one.
     let by_symbol = m.checkpoint.iter().any(|c| c.at_symbol.is_some())
         || m.input_at.is_some()
-        || !m.poke.is_empty();
+        || !m.poke.is_empty()
+        || m.inject_nmi_at.is_some()
+        || m.inject_irq_at.is_some();
     if by_symbol && !matches!(bound, Some(Bound::Frames(_))) {
         // A routine that is never reached must end the run somewhere.
         return Err(
-            "`at_symbol` checkpoints, `input_at` and `[[poke]]` need `frames`: the frame \
+            "`at_symbol` checkpoints, `input_at`, `[[poke]]` and `inject_*_at` need `frames`: the frame \
              the run gives up at when a routine is not reached"
                 .into(),
         );
@@ -1237,8 +1266,34 @@ fn run_one(path: &Path) -> Result<TestOutcome, String> {
             matches: 0,
             label,
             writes,
+            inject: None,
             done: false,
         });
+    }
+    for (kind, specs) in [
+        (luna_api::InterruptKind::Nmi, &m.inject_nmi_at),
+        (luna_api::InterruptKind::Irq, &m.inject_irq_at),
+    ] {
+        let Some(specs) = specs else { continue };
+        let key = match kind {
+            luna_api::InterruptKind::Nmi => "inject_nmi_at",
+            luna_api::InterruptKind::Irq => "inject_irq_at",
+        };
+        for g in crate::state::PokeGroup::injections(kind, &specs.to_vec())? {
+            let label = format!("{key}@{}#{}", g.at, g.hit);
+            let at = resolve_key(&em, &g.at).map_err(|e| format!("{label}: {e}"))?;
+            let pc = watch.index_of(at);
+            watch.pokes.push(PendingPoke {
+                pc,
+                hit: g.hit,
+                condition: None,
+                matches: 0,
+                label,
+                writes: Vec::new(),
+                inject: Some(kind),
+                done: false,
+            });
+        }
     }
     let mut cp_pc: Vec<Option<usize>> = Vec::with_capacity(m.checkpoint.len());
     for cp in &m.checkpoint {
@@ -1512,8 +1567,14 @@ fn run_one(path: &Path) -> Result<TestOutcome, String> {
     }
     for p in watch.pokes.iter().filter(|p| !p.done) {
         failures.push(format!(
-            "{}: not reached by frame {final_frame} (reached {} time(s)); nothing was written",
-            p.label, watch.counts[p.pc]
+            "{}: not reached by frame {final_frame} (reached {} time(s)); nothing was {}",
+            p.label,
+            watch.counts[p.pc],
+            if p.inject.is_some() {
+                "injected"
+            } else {
+                "written"
+            }
         ));
     }
 
@@ -1872,6 +1933,26 @@ fn drive_watching(
                         };
                         if !due {
                             continue;
+                        }
+                        if let Some(kind) = p.inject {
+                            match em.inject_interrupt(kind) {
+                                Ok(o) if o.delivered => {}
+                                Ok(o) => {
+                                    watch.poke_error.get_or_insert_with(|| {
+                                        format!(
+                                            "{}: {} not injected: {}",
+                                            p.label,
+                                            kind.name(),
+                                            o.reason.unwrap_or_default()
+                                        )
+                                    });
+                                }
+                                Err(e) => {
+                                    watch
+                                        .poke_error
+                                        .get_or_insert_with(|| format!("{}: {e}", p.label));
+                                }
+                            }
                         }
                         for (at, bytes) in &p.writes {
                             if let Err(e) = em.poke_memory((at >> 16) as u8, *at as u16, bytes) {

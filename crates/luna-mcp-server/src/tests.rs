@@ -2415,3 +2415,73 @@ async fn server_tick_intervals_measures_the_ticks() {
     assert_eq!(ok.cycles_unit, "amiga_master");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `inject_interrupt_at` runs to the arrival, forces the NMI before it,
+/// reports a refusal with its reason and an unreached arrival as such; the
+/// tool is in the `capabilities` catalogue.
+#[tokio::test]
+async fn server_inject_interrupt_at_round_trip() {
+    let mut rom = demo_lorom();
+    let code = [
+        0x78, 0xA9, 0x80, 0x8D, 0x00, 0x42, // SEI; LDA #$80; STA $4200
+        0xEA, 0x80, 0xFD, // 8006 NOP; BRA $8006
+    ];
+    rom[..code.len()].copy_from_slice(&code);
+    rom[0x10..0x13].copy_from_slice(&[0xE6, 0x10, 0x40]); // 8010 INC $10; RTI
+    for off in [0x7FEA, 0x7FFA] {
+        rom[off] = 0x10;
+        rom[off + 1] = 0x80;
+    }
+    let path = PathBuf::from("/tmp/luna_mcp_inject_demo.smc");
+    std::fs::write(&path, &rom).unwrap();
+    let s = LunaServer::new();
+    let mut params = rom_params(path.to_str().unwrap());
+    params.force_mapper = Some("lorom".into());
+    s.load_rom(Parameters(params)).await.unwrap();
+
+    let caps = s.capabilities().await;
+    assert!(caps.0.tools.iter().any(|t| t == "inject_interrupt_at"));
+
+    let ask = |kind, address, hit| InjectInterruptAtParams {
+        kind,
+        address,
+        symbol: None,
+        hit,
+        max_frames: 1,
+    };
+    let r = s
+        .inject_interrupt_at(Parameters(ask(luna_api::InterruptKind::Nmi, 0x00_8006, 3)))
+        .await
+        .unwrap()
+        .0;
+    assert!(r.reached && r.delivered && r.hits_seen == 3, "{r:?}");
+    s.step(Parameters(StepParams { count: 3 })).await.unwrap();
+    let ran = s
+        .peek_memory(Parameters(PeekMemoryParams {
+            bank: 0x7E,
+            offset: 0x10,
+            count: 1,
+            symbol: None,
+        }))
+        .await
+        .unwrap();
+    assert_eq!(ran.0.bytes, vec![1]);
+
+    // IRQ with the I flag set: reached, refused, with the reason.
+    let r = s
+        .inject_interrupt_at(Parameters(ask(luna_api::InterruptKind::Irq, 0x00_8006, 1)))
+        .await
+        .unwrap()
+        .0;
+    assert!(r.reached && !r.delivered, "{r:?}");
+    assert!(r.reason.unwrap().contains("I flag set"));
+
+    // An arrival that never comes.
+    let r = s
+        .inject_interrupt_at(Parameters(ask(luna_api::InterruptKind::Nmi, 0x00_9000, 1)))
+        .await
+        .unwrap()
+        .0;
+    assert!(!r.reached && !r.delivered, "{r:?}");
+    assert!(r.reason.unwrap().contains("not reached"));
+}

@@ -966,6 +966,16 @@ impl Report<'_> {
             );
         }
         for group in self.o.pokes {
+            if let Some(kind) = group.inject {
+                let _ = writeln!(
+                    s,
+                    "A forced {} before arrival {} on `{}`.\n",
+                    kind.name(),
+                    group.hit,
+                    group.at
+                );
+                continue;
+            }
             let _ = writeln!(
                 s,
                 "Written at arrival {} on `{}`: `{}`\n",

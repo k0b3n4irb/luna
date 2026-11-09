@@ -213,10 +213,14 @@ pub(crate) fn run_strict(o: &StrictOpts<'_>) -> ExitCode {
     }
     // A poke the run never reached wrote nothing: the scenario was not played.
     if let Some(p) = pokes.iter().find(|p| !p.applied) {
-        eprintln!(
-            "error: --poke-at {} never reached arrival {} (seen {})",
-            p.spec, p.hit, p.hits_seen
-        );
+        if p.inject.is_some() {
+            eprintln!("error: {}", p.missed(em.frame_count().unwrap_or(0)));
+        } else {
+            eprintln!(
+                "error: --poke-at {} never reached arrival {} (seen {})",
+                p.spec, p.hit, p.hits_seen
+            );
+        }
         return ExitCode::from(2);
     }
     let ran = em.frame_count().unwrap_or(0);

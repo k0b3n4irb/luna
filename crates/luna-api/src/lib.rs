@@ -277,6 +277,55 @@ pub enum PcStop {
     Budget,
 }
 
+/// Which interrupt [`Emulator::inject_interrupt`] forces.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum InterruptKind {
+    /// The non-maskable interrupt (vector `$FFEA` native, `$FFFA` emulation).
+    Nmi,
+    /// The maskable interrupt (vector `$FFEE` native, `$FFFE` emulation).
+    Irq,
+}
+
+impl InterruptKind {
+    /// `NMI` or `IRQ`, as printed.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Nmi => "NMI",
+            Self::Irq => "IRQ",
+        }
+    }
+}
+
+/// What [`Emulator::inject_interrupt`] did.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+pub struct InjectOutcome {
+    /// The interrupt is latched and the next instruction boundary takes it.
+    pub delivered: bool,
+    /// Why nothing was injected (absent when `delivered`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// What [`Emulator::inject_interrupt_at`] found.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+pub struct InjectedAt {
+    /// The asked arrival was reached (the interrupt was tried there).
+    pub reached: bool,
+    /// Arrivals seen before the run ended.
+    pub hits_seen: u64,
+    /// What the injection did (absent when the arrival was not reached).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<InjectOutcome>,
+    /// PPU frame where the run ended.
+    pub frame: u64,
+    /// Scanline where the run ended.
+    pub line: u16,
+}
+
 /// Cartridge metadata returned by [`Emulator::load_rom`].
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct RomInfo {
@@ -3608,6 +3657,32 @@ impl Emulator {
         Ok(snes.dbg_poke_bytes(bank, offset, data))
     }
 
+    /// Force an NMI or an IRQ to be taken before the instruction the CPU
+    /// stands on, now (an instruction boundary: call it between steps).
+    ///
+    /// A synthetic extra edge, not hardware: a real console raises the NMI
+    /// once per `VBlank`, so a frame can see two here. A refused injection
+    /// is not an error: `delivered` is `false` and `reason` says why
+    /// (`NMITIMEN.7` clear for an NMI, the `I` flag set for an IRQ, `STP`).
+    /// Nothing else of the machine changes, and a save state is unaffected.
+    pub fn inject_interrupt(&mut self, kind: InterruptKind) -> Result<InjectOutcome, ApiError> {
+        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        let done = match kind {
+            InterruptKind::Nmi => snes.inject_nmi(),
+            InterruptKind::Irq => snes.inject_irq(),
+        };
+        Ok(match done {
+            Ok(()) => InjectOutcome {
+                delivered: true,
+                reason: None,
+            },
+            Err(why) => InjectOutcome {
+                delivered: false,
+                reason: Some(why.to_string()),
+            },
+        })
+    }
+
     /// Direct write into PPU VRAM at byte address `offset` (wraps at
     /// 64 KB). Bypasses the bus like [`Self::poke_memory`] — state
     /// injection, no cycles, no MMIO side effects (issue #178).
@@ -4023,6 +4098,59 @@ impl Emulator {
             self.present_completed_frame();
         }
         Ok(stop)
+    }
+
+    /// Run to the `hit`-th arrival on `pc` (`pb << 16 | pc`, the bank-bit-7
+    /// mirror included) and force `kind` there, before that instruction:
+    /// the machine form of `--inject-nmi-at` / `--inject-irq-at`. Gives up
+    /// when `max_frames` frames have elapsed, or `interrupt` is raised.
+    /// An interrupt that is refused (see [`Self::inject_interrupt`]) still
+    /// reports `reached`.
+    pub fn inject_interrupt_at(
+        &mut self,
+        kind: InterruptKind,
+        pc: u32,
+        hit: u64,
+        max_frames: u64,
+        interrupt: &std::sync::atomic::AtomicBool,
+    ) -> Result<InjectedAt, ApiError> {
+        const CHUNK: u64 = 200_000;
+        let start = self.frame_count()?;
+        let mut seen = 0u64;
+        let mut skip = false;
+        loop {
+            let frame = self.frame_count()?;
+            let stopped = self.snes.as_ref().is_some_and(|s| s.cpu.stopped);
+            if frame.saturating_sub(start) >= max_frames
+                || stopped
+                || interrupt.load(std::sync::atomic::Ordering::Relaxed)
+            {
+                return Ok(InjectedAt {
+                    reached: false,
+                    hits_seen: seen,
+                    outcome: None,
+                    frame,
+                    line: self.beam().map_or(0, |(line, _)| line),
+                });
+            }
+            match self.run_to_pc_or_frame(&[pc], CHUNK, skip)? {
+                PcStop::Pc(_) => {
+                    seen += 1;
+                    skip = true;
+                    if seen == hit {
+                        let outcome = self.inject_interrupt(kind)?;
+                        return Ok(InjectedAt {
+                            reached: true,
+                            hits_seen: seen,
+                            outcome: Some(outcome),
+                            frame: self.frame_count()?,
+                            line: self.beam().map_or(0, |(line, _)| line),
+                        });
+                    }
+                }
+                PcStop::Frame | PcStop::Budget => skip = false,
+            }
+        }
     }
 
     /// Run until the Super FX starts a job (`go` = `true`) or finishes one

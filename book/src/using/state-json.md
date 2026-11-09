@@ -19,6 +19,7 @@
 | `vram_writers` | Only with `--vram-writers`: `{from_frame, rows, overlaps, cgram_rows, totals}` — `rows` are `{first_word, last_word, bytes, source, how, first_frame, last_frame}`, `overlaps` are `{first_word, last_word, words, first, first_frame, then, then_frame}`, `cgram_rows` are `{first_entry, last_entry, bytes, source, how, first_frame, last_frame}` (colours written to `$2122`), `totals` is `{vram_words, vram_bytes, cgram_entries, cgram_bytes}` (distinct words and entries; bytes count rewrites). |
 | `pokes` | Only with `--poke-at`: one `{spec, addr, hit, hits_seen, applied}` per `--poke-at`, in command-line order — whether its bytes were written. |
 | `poke` | Only with `--poke-at`: the first entry of `pokes`, kept for scripts written when the option could be given once. |
+| `pokes[].inject`, `pokes[].delivered` | With `--inject-nmi-at` / `--inject-irq-at` (same `pokes` list): `inject` is `nmi` or `irq`, `delivered` is whether it was latched (`false` = refused, the reason is on stderr; absent until the arrival). |
 | `peek_hits` | Only with `--peek-at`: one `{hit, frame, line, peeks: […]}` per arrival on the routine, `peeks` shaped as above. |
 
 ```bash

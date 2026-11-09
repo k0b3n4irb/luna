@@ -134,6 +134,7 @@ and is the hub for every headless diagnostic.
 | `--peek-at <SYMBOL>` | — | Read every `--peek` **each time** execution reaches this routine, one line per arrival with its frame and scanline. The run length stays `-n` / `--until-frame` / `--until-pc`. |
 | `--peek-at-out <PATH>` | — | Write the `--peek-at` rows as CSV (`hit,frame,line`, then one column of hex bytes per `--peek`) instead of printing them. |
 | `--poke-at <SYMBOL>`, `--poke-hit <N>`, `--poke <NAME=HEX>` | —, `1`, — | Write bytes into memory at the `N`-th arrival on a routine, just before its first instruction: puts the game in a state it does not reach by itself. Repeatable: each `--poke-at` takes the `--poke-hit` and `--poke`s that follow it. See *Stopping on a routine* below. |
+| `--inject-nmi-at <SPEC[:N]>`, `--inject-irq-at <SPEC[:N]>` | — | Force an NMI / an IRQ **just before** the `N`-th execution (default 1) of a routine: a synthetic extra edge, not hardware. Repeatable. See *Forcing an interrupt* below. |
 | `--input-at <SYMBOL>` | — | Index the input scripts by arrivals on this routine instead of by frame, so the presses land in the same game ticks whatever the speed of the code; a joypad entry `N+K:` lands K frames after the N-th arrival ([input scripts](input-scripts.md#a-script-clocked-by-the-game-not-by-the-frame)). |
 | `--schema` | off | Print the JSON Schema of the `--out` payload ([the state JSON](state-json.md)) and exit — no ROM needed. |
 | `--out <PATH>` | `-` | Where to write the JSON (`-` = stdout). |
@@ -573,6 +574,66 @@ luna state --until-frame 2 --srm-in /tmp/save.srm --assert 70:0000=5A \
 (`$70:0000` is where a LoROM cartridge maps its SRAM; a HiROM one has it
 from `$20:6000`.) In a `luna test` suite the same pair is the manifest keys
 `srm_out` / `srm_in`.
+
+### Forcing an interrupt (`--inject-nmi-at`, `--inject-irq-at`)
+
+A race between the main loop and an interrupt — a handler that fires
+between two instructions of a routine that is not meant to be
+interrupted — is won by luck on a frame and lost on another. These
+options force the interrupt at a chosen instruction, so every
+instruction of the routine can be tried in turn:
+
+```bash
+luna state --inject-nmi-at update_pos:5 --until-pc update_pos --hit 6 \
+  --peek pos_x:2 --out /dev/null game.sfc
+# injected NMI before update_pos hit 5 — frame 7, line 133
+#   $7E0140  ..
+```
+
+`SPEC[:N]` is a routine (`.sym` label, `label+N`, `BANK:OFFSET`) and the
+arrival counted from power-on, default 1; a bare `BANK:OFFSET` is an
+address, so its arrival is written `BANK:OFFSET:N`. The interrupt is taken
+**before** the instruction runs: the return address pushed on the stack is
+the instruction's own, and the instruction runs after the `RTI` (so the
+run reaches the same address once more, one more arrival). `label+N` aims
+at the instruction N bytes in, which is how a sweep walks a routine:
+
+```bash
+for n in $(seq 0 14); do
+  luna state --inject-nmi-at "update_pos+$n" --until-frame 120 \
+    --peek pos_x:2 --out - game.sfc | jq -c '.peeks[0].bytes_hex'
+done
+```
+
+The same injection gives the same machine every time (the whole `--out`
+JSON is identical between two runs), so a sweep is reproducible.
+
+This is **a synthetic extra edge, not what a console does.** The hardware
+raises the NMI once per VBlank, while `RDNMI` stays set until read, and
+never a second edge on the same frame; the VBlank NMI is not suppressed
+by an injected one, so a frame can see two. Nothing else changes: `RDNMI`
+(`$4210.7`) reads set as it would after a real edge, the `nmis_serviced`
+and `last_nmi_frame` counters keep counting the real VBlank edges, and a
+save state is unaffected. An IRQ is a single edge too: `TIMEUP` (`$4211`)
+is not raised, so nothing holds the line afterwards.
+
+Nothing is injected, and the run goes on (exit 0), when:
+
+- **NMI** — `NMITIMEN.7` (`$4200` bit 7) is clear: `NMI not injected before
+  … : NMITIMEN.7 clear, the NMI is disabled`.
+- **IRQ** — the `I` flag is set: `… : I flag set, IRQs are masked`. The flag
+  is read at the boundary, so an injection at the `CLI` itself is refused
+  and one at the next instruction is taken; there is no extra
+  one-instruction delay (ares' `irqLock` is not modelled, as for real IRQs).
+- either — the CPU executed `STP`. A `WAI` is woken, as by a real interrupt.
+
+An arrival the run never reaches injects nothing, and that is an error
+(exit 1), as for `--poke-at`. The JSON gets the same `pokes` entry as a
+`--poke-at`, with `inject` (`nmi` / `irq`) and `delivered`. The `luna test`
+manifest takes `inject_nmi_at = "SYM:3"` and `inject_irq_at` (a string or a
+list), where a refusal fails the test. `luna record`, `luna profile` and
+`luna strict` take the same options. Coprocessor IRQs are out of scope.
+Over MCP: [`inject_interrupt_at`](mcp.md).
 
 ### Where is the CPU, and how did it get there (`--call-stack`)
 
