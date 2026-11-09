@@ -7,6 +7,8 @@ other `luna_*_gaps.md` docs.
 Authored 2026-05-30; refreshed 2026-05-30 after the Tom Harte harness
 landed (see history below).
 
+> **Grade held at B+ on 2026-11-09:** held at B+ until a hardware reference judges the SPC700 (author decision: the FXPak Pro bench comes before any final recipe; until then statuses read "faithful to luna + Mesen2"; the audit found no proof against a console). The A− is returned when the bench produces a run, cited in this row.
+
 ## Methodology note — what is already gated
 
 As of the SPC700 Tom Harte harness (`crates/luna-cpu-spc700/tests/

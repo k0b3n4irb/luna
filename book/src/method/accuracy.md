@@ -38,9 +38,9 @@ placeholder and the open DMA/HDMA audit rows are why those four rows are
 
 | Subsystem | Grade | In this guide |
 |---|:---:|---|
-| CPU 65c816 | **A−** | [The CPUs](../internals/cpus.md#65c816--the-main-cpu) |
-| SPC700 | **A−** | [The CPUs](../internals/cpus.md#spc700--the-audio-cpu) |
-| S-DSP (audio) | **A** | [The APU](../internals/apu.md) |
+| CPU 65c816 | **B+** | [The CPUs](../internals/cpus.md#65c816--the-main-cpu) |
+| SPC700 | **B+** | [The CPUs](../internals/cpus.md#spc700--the-audio-cpu) |
+| S-DSP (audio) | **B+** | [The APU](../internals/apu.md) |
 | PPU | **A** | [The PPU](../internals/ppu.md) |
 | DMA / HDMA | **B+** | [Memory, DMA & the bus](../internals/memory-dma-bus.md#dma--hdma) |
 | SA-1 | **B+** | [SA-1](../internals/coprocessors-sa1.md) |

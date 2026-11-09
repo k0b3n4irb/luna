@@ -3,6 +3,8 @@
 Reference-first audit of luna's APU against ares (`ares/sfc/smp/*`,
 `ares/sfc/dsp/*`). Companion to `luna_bg_gaps.md` / `luna_obj_gaps.md`.
 
+> **Grade held at B+ on 2026-11-09:** held at B+ until a hardware reference judges the SPC700 and the S-DSP (author decision: the FXPak Pro bench comes before any final recipe; until then statuses read "faithful to luna + Mesen2"; the audit found no proof against a console). The A is returned when the bench produces a run, cited in this row.
+
 Scope: the **SMP glue** (`crates/luna-apu/src/lib.rs` — `$00F0-$00FF`
 control regs, timers, the `$2140-43`↔`$F4-F7` mailbox), the **S-DSP**
 (`crates/luna-apu/src/dsp.rs`), and the SPC700 core

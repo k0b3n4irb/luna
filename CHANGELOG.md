@@ -29,7 +29,7 @@ fast-forwarded to (binaries attached by CI). Format inspired by
   back). The `ApuStub` module and `Snes::apu_panicked` / `apu_stub_fallback` are removed. **Save-state format v11:** a
   v10 state is refused (the layout lost two fields). The audio goldens are unchanged (149/149); `spc_pitchmod`, which
   stays `#[ignore]`, now yields all its samples instead of stopping short. `docs/luna_apu_gaps.md` #8 and
-  `docs/luna_spc700_gaps.md` #3 closed; the SPC700 and S-DSP grades are restored (A−, A).
+  `docs/luna_spc700_gaps.md` #3 closed; the SPC700 and S-DSP grades were restored (A−, A), then held at B+ on 2026-11-09 with the 65C816's (A−), until a hardware reference judges them (the FXPak Pro bench comes first; the audit found no proof against a console). Save-state v11 refuses v10 states by design; checked with the partners: they call `luna state` (computed on the fly) and keep no luna state file.
 - A stopped S-CPU (`STP`) no longer freezes the machine. Until now `STP` ended all time: `frame_count`, the PPU, the DRAM
   refresh, HDMA, the auto-joypad read and the APU stood still. ares loops `idle()` on it (each one a full 6-mclk step of
   the machine), so now the frames go on, `$4210` bit 7 rises at every VBlank, the NMI is latched and never serviced (ares' stopped loop is `L idle()`), and

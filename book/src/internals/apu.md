@@ -8,7 +8,7 @@ S-DSP), describing the hardware-accurate behaviour each component models.
 | **On the console** | the S-DSP: eight voices of BRR samples, envelopes, echo, 32 kHz stereo, programmed by the SPC700 through `$F2` / `$F3` |
 | **In luna** | `crates/luna-apu/src/dsp.rs` (the S-DSP, a cycle-accurate port) and `crates/luna-apu/src/lib.rs` (the SPC700 bridge, the CPU ports `$2140-$2143`) |
 | **Proven by** | nine PCM goldens in `crates/luna-core/tests/snes_test_roms.rs`; the BRR decoder compared with an independent decoder over 200 000 random groups |
-| **Grade** | **A** (scorecard: *S-DSP (audio)*) |
+| **Grade** | **B+** (scorecard: *S-DSP (audio)*) |
 | **Open gaps** | [`docs/luna_apu_gaps.md`](https://github.com/k0b3n4irb/luna/blob/main/docs/luna_apu_gaps.md): none open (the S-DSP stopping with the SPC700 after `STOP`, #8, was closed 2026-11-08) |
 | **Reference** | [`docs/apu_dsp_reference.md`](https://github.com/k0b3n4irb/luna/blob/main/docs/apu_dsp_reference.md); the SPC700 itself is on [The CPUs](cpus.md#spc700--the-audio-cpu) |
 
