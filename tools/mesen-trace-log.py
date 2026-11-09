@@ -101,6 +101,8 @@ def main():
     ap.add_argument("--format", default=DEFAULT_FORMAT)
     ap.add_argument("--labels", action="store_true")
     ap.add_argument("--ram", choices=("random", "zeros", "ones"), default="zeros")
+    ap.add_argument("--region", choices=("auto", "ntsc", "pal"), default="auto",
+                    help="video standard (auto reads the header; a headerless ROM needs ntsc or pal)")
     args = ap.parse_args()
 
     lib = os.environ.get("MESEN_CORE", os.path.expanduser("~/.config/Mesen2/MesenCore.so"))
@@ -110,6 +112,8 @@ def main():
     core.InitializeEmu(home.encode(), None, None, True, True, True, True)
     cfg = SnesConfig()
     cfg.GsuClockSpeed = 100
+    cfg.SpcClockSpeedAdjustment = 40  # the GUI default: 32040 Hz, luna's rate (the raw default is 0 = 32000 Hz)
+    cfg.Region = ("auto", "ntsc", "pal").index(args.region)
     cfg.BsxCustomDate = -1
     for i in range(8):
         cfg.ChannelVolumes[i] = 100

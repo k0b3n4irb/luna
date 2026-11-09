@@ -97,7 +97,7 @@ own wave recorder at the reset vector and writes a WAV (48 kHz, in real
 time, so compare envelopes and events, not sample indices):
 
 ```bash
-tools/mesen-wave.py game.sfc /tmp/mesen.wav --seconds 9
+tools/mesen-wave.py game.sfc /tmp/mesen.wav --seconds 9 --region pal
 luna state game.sfc --until-frame 450 --audio-out /tmp/luna.wav
 ```
 
