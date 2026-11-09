@@ -5,7 +5,7 @@ name: Release
 #   - Linux   x86_64 (ubuntu-latest)
 #   - Linux   arm64  (ubuntu-24.04-arm, free arm64 runner: public repo)
 #   - Windows x86_64 (windows-latest)
-#   - macOS   arm64  (macos-14, Apple Silicon)
+#   - macOS   arm64  (macos-15, Apple Silicon)
 # One zip per platform, `luna_<tag>_<os>_<arch>.zip`, the OpenSNES layout
 # (`opensnes_<tag>_<os>_<arch>.zip`): one file to pick, Explorer opens it,
 # GitHub shows its digest on the release page. The auto-generated source
@@ -60,7 +60,7 @@ jobs:
           - runner: windows-latest
             os: windows
             arch: x86_64
-          - runner: macos-14
+          - runner: macos-15
             os: darwin
             arch: arm64
     runs-on: ${{ matrix.runner }}
