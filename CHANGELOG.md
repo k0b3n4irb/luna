@@ -12,6 +12,17 @@ fast-forwarded to (binaries attached by CI). Format inspired by
   only, but the audit gate is the contract). `ServerInfo` is deprecated for `ServerConfig` (same type). rmcp 3.9 no longer answers an
   `initialize` that asks for 2026-07-28 (it replies 2025-11-25): that version is stateless, a client states it in the `_meta` of each
   request, and the `ttlMs` / `cacheScope` hints follow from it. The protocol test now speaks it that way.
+- **The S-DSP runs one pipeline step per SPC cycle, not 32 at once.** luna ran the 32 steps of a sample as one block when
+  the SPC had spent 32 cycles, on the DSP registers as they stand at the end of that window, so a register written in the
+  last cycles of a sample (phases 30-31) was seen by the sample being finished. ares (`DSP::tick()` between the 32 groups
+  of `main()`, synchronised from `SMP::step`) and Mesen2 (`Dsp::Exec()` once per SPC bus access, before it) step the DSP
+  on the cycle; EDL is latched at step 29, so an EDL write at phase 30 or 31 lands one sample later. Found on PitchMod
+  (`MOV $F3,#$0F` at phase 30): the echo buffer sat one slot ahead of Mesen2's. New `Dsp::step_one` / `Dsp::step`;
+  `Dsp::main()` stays as 32 steps for tests; the wait-state accesses step `SPC_SAMPLE_WAIT[ws]` times as in ares.
+  **Audible, to be listened to before any re-record:** four of the 149 `snes_test_roms` goldens move (`spc_axel_f`, `spc_ffvii_prelude`, `spc_speech`, `spc_play_two_song`, by at most 99 LSB, under 0.03 % RMS after 3 s); none is re-recorded yet. Measured: with the same DSP phase as Mesen2 the PitchMod echo buffer matches it slot for slot (69 ARAM bytes differ, 27 253 before); the 720-cycle gap in the IPL upload handshake that sets that phase is a separate difference. **Save-state format
+  v12:** a v11 state is refused (the DSP phase is state; the 32-cycle accumulator is gone). `docs/luna_apu_gaps.md` #10;
+  the PitchMod sound parting was this scheduling, not the SPC core (`docs/luna_spc700_gaps.md` #4 stays open). SPC700 and
+  S-DSP grades stay B+.
 - **Forcing an interrupt before an instruction**: `--inject-nmi-at SPEC[:N]` and `--inject-irq-at SPEC[:N]` (`state`,
   `record`, `profile`, `strict`), the `inject_nmi_at` / `inject_irq_at` keys of a `luna test` manifest, the MCP tool
   `inject_interrupt_at` and `luna_api::Emulator::inject_interrupt` / `inject_interrupt_at`. The NMI or IRQ is latched in

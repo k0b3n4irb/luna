@@ -23,7 +23,7 @@ The rest of this page is the hardware behaviour the port follows.
   `SPC_CLOCK_HZ`) use the measured 1 025 280 Hz. Each SPC cycle = ~21 master cycles.
 - **DSP sample rate**: SPC_clock / 32 = **32 040 Hz** (one output sample
   emitted every 32 SPC cycles; `luna_api::SAMPLE_RATE_HZ`, the rate every WAV header and duration uses).
-- The DSP runs a **32-cycle macro pipeline** that emits one stereo sample.
+- The DSP runs a **32-step pipeline**, one step per SPC cycle, that emits one stereo sample.
 
 ## 2. SPC700 opcode cycle counts — NOT FLAT
 

@@ -336,7 +336,7 @@ fn save_state_shape_is_pinned_to_the_version() {
     assert_eq!(
         (SAVE_STATE_VERSION, shapes),
         (
-            11,
+            12,
             [
                 ("LoROM", (447_758, 8_195)),
                 ("SA-1", (447_758, 4_723)),

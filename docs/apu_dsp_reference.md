@@ -20,7 +20,7 @@ Per CLAUDE.md, every claim below has agreement from both refs unless flagged "DI
 - **SNES master clock**: 21.477 272 MHz NTSC (21.281 370 MHz PAL).
 - **SPC700 clock**: 1.024 MHz = master / ~21. Each SPC cycle = ~21 master cycles.
 - **DSP sample rate**: SPC_clock / 32 = **32 040 Hz** with luna's measured 1 025 280 Hz SPC clock (nominal 32 000; one output sample emitted every 32 SPC cycles).
-- The DSP runs a **32-cycle macro pipeline** that emits one stereo sample.
+- The DSP runs a **32-step pipeline**, one step per SPC cycle, that emits one stereo sample.
 
 ## 2. SPC700 opcode cycle counts — NOT FLAT
 
@@ -66,7 +66,7 @@ Harte SPC700 harness runs both cores (`crates/luna-cpu-spc700/tests/tom_harte.rs
 
 ## 3. SPC700 ↔ DSP timing
 
-ares' `SMP::main()` calls `synchronize(dsp)` after every opcode. Mesen2's `Spc::Exec()` runs one opcode then `Dsp::Step(elapsed)`. The DSP catches up by running its 32-cycle pipeline however many times the elapsed SPC cycles cover.
+The DSP is **step-granular**: one of its 32 pipeline steps runs per SPC cycle, before the bus access of that cycle. ares: `SMP::step()` ends in `Thread::synchronize(dsp)` (`smp/timing.cpp`) and `DSP::main()` calls `tick()` (`Thread::step(24)` + `synchronize(smp)`) between its 32 groups of voice/echo calls (`dsp/dsp.cpp:34-190`). Mesen2: `Spc::IncCycleCount` calls `Dsp::Exec()` once per access, which `switch`es on `_state.Step` (`Core/SNES/DSP/Dsp.cpp:267-340`; `Spc.cpp:159-176`). A register written by the SPC on cycle *c* of a sample is therefore read only by the steps that run after it: EDL is latched at step 29 (`echo29` / `EchoStep29`), so a write at phase 30-31 takes effect one sample later. luna: `Dsp::step_one()` (the step of `Dsp::step`, saved in the state), called by `ApuBusView::clock_cycle` `SPC_SAMPLE_WAIT[ws]` times per access (ares counts the wait states; Mesen2 steps once per access); `Dsp::main()` is 32 `step_one()` for tests. Until 2026-11-09 luna ran the 32 steps as one block each 32 cycles on the registers of the window's end ([`luna_apu_gaps.md`](luna_apu_gaps.md) #10).
 
 DSP pipeline organization:
 - 32 DSP cycles per output sample.

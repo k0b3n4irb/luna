@@ -359,6 +359,10 @@ pub struct Dsp {
     /// Per-`main()` accumulator: the last produced stereo sample
     /// (echo27 calls `sample()` once per macro-pipeline run).
     pub last_sample: (i16, i16),
+    /// Pipeline phase (0..31): the next of the 32 steps [`Self::step_one`]
+    /// runs (Mesen2 `_state.Step`; ares keeps it in the thread's program
+    /// counter). Saved with the state.
+    pub step: u8,
     /// Optional register-write trace (`--dsp-trace`). `None` = off, and
     /// the write path pays a single `Option` check.
     #[serde(skip)]
@@ -464,6 +468,7 @@ impl Dsp {
             brr: Brr::default(),
             latch: Latch::default(),
             last_sample: (0, 0),
+            step: 0,
             write_log: None,
             trace_cycles: 0,
             trace_frame: 0,
@@ -1100,98 +1105,186 @@ impl Dsp {
 
     // ---------------- main() pipeline ------------
 
-    /// Runs one full 32-step macro pipeline → one stereo output sample.
-    /// Mirrors `DSP::main()` from `ares/sfc/dsp/dsp.cpp:34-185`.
-    pub fn main(&mut self, apuram: &mut [u8; 0x10000]) -> (i16, i16) {
-        self.voice5(0);
-        self.voice2(1, apuram);
-        self.voice6(0);
-        self.voice3(1, apuram);
-        self.voice7(0);
-        self.voice4(1, apuram);
-        self.voice1(3);
-        self.voice8(0);
-        self.voice5(1);
-        self.voice2(2, apuram);
-        self.voice9(0);
-        self.voice6(1);
-        self.voice3(2, apuram);
-        self.voice7(1);
-        self.voice4(2, apuram);
-        self.voice1(4);
-        self.voice8(1);
-        self.voice5(2);
-        self.voice2(3, apuram);
-        self.voice9(1);
-        self.voice6(2);
-        self.voice3(3, apuram);
-        self.voice7(2);
-        self.voice4(3, apuram);
-        self.voice1(5);
-        self.voice8(2);
-        self.voice5(3);
-        self.voice2(4, apuram);
-        self.voice9(2);
-        self.voice6(3);
-        self.voice3(4, apuram);
-        self.voice7(3);
-        self.voice4(4, apuram);
-        self.voice1(6);
-        self.voice8(3);
-        self.voice5(4);
-        self.voice2(5, apuram);
-        self.voice9(3);
-        self.voice6(4);
-        self.voice3(5, apuram);
-        self.voice7(4);
-        self.voice4(5, apuram);
-        self.voice1(7);
-        self.voice8(4);
-        self.voice5(5);
-        self.voice2(6, apuram);
-        self.voice9(4);
-        self.voice6(5);
-        self.voice3(6, apuram);
-        self.voice1(0);
-        self.voice7(5);
-        self.voice4(6, apuram);
-        self.voice8(5);
-        self.voice5(6);
-        self.voice2(7, apuram);
-        self.voice9(5);
-        self.voice6(6);
-        self.voice3(7, apuram);
-        self.voice1(1);
-        self.voice7(6);
-        self.voice4(7, apuram);
-        self.voice8(6);
-        self.voice5(7);
-        self.voice2(0, apuram);
-        self.voice3a(0);
-        self.voice9(6);
-        self.voice6(7);
-        self.echo22(apuram);
-        self.voice7(7);
-        self.echo23(apuram);
-        self.voice8(7);
-        self.echo24();
-        self.voice3b(0, apuram);
-        self.voice9(7);
-        self.echo25();
-        self.echo26();
-        self.misc27();
-        self.echo27();
-        self.misc28();
-        self.echo28();
-        self.misc29();
-        self.echo29(apuram);
-        self.misc30();
-        self.voice3c(0);
-        self.echo30(apuram);
-        self.voice4(0, apuram);
-        self.voice1(2);
+    /// Runs exactly one of the 32 pipeline steps (one SPC cycle of the
+    /// S-DSP), the step the reference runs at this phase, then advances
+    /// [`Self::step`]. Mirrors `DSP::main()` of ares
+    /// (`sfc/dsp/dsp.cpp:34-185`, one `tick()` between steps) and
+    /// `Dsp::Exec` of Mesen2 (`Core/SNES/DSP/Dsp.cpp:267-340`, a `switch`
+    /// on `_state.Step`). The register file is read as it stands at THIS
+    /// cycle: a `$F3` write at phase 30 is seen by the next sample's
+    /// step-29 latch (EDL), not by the sample being finished. Returns
+    /// `Some(sample)` on the last step (31), when the sample is complete.
+    pub fn step_one(&mut self, apuram: &mut [u8; 0x10000]) -> Option<(i16, i16)> {
+        let step = self.step;
+        self.step = (step + 1) & 0x1F;
+        match step {
+            0 => {
+                self.voice5(0);
+                self.voice2(1, apuram);
+            }
+            1 => {
+                self.voice6(0);
+                self.voice3(1, apuram);
+            }
+            2 => {
+                self.voice7(0);
+                self.voice4(1, apuram);
+                self.voice1(3);
+            }
+            3 => {
+                self.voice8(0);
+                self.voice5(1);
+                self.voice2(2, apuram);
+            }
+            4 => {
+                self.voice9(0);
+                self.voice6(1);
+                self.voice3(2, apuram);
+            }
+            5 => {
+                self.voice7(1);
+                self.voice4(2, apuram);
+                self.voice1(4);
+            }
+            6 => {
+                self.voice8(1);
+                self.voice5(2);
+                self.voice2(3, apuram);
+            }
+            7 => {
+                self.voice9(1);
+                self.voice6(2);
+                self.voice3(3, apuram);
+            }
+            8 => {
+                self.voice7(2);
+                self.voice4(3, apuram);
+                self.voice1(5);
+            }
+            9 => {
+                self.voice8(2);
+                self.voice5(3);
+                self.voice2(4, apuram);
+            }
+            10 => {
+                self.voice9(2);
+                self.voice6(3);
+                self.voice3(4, apuram);
+            }
+            11 => {
+                self.voice7(3);
+                self.voice4(4, apuram);
+                self.voice1(6);
+            }
+            12 => {
+                self.voice8(3);
+                self.voice5(4);
+                self.voice2(5, apuram);
+            }
+            13 => {
+                self.voice9(3);
+                self.voice6(4);
+                self.voice3(5, apuram);
+            }
+            14 => {
+                self.voice7(4);
+                self.voice4(5, apuram);
+                self.voice1(7);
+            }
+            15 => {
+                self.voice8(4);
+                self.voice5(5);
+                self.voice2(6, apuram);
+            }
+            16 => {
+                self.voice9(4);
+                self.voice6(5);
+                self.voice3(6, apuram);
+            }
+            17 => {
+                self.voice1(0);
+                self.voice7(5);
+                self.voice4(6, apuram);
+            }
+            18 => {
+                self.voice8(5);
+                self.voice5(6);
+                self.voice2(7, apuram);
+            }
+            19 => {
+                self.voice9(5);
+                self.voice6(6);
+                self.voice3(7, apuram);
+            }
+            20 => {
+                self.voice1(1);
+                self.voice7(6);
+                self.voice4(7, apuram);
+            }
+            21 => {
+                self.voice8(6);
+                self.voice5(7);
+                self.voice2(0, apuram);
+            }
+            22 => {
+                self.voice3a(0);
+                self.voice9(6);
+                self.voice6(7);
+                self.echo22(apuram);
+            }
+            23 => {
+                self.voice7(7);
+                self.echo23(apuram);
+            }
+            24 => {
+                self.voice8(7);
+                self.echo24();
+            }
+            25 => {
+                self.voice3b(0, apuram);
+                self.voice9(7);
+                self.echo25();
+            }
+            26 => {
+                self.echo26();
+            }
+            27 => {
+                self.misc27();
+                self.echo27();
+            }
+            28 => {
+                self.misc28();
+                self.echo28();
+            }
+            29 => {
+                self.misc29();
+                self.echo29(apuram);
+            }
+            30 => {
+                self.misc30();
+                self.voice3c(0);
+                self.echo30(apuram);
+            }
+            _ => {
+                // Step 31: the last of the sample.
+                self.voice4(0, apuram);
+                self.voice1(2);
+                return Some(self.last_sample);
+            }
+        }
+        None
+    }
 
-        self.last_sample
+    /// Runs one full 32-step macro pipeline → one stereo output sample:
+    /// 32 [`Self::step_one`]. For callers that run whole samples (the
+    /// unit tests, the atomic oracle); the SPC bus clocks `step_one` per
+    /// cycle. Must be called on a sample boundary (`step == 0`).
+    pub fn main(&mut self, apuram: &mut [u8; 0x10000]) -> (i16, i16) {
+        debug_assert_eq!(self.step, 0, "main() starts on a sample boundary");
+        for _ in 0..31 {
+            self.step_one(apuram);
+        }
+        self.step_one(apuram).unwrap_or(self.last_sample)
     }
 }
 
@@ -1210,6 +1303,57 @@ mod tests {
         let (l, r) = dsp.main(&mut aram);
         assert_eq!(l, 0);
         assert_eq!(r, 0);
+    }
+
+    #[test]
+    fn echo_length_is_latched_at_pipeline_step_29() {
+        // EDL is read by step 29 (ares `echo29`, Mesen2 `EchoStep29`).
+        // `phase` is the number of steps already run when the write lands
+        // (the write happens on the SPC cycle after those DSP steps).
+        let echo_length_after = |phase: usize| {
+            let mut dsp = Dsp::new();
+            let mut aram: Box<[u8; 0x10000]> = vec![0u8; 0x10000]
+                .into_boxed_slice()
+                .try_into()
+                .expect("64 KB slice into fixed array");
+            for _ in 0..phase {
+                dsp.step_one(&mut aram);
+            }
+            dsp.write(0x7D, 0x0F);
+            for _ in phase..32 {
+                dsp.step_one(&mut aram);
+            }
+            assert_eq!(dsp.step, 0, "a whole sample ran");
+            dsp.echo._length
+        };
+        // Written before step 29 runs (phases 28 and 29): this sample.
+        assert_eq!(echo_length_after(28), 15 << 11);
+        assert_eq!(echo_length_after(29), 15 << 11);
+        // Written after it (phases 30, 31): the next sample, the batched
+        // pipeline's one-slot-early error.
+        assert_eq!(echo_length_after(30), 0);
+        assert_eq!(echo_length_after(31), 0);
+    }
+
+    #[test]
+    fn main_is_32_steps_and_returns_to_phase_zero() {
+        let mut dsp = Dsp::new();
+        let mut aram: Box<[u8; 0x10000]> = vec![0u8; 0x10000]
+            .into_boxed_slice()
+            .try_into()
+            .expect("64 KB slice into fixed array");
+        for _ in 0..3 {
+            dsp.main(&mut aram);
+            assert_eq!(dsp.step, 0);
+        }
+        let mut done = 0;
+        for i in 0..64 {
+            if dsp.step_one(&mut aram).is_some() {
+                assert_eq!(i % 32, 31, "the sample completes on the last step");
+                done += 1;
+            }
+        }
+        assert_eq!(done, 2);
     }
 
     #[test]

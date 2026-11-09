@@ -220,7 +220,12 @@ $212C-$212F (TM TS TMW TSW), $2130 CGWSEL, $2131 CGADSUB, $2133 SETINI";
 /// mailbox stub nor freezes the S-DSP and the timers (ares idles it), so
 /// there is no latch to save and no stub state. A v10 state taken after a
 /// `STOP` could not be restored faithfully anyway.
-pub const SAVE_STATE_VERSION: u32 = 11;
+/// v12 (2026-11): the S-DSP runs its 32 pipeline steps one per SPC cycle
+/// like ares and Mesen2, not as one block per 32 cycles, so its phase
+/// (`Dsp::step`) is state and the 32-cycle accumulator
+/// (`Apu::sample_tick_deficit`) is gone. A v11 state could not say where in
+/// the sample the pipeline stood.
+pub const SAVE_STATE_VERSION: u32 = 12;
 
 /// On-disk / on-wire save-state container produced by
 /// [`Emulator::save_state`]. `core` is the bincode-encoded `Snes` (the

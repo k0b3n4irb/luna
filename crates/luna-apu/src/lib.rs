@@ -202,8 +202,8 @@ pub struct Apu {
     pub cpu: Spc700,
     /// Cycle-accurate ares-port S-DSP. Owns its own register file,
     /// Voice\[8\], Echo, Noise, BRR, Latch, Clock, `MainVol` state. The
-    /// bus view's `clock_cycle` runs one `dsp.main()` per 32 SPC
-    /// cycles → one stereo sample.
+    /// bus view's `clock_cycle` runs one `dsp.step_one()` per SPC
+    /// cycle (32 → one stereo sample).
     pub dsp: dsp::Dsp,
     /// 64 KB of physical audio RAM. The 64-byte IPL ROM is *not* baked
     /// in — it's a read overlay over `$FFC0..=$FFFF` on the SPC side,
@@ -284,10 +284,6 @@ pub struct Apu {
     /// `serde(skip)`-defaults to an empty queue on restore.
     #[serde(skip)]
     pub audio_queue: std::collections::VecDeque<(i16, i16)>,
-    /// SPC cycles owed to the audio-sample tick (32-cycle base
-    /// clock). Drives both ADSR rate progression and the per-voice
-    /// position counter.
-    sample_tick_deficit: u32,
 
     // ------------- Timers -------------
     /// Reload values at `$FA` (T0), `$FB` (T1), `$FC` (T2). A value
@@ -615,7 +611,6 @@ impl Apu {
             audio_left: 0,
             audio_right: 0,
             audio_queue: std::collections::VecDeque::with_capacity(8192),
-            sample_tick_deficit: 0,
             timer_reload: [0; 3],
             timer_output: [0; 3],
             timer_internal: [0; 3],
@@ -649,7 +644,6 @@ impl Apu {
             timer_internal: &mut apu.timer_internal,
             timer_enabled: &mut apu.timer_enabled,
             timer_subdivider: &mut apu.timer_subdivider,
-            sample_tick_deficit: &mut apu.sample_tick_deficit,
             audio_queue: &mut apu.audio_queue,
             audio_left: &mut apu.audio_left,
             audio_right: &mut apu.audio_right,
@@ -699,11 +693,9 @@ impl Apu {
     }
 
     #[cfg(any(test, feature = "atomic-oracle"))]
-    /// Tick the per-voice envelope state machines. We accumulate SPC
-    /// cycles in `sample_tick_deficit`; each time it crosses a
-    /// 32-cycle boundary the DSP advances by one 32 kHz audio sample
-    /// — which is when the ADSR phase machine actually moves and
-    /// the per-voice position counter increments.
+    /// Run the S-DSP for `spc_cycles` SPC cycles that no bus access
+    /// clocked: one pipeline step per cycle ([`dsp::Dsp::step_one`]), so
+    /// a sample completes every 32 of them.
     fn tick_voices(&mut self, spc_cycles: u32) {
         // Timestamp source for the optional DSP write trace (#122):
         // advanced with the same cycles that drive the sample pipeline,
@@ -713,19 +705,14 @@ impl Apu {
         if self.dsp.write_log.is_some() {
             self.dsp.trace_cycles = self.dsp.trace_cycles.wrapping_add(u64::from(spc_cycles));
         }
-        self.sample_tick_deficit = self.sample_tick_deficit.saturating_add(spc_cycles);
-        while self.sample_tick_deficit >= SPC_CYCLES_PER_SAMPLE {
-            self.sample_tick_deficit -= SPC_CYCLES_PER_SAMPLE;
-            // One full 32-step DSP macro pipeline → one stereo sample.
-            // `dsp.main` drains internal latches (KON, KOFF, ENDX, BRR
-            // step, envelope, gaussian, echo FIR) and writes a single
-            // (i16,i16) into `dsp.last_sample`.
-            let (l, r) = self.dsp.main(&mut self.aram);
-            if self.audio_queue.len() < AUDIO_QUEUE_CAPACITY {
-                self.audio_queue.push_back((l, r));
+        for _ in 0..spc_cycles {
+            if let Some((l, r)) = self.dsp.step_one(&mut self.aram) {
+                if self.audio_queue.len() < AUDIO_QUEUE_CAPACITY {
+                    self.audio_queue.push_back((l, r));
+                }
+                self.audio_left = l;
+                self.audio_right = r;
             }
-            self.audio_left = l;
-            self.audio_right = r;
         }
     }
 
@@ -1115,7 +1102,6 @@ impl Apu {
                 timer_internal: &mut self.timer_internal,
                 timer_enabled: &mut self.timer_enabled,
                 timer_subdivider: &mut self.timer_subdivider,
-                sample_tick_deficit: &mut self.sample_tick_deficit,
                 audio_queue: &mut self.audio_queue,
                 audio_left: &mut self.audio_left,
                 audio_right: &mut self.audio_right,
@@ -1177,7 +1163,6 @@ impl Apu {
             timer_internal: &mut self.timer_internal,
             timer_enabled: &mut self.timer_enabled,
             timer_subdivider: &mut self.timer_subdivider,
-            sample_tick_deficit: &mut self.sample_tick_deficit,
             audio_queue: &mut self.audio_queue,
             audio_left: &mut self.audio_left,
             audio_right: &mut self.audio_right,
@@ -1301,9 +1286,6 @@ struct ApuBusView<'a> {
     /// SPC-cycle accumulator feeding the timer dividers (128 → T0/T1,
     /// 16 → T2). Advanced one per bus cycle by [`Self::clock_cycle`].
     timer_subdivider: &'a mut u32,
-    /// SPC cycles since the last DSP sample; one 32 kHz sample is
-    /// produced every [`SPC_CYCLES_PER_SAMPLE`].
-    sample_tick_deficit: &'a mut u32,
     audio_queue: &'a mut std::collections::VecDeque<(i16, i16)>,
     audio_left: &'a mut i16,
     audio_right: &'a mut i16,
@@ -1419,15 +1401,20 @@ impl ApuBusView<'_> {
                 .trace_cycles
                 .wrapping_add(u64::from(SPC_SAMPLE_WAIT[ws]));
         }
-        *self.sample_tick_deficit += SPC_SAMPLE_WAIT[ws];
-        if *self.sample_tick_deficit >= SPC_CYCLES_PER_SAMPLE {
-            *self.sample_tick_deficit -= SPC_CYCLES_PER_SAMPLE;
-            let (l, r) = self.dsp.main(self.aram);
-            if self.audio_queue.len() < AUDIO_QUEUE_CAPACITY {
-                self.audio_queue.push_back((l, r));
+        // One DSP pipeline step per SPC cycle, BEFORE the access (ares
+        // `smp/timing.cpp::step` -> `synchronize(dsp)`, one `dsp::tick()` per
+        // cycle; Mesen2 `Spc.cpp:159-176` `IncCycleCount` -> `Dsp::Exec`): the
+        // access that follows sees, and writes, the registers at this phase.
+        // A wait-state access spans `SPC_SAMPLE_WAIT[ws]` cycles, so as many
+        // steps (ares; Mesen2 runs one regardless).
+        for _ in 0..SPC_SAMPLE_WAIT[ws] {
+            if let Some((l, r)) = self.dsp.step_one(self.aram) {
+                if self.audio_queue.len() < AUDIO_QUEUE_CAPACITY {
+                    self.audio_queue.push_back((l, r));
+                }
+                *self.audio_left = l;
+                *self.audio_right = r;
             }
-            *self.audio_left = l;
-            *self.audio_right = r;
         }
     }
 }
@@ -1735,7 +1722,6 @@ mod tests {
             timer_internal: &mut apu.timer_internal,
             timer_enabled: &mut apu.timer_enabled,
             timer_subdivider: &mut apu.timer_subdivider,
-            sample_tick_deficit: &mut apu.sample_tick_deficit,
             audio_queue: &mut apu.audio_queue,
             audio_left: &mut apu.audio_left,
             audio_right: &mut apu.audio_right,
@@ -1765,7 +1751,11 @@ mod tests {
         // ($7C) must persist across repeated reads (it's cleared only by
         // a write to $7C or by KON).
         let mut apu = Apu::new();
-        apu.dsp.registers[0x7C] = 0b0000_0101; // voices 0 and 2 ended
+        // Voices 0 and 2 ended. The pipeline rebuilds `$7C` from the voices'
+        // end flags at step 2 (ares `voice7`), which the bus cycles below
+        // reach, so the state goes where the hardware keeps it.
+        apu.dsp.voices[0]._end = true;
+        apu.dsp.voices[2]._end = true;
         let mut bus = ApuBusView {
             aram: &mut apu.aram,
             to_spc_ports: &mut apu.to_spc_ports,
@@ -1780,7 +1770,6 @@ mod tests {
             timer_internal: &mut apu.timer_internal,
             timer_enabled: &mut apu.timer_enabled,
             timer_subdivider: &mut apu.timer_subdivider,
-            sample_tick_deficit: &mut apu.sample_tick_deficit,
             audio_queue: &mut apu.audio_queue,
             audio_left: &mut apu.audio_left,
             audio_right: &mut apu.audio_right,
@@ -1956,7 +1945,6 @@ mod tests {
                 timer_internal: &mut apu.timer_internal,
                 timer_enabled: &mut apu.timer_enabled,
                 timer_subdivider: &mut apu.timer_subdivider,
-                sample_tick_deficit: &mut apu.sample_tick_deficit,
                 audio_queue: &mut apu.audio_queue,
                 audio_left: &mut apu.audio_left,
                 audio_right: &mut apu.audio_right,
@@ -1986,7 +1974,6 @@ mod tests {
             timer_internal: &mut apu.timer_internal,
             timer_enabled: &mut apu.timer_enabled,
             timer_subdivider: &mut apu.timer_subdivider,
-            sample_tick_deficit: &mut apu.sample_tick_deficit,
             audio_queue: &mut apu.audio_queue,
             audio_left: &mut apu.audio_left,
             audio_right: &mut apu.audio_right,
@@ -2025,7 +2012,6 @@ mod tests {
                 timer_internal: &mut apu.timer_internal,
                 timer_enabled: &mut apu.timer_enabled,
                 timer_subdivider: &mut apu.timer_subdivider,
-                sample_tick_deficit: &mut apu.sample_tick_deficit,
                 audio_queue: &mut apu.audio_queue,
                 audio_left: &mut apu.audio_left,
                 audio_right: &mut apu.audio_right,
@@ -2051,7 +2037,6 @@ mod tests {
                 timer_internal: &mut apu.timer_internal,
                 timer_enabled: &mut apu.timer_enabled,
                 timer_subdivider: &mut apu.timer_subdivider,
-                sample_tick_deficit: &mut apu.sample_tick_deficit,
                 audio_queue: &mut apu.audio_queue,
                 audio_left: &mut apu.audio_left,
                 audio_right: &mut apu.audio_right,
@@ -2083,7 +2068,6 @@ mod tests {
             timer_internal: &mut apu.timer_internal,
             timer_enabled: &mut apu.timer_enabled,
             timer_subdivider: &mut apu.timer_subdivider,
-            sample_tick_deficit: &mut apu.sample_tick_deficit,
             audio_queue: &mut apu.audio_queue,
             audio_left: &mut apu.audio_left,
             audio_right: &mut apu.audio_right,
