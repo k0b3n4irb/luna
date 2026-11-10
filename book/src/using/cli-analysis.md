@@ -1220,6 +1220,121 @@ luna state game.sfc --until-frame 1200 --audio-out run.wav --voice-wav-dir voice
 luna audio-check run.wav --voices-dir voices/ --json | jq '.faults[] | {kind, frame, time_s}'
 ```
 
+## `luna race-sweep` — which instruction is the race?
+
+```
+luna race-sweep [OPTIONS] --from <SPEC> --to <SPEC> <ROM>
+```
+
+A race between the main loop and an interrupt is won by luck on a frame and
+lost on another, and a one-in-ten-thousand loss shows nothing in a test that
+passes nine thousand times. `race-sweep` removes the luck: it takes a
+snapshot where you say, runs the program to its end once as the **baseline**,
+then, for **every instruction** of a routine and from that same snapshot,
+forces an NMI (or an IRQ) just before it
+([`--inject-nmi-at`](cli-run-state.md#forcing-an-interrupt---inject-nmi-at---inject-irq-at)
+does one such run by hand) and compares the outcome with the baseline's.
+
+| Option | What it sets |
+|---|---|
+| `--from SPEC`, `--to SPEC` | the swept range, both ends included: a `.sym` label, `label+N`, or `BANK:OFFSET` in hex. Every instruction address the baseline executes in it is a trial (an address it never runs is not swept). |
+| `--kind nmi\|irq\|both` | the interrupt forced at each address (default `nmi`). |
+| `--hit N` | inject at the N-th arrival of each address (default 1); an address the baseline reaches less often is not swept. |
+| `--warm-until-pc SPEC` [`--warm-hit N`], or `--warm-frames N` | where the sweep starts, and the snapshot is taken: the N-th arrival on a routine, or an absolute frame number. Default: right after reset. |
+| `--until-pc SPEC` [`--until-hit N`], or `--until-frame N` | the end of every run, baseline and trials: the N-th arrival on a routine (counted from the snapshot; standing on it counts), or an absolute frame number. One of the two is required. |
+| `--compare SPEC[:COUNT]` | bytes that must be equal at the end (repeatable): `BANK:OFFSET` in hex or a symbol, `:COUNT` bytes (a symbol defaults to its size in the `.sym`; a bare `BANK:OFFSET` takes its count as `BANK:OFFSET:COUNT`). |
+| `--max-steps N` | instruction budget of the baseline (default 20 000 000); a trial gets four times the baseline plus 100 000, within this. |
+| `--jobs N` | trials in parallel (0 = one per CPU). The report is the same for any value. |
+| `--json`, `--out PATH` | the report as JSON (schema 1) instead of text; into a file instead of stdout. |
+| `--fail-on-race` | exit 1 when a race was found, or when every injection was refused. |
+| `--sym`, `--force-mapper`, `--force-region`, `--power-on` | as for `luna state`. |
+
+What you compare is the point of the sweep: **the invariants of the main
+thread**, bytes that an extra interrupt must not move. Not a counter the
+handler also counts in (it legitimately differs by one): a value the main
+thread derives at the end, such as a checksum, a sum that must equal a
+count, or the flag a wait loop sets. The end is a place the program reaches
+(`--until-pc`) or a frame, never an instruction count, so the extra NMI the
+trial adds does not shift it.
+
+Each trial ends one of five ways:
+
+| Verdict | Meaning |
+|---|---|
+| `identical` | the compared bytes equal the baseline's. |
+| `DIFFERS` | at least one differs: the address, symbol, baseline and injected byte (hex) are listed. This address is racy. |
+| `not taken` | the injection was refused, with the reason: `NMITIMEN.7` clear for an NMI, the I flag set for an IRQ, a stopped CPU. **Nothing was tested at that address**, and the summary says so; it is never counted as a pass. |
+| `END NOT REACHED` | the end was not reached within the budget: a hang, or a lost wake-up. A finding like `DIFFERS`. |
+| `not reached` | the arrival to inject at never came (the run ended first). |
+
+The baseline is run twice from the snapshot before any trial: a run that
+does not reproduce from its snapshot cannot be compared, and the command
+stops with an error (exit 2) rather than report noise. The sweep is
+deterministic: two runs, or any `--jobs`, print the same bytes.
+
+A synthetic ROM keeps a 16-bit counter whose low byte `store`s to `$20`; its
+main loop does `LDA $20 / CLC / ADC #1 / STA $20` forty times, and the NMI
+handler does `INC $20` (and counts its entries in `$23`). The main thread
+ends by computing `$24 = $20 - $23`, which is 40 whatever the number of
+interrupts: that is the invariant.
+
+```
+luna race-sweep game.sfc --warm-until-pc loop --from loop --to loop_end \
+  --until-pc end --compare invariant --fail-on-race
+# race-sweep $00:8012..$00:8023  NMI  inject at arrival 1  end: pc $00:802F hit 1  baseline 365 instructions
+#   compare $7E:0024 x1 = 28  (invariant)
+#   ADDRESS    SYMBOL                   KIND VERDICT
+#   $00:8014   clc                      NMI  DIFFERS: $7E:0024 invariant 28 -> 27
+#   $00:8015   adc                      NMI  DIFFERS: $7E:0024 invariant 28 -> 27
+#   $00:8017   store                    NMI  DIFFERS: $7E:0024 invariant 28 -> 27
+# 9 addresses swept, 3 racy (9 trials: 6 identical, 3 differ, 0 end not reached)
+```
+
+The `= 28` after the compared bytes is what the baseline ended with (hex, memory
+order): check that it is the *right* value, not only the one every trial is
+compared to; a baseline that is itself wrong hides the race it should show.
+Exactly the three instructions between the load and the store are racy: an
+interrupt there loses the handler's increment (the invariant reads 39, `27`
+in hex). Replace the read-modify-write by one `INC $20` and the sweep finds
+nothing. Wrap it in `SEI`/`CLI` and `--kind both` shows what the guard does
+and does not do:
+
+```
+#   $00:8015   clc                      NMI  DIFFERS: $7E:0024 invariant 28 -> 27
+#   $00:8015   clc                      IRQ  not taken: I flag set, IRQs are masked
+# …
+# 11 addresses swept, 3 racy (22 trials: 14 identical, 3 differ, 0 end not reached, 5 NOT TAKEN: not tested)
+```
+
+`SEI` keeps the IRQ out of the window (those trials are refused, and listed)
+and does nothing against an NMI. A lost wake-up reads differently: a loop
+that tests a flag the NMI handler sets and then `WAI`s hangs when the NMI
+lands between the test and the `WAI`, and the trial there ends `END NOT
+REACHED`.
+
+Limits. The interrupt is forced on **instruction boundaries**, which is where
+a real one lands (the CPU polls at the last cycle of an instruction); the
+injected edge is synthetic (see the page above: a frame can see two NMIs),
+and an NMI that arrives only because it was forced can reach a state the
+console never reaches. Sweep the window where the race can happen, not the whole routine around it: an
+NMI forced where the program has not yet announced it is ready (or has already
+been woken) changes a lag counter or a flag by design, and the sweep reports it
+like any other difference. A clean sweep says no boundary of the range loses the
+bytes you compared, from the state you warmed up to; it does not say the
+bytes you did not compare are right. The MCP tool `race_sweep` takes the
+same options (`from`, `to`, `kinds`, `hit`, `warm_until_pc`, `warm_hit`,
+`warm_frames`, `until_pc`, `until_hit`, `until_frame`, `compare`,
+`max_steps`) and returns the schema-1 report; it sweeps from where the
+session stands (or from the warm-up) and leaves the session at that state.
+`luna-api`: `Emulator::race_sweep` (and `race_sweep_baseline`,
+`race_sweep_trial`, `race_sweep_report` to spread the trials over several
+emulators, as `--jobs` does).
+
+Exit code: `0`, or with `--fail-on-race` `1` when a trial `DIFFERS` or loses
+its end, or when every injection was refused (nothing was tested); `2` for a
+usage error (an unknown symbol, no end condition, a baseline that does not
+reach its end or does not reproduce); `1` for a failure of the run itself.
+
 ## `luna cart-check` — is the header ready for a physical cartridge?
 
 ```

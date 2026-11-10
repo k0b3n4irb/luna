@@ -23,6 +23,7 @@ mod output;
 mod parsers;
 mod profile;
 mod profile_frames;
+mod race_sweep;
 mod record;
 mod rom;
 mod run;
@@ -1530,6 +1531,97 @@ enum Command {
         #[arg(long, default_value_t = 1)]
         jobs: usize,
     },
+    /// Search the interrupt races of a routine: force an NMI (or an IRQ)
+    /// before EACH instruction of `--from`..`--to`, from one snapshot, and
+    /// compare the outcome with the run that was not interrupted. Warm up
+    /// (`--warm-until-pc` / `--warm-frames`), snapshot, run the baseline to
+    /// the end condition (`--until-pc` / `--until-frame`), read the
+    /// `--compare` bytes, then for every instruction address of the range
+    /// the baseline executed: restore, interrupt there, run to the same
+    /// end, compare. A trial is identical, DIFFERS (the bytes are listed),
+    /// NOT TAKEN (injection refused: NMITIMEN.7 clear, I flag set; never a
+    /// pass) or END NOT REACHED (a hang, a lost wake-up). The injected edge
+    /// is synthetic, as for `--inject-nmi-at`. Deterministic: the report is
+    /// the same for any `--jobs`.
+    ///
+    /// Exit 0 = report printed, 1 = with `--fail-on-race`: a race was found
+    /// (or every injection was refused), 2 = usage error.
+    RaceSweep {
+        /// Path to the .sfc / .smc ROM file.
+        rom: PathBuf,
+        /// Symbol file naming the routines and variables. Default: the
+        /// `.sym` beside the ROM.
+        #[arg(long)]
+        sym: Option<PathBuf>,
+        /// First instruction address swept (a `.sym` label, `label+N`, or
+        /// `BANK:OFFSET` in hex).
+        #[arg(long, value_name = "SPEC")]
+        from: String,
+        /// Last address swept, inclusive (same forms).
+        #[arg(long, value_name = "SPEC")]
+        to: String,
+        /// Interrupt forced at each address: nmi, irq or both.
+        #[arg(long, default_value = "nmi")]
+        kind: String,
+        /// Inject at this arrival of each address (default 1); an address
+        /// the baseline reaches fewer times is not swept.
+        #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u64).range(1..))]
+        hit: u64,
+        /// Start the sweep at the arrival on this routine (the machine is
+        /// snapshotted there). Default: right after reset.
+        #[arg(long = "warm-until-pc", value_name = "SPEC")]
+        warm_until_pc: Option<String>,
+        /// With --warm-until-pc: the arrival (default 1).
+        #[arg(long = "warm-hit", default_value_t = 1, value_parser = clap::value_parser!(u64).range(1..))]
+        warm_hit: u64,
+        /// Start the sweep at this absolute frame number.
+        #[arg(long = "warm-frames", value_name = "N")]
+        warm_frames: Option<u64>,
+        /// End of every run: the arrival on this routine.
+        #[arg(long = "until-pc", value_name = "SPEC")]
+        until_pc: Option<String>,
+        /// With --until-pc: the arrival (default 1, counted from the
+        /// snapshot; standing on it counts).
+        #[arg(long = "until-hit", default_value_t = 1, value_parser = clap::value_parser!(u64).range(1..))]
+        until_hit: u64,
+        /// End of every run: this absolute frame number.
+        #[arg(long = "until-frame", value_name = "N")]
+        until_frame: Option<u64>,
+        /// Bytes that must be equal at the end: `SPEC` or `SPEC:COUNT`
+        /// (`BANK:OFFSET` in hex, or a symbol; a symbol's count defaults to
+        /// its size in the `.sym`; with a bare `BANK:OFFSET` write
+        /// `BANK:OFFSET:COUNT`). Repeatable.
+        #[arg(long, value_name = "SPEC[:COUNT]")]
+        compare: Vec<String>,
+        /// Instruction budget of the baseline, and the cap of a trial
+        /// (a trial gets 4x the baseline + 100000, within this).
+        #[arg(long = "max-steps", default_value_t = 20_000_000)]
+        max_steps: u64,
+        /// Trials in parallel (0 = one per CPU). Same report for any value.
+        #[arg(long, default_value_t = 1)]
+        jobs: usize,
+        /// Print the report as JSON (schema 1) instead of text.
+        #[arg(long)]
+        json: bool,
+        /// Write the report to this file instead of stdout.
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Exit 1 when a race was found (a trial differs or loses its end)
+        /// or when every injection was refused.
+        #[arg(long = "fail-on-race")]
+        fail_on_race: bool,
+        #[arg(
+            long = "force-mapper",
+            help = mapper_help("Force a cartridge mapper, bypassing header auto-detection.")
+        )]
+        force_mapper: Option<String>,
+        /// Force the video standard (ntsc, pal).
+        #[arg(long = "force-region")]
+        force_region: Option<String>,
+        /// What RAM holds before the ROM boots (zero, ones, random, random=<seed>).
+        #[arg(long = "power-on")]
+        power_on: Option<String>,
+    },
     /// Audio fault analyzer: find a gap (a hole in a sound that was playing),
     /// a click (a jump out of the slope of the signal), saturation (clipped
     /// runs) and, with --voices-dir, a voice cut (a voice that falls to
@@ -2440,6 +2532,51 @@ fn main() -> ExitCode {
             };
             bench::run_bench(&dir, &out, frames, script, jobs)
         }
+        Command::RaceSweep {
+            rom,
+            sym,
+            from,
+            to,
+            kind,
+            hit,
+            warm_until_pc,
+            warm_hit,
+            warm_frames,
+            until_pc,
+            until_hit,
+            until_frame,
+            compare,
+            max_steps,
+            jobs,
+            json,
+            out,
+            fail_on_race,
+            force_mapper,
+            force_region,
+            power_on,
+        } => race_sweep::run_race_sweep(&race_sweep::RaceSweepOpts {
+            rom: &rom,
+            sym: sym.as_deref(),
+            from: &from,
+            to: &to,
+            kind: &kind,
+            hit,
+            warm_until_pc: warm_until_pc.as_deref(),
+            warm_hit,
+            warm_frames,
+            until_pc: until_pc.as_deref(),
+            until_hit,
+            until_frame,
+            compare: &compare,
+            max_steps,
+            jobs,
+            json,
+            out: out.as_deref(),
+            fail_on_race,
+            force_mapper: force_mapper.as_deref(),
+            force_region: force_region.as_deref(),
+            power_on: power_on.as_deref(),
+        }),
         Command::AudioCheck {
             wav,
             voices_dir,

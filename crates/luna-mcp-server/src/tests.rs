@@ -2486,6 +2486,87 @@ async fn server_inject_interrupt_at_round_trip() {
     assert!(r.reason.unwrap().contains("not reached"));
 }
 
+/// `race_sweep` finds the window between a load and a store that an NMI
+/// splits, and only it; a refused injection is `not_taken`; it is in the
+/// catalogue; the session is left where the sweep started.
+#[tokio::test]
+async fn server_race_sweep_round_trip() {
+    let mut rom = demo_lorom();
+    let code: &[u8] = &[
+        0x78, 0xA9, 0x80, 0x8D, 0x00, 0x42, // 8000 SEI; LDA #$80; STA $4200
+        0x64, 0x20, 0x64, 0x23, // 8006 STZ $20; STZ $23
+        0xA5, 0x20, // 800A LDA $20   load
+        0x18, // 800C CLC
+        0x69, 0x01, // 800D ADC #1
+        0x85, 0x20, // 800F STA $20   store
+        0xA5, 0x20, 0x38, 0xE5, 0x23, 0x85, 0x24, // 8011 $24 = $20 - $23
+        0x80, 0xFE, // 8018 BRA self  end
+    ];
+    rom[..code.len()].copy_from_slice(code);
+    rom[0x100..0x109].copy_from_slice(&[0xE6, 0x20, 0xD0, 0x02, 0xE6, 0x21, 0xE6, 0x23, 0x40]);
+    for off in [0x7FEA, 0x7FFA] {
+        rom[off] = 0x00;
+        rom[off + 1] = 0x81;
+    }
+    let path = PathBuf::from("/tmp/luna_mcp_race_sweep_demo.smc");
+    std::fs::write(&path, &rom).unwrap();
+    let s = LunaServer::new();
+    let mut params = rom_params(path.to_str().unwrap());
+    params.force_mapper = Some("lorom".into());
+    s.load_rom(Parameters(params)).await.unwrap();
+    assert!(
+        s.capabilities()
+            .await
+            .0
+            .tools
+            .iter()
+            .any(|t| t == "race_sweep")
+    );
+
+    let ask = |kinds: Vec<luna_api::InterruptKind>| RaceSweepParams {
+        from: "00:800A".into(),
+        to: "00:800F".into(),
+        kinds,
+        hit: 1,
+        warm_until_pc: Some("00:800A".into()),
+        warm_hit: 1,
+        warm_frames: None,
+        until_pc: Some("00:8018".into()),
+        until_hit: 1,
+        until_frame: None,
+        compare: vec!["7e:0024".into()],
+        max_steps: 100_000,
+    };
+    let r = s
+        .race_sweep(Parameters(ask(vec![luna_api::InterruptKind::Nmi])))
+        .await
+        .unwrap()
+        .0;
+    let racy: Vec<&str> = r
+        .trials
+        .iter()
+        .filter(|t| t.verdict == luna_api::RaceVerdict::Differs)
+        .map(|t| t.address_hex.as_str())
+        .collect();
+    assert_eq!(racy, ["$00:800C", "$00:800D", "$00:800F"], "{r:?}");
+    assert_eq!(r.summary.addresses_swept, 4);
+    assert_eq!(r.summary.racy_addresses, 3);
+
+    // The I flag is set all along: every IRQ is refused, none counts as a pass.
+    let r = s
+        .race_sweep(Parameters(ask(vec![luna_api::InterruptKind::Irq])))
+        .await
+        .unwrap()
+        .0;
+    assert_eq!(r.summary.not_taken, 4, "{r:?}");
+    assert_eq!(r.summary.identical, 0);
+
+    // A usage error is an invalid-params error.
+    let mut bad = ask(vec![]);
+    bad.until_pc = None;
+    assert!(s.race_sweep(Parameters(bad)).await.is_err());
+}
+
 /// `audio_check` reports an injected hole from a WAV on disk, takes a
 /// region and a threshold, refuses a bad one, and is in the catalogue.
 #[tokio::test]

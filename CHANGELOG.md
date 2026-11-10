@@ -7,6 +7,15 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ## [Unreleased]
 
+- `luna race-sweep ROM --from SPEC --to SPEC --until-pc SPEC|--until-frame N --compare SPEC[:COUNT]`
+  (`--kind nmi|irq|both`, `--hit`, `--warm-until-pc` / `--warm-hit` / `--warm-frames`, `--until-hit`,
+  `--max-steps`, `--jobs`, `--json`, `--out`, `--fail-on-race`), MCP `race_sweep`, `luna-api`
+  `Emulator::race_sweep`: forces an NMI or an IRQ before **each** instruction of a routine from one
+  snapshot and compares the bytes you name with the run that was not interrupted. A trial is
+  identical, DIFFERS (bytes listed), NOT TAKEN (injection refused: never counted as a pass), or END
+  NOT REACHED (a hang or lost wake-up). Deterministic for any `--jobs`; exit 1 under `--fail-on-race`;
+  the baseline is run twice from its snapshot and refused if it does not reproduce. What a shell
+  loop of `--inject-nmi-at` runs did slowly and unreproducibly, from one in-memory snapshot.
 - GUI *Emulation ▸ ● Record input* also writes the core's audio stream: stopping the recording
   saves `<name>.wav` next to the `.input` script (16-bit stereo, 32 040 Hz, the samples the S-DSP
   produced, before the host device and its pacing). Feed it to `luna audio-check`.

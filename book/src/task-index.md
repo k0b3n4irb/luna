@@ -110,6 +110,7 @@ means that transport has no form of it.
 | fail the build when the NMI handler is too slow | `--budget NmiHandler=6000` | — | [`luna profile`](using/cli-analysis.md#luna-profile--real-master-cycles-per-symbol) |
 | profile the same game ticks on two builds | `luna profile --until-pc tickEnd --hit 340` | — | [The same work on two builds](using/cli-analysis.md#the-same-work-on-two-builds----until-pc) |
 | force an NMI or an IRQ just before an instruction, to sweep a race | `luna state --inject-nmi-at routine:5` | `inject_interrupt_at` | [Forcing an interrupt](using/cli-run-state.md#forcing-an-interrupt---inject-nmi-at---inject-irq-at) |
+| find every instruction of a routine an interrupt breaks (a lost update, a lost wake-up) | `luna race-sweep --from a --to b --until-pc end --compare var` | `race_sweep` | [`luna race-sweep`](using/cli-analysis.md#luna-race-sweep--which-instruction-is-the-race) |
 | profile a scene the game reaches only through a menu | `luna profile --poke-at main --poke skip_menu=01` | — | [A scene behind a menu](using/cli-analysis.md#a-scene-behind-a-menu----poke-at) |
 | find which frame overran, and what ran in it | `luna profile --frames-out frames.csv --worst 3` | — | [Frame by frame](using/cli-analysis.md#frame-by-frame--which-frame-overran-and-what-ran-in-it) |
 | fail the build when a tick spills into one frame too many | `--max-lag-run 1`, `--max-lag-frames`, `--max-frame-mclk` | — | [Frame by frame](using/cli-analysis.md#frame-by-frame--which-frame-overran-and-what-ran-in-it) |

@@ -25,6 +25,8 @@
 //! - `run_until_pc { pc, max_steps }` → step to a target PC.
 //! - `inject_interrupt_at { kind, address|symbol, hit, max_frames }` → run to
 //!   an arrival and force an NMI / IRQ before it.
+//! - `race_sweep { from, to, kinds?, until_pc|until_frame, compare, … }` → force an
+//!   interrupt before each instruction of a range and compare the outcome.
 //! - `run_until_gsu_stop` / `run_until_gsu_go { max_steps }` → step to a
 //!   Super FX job boundary.
 //! - `set_cpu_register { reg, val }` → set a CPU register.
@@ -406,6 +408,50 @@ const fn default_hit() -> u64 {
 
 const fn default_inject_frames() -> u64 {
     60
+}
+
+/// `race_sweep` parameters: those of `luna race-sweep`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct RaceSweepParams {
+    /// First instruction swept (a loaded symbol, `symbol+N`, or `BANK:OFFSET` in hex).
+    pub from: String,
+    /// Last instruction swept, inclusive (same forms).
+    pub to: String,
+    /// Interrupts forced at each address (default `["nmi"]`).
+    #[serde(default)]
+    pub kinds: Vec<luna_api::InterruptKind>,
+    /// Inject at this arrival of each address (default 1).
+    #[serde(default = "default_hit")]
+    pub hit: u64,
+    /// Start the sweep at the arrival on this routine (default: where the
+    /// session stands).
+    #[serde(default)]
+    pub warm_until_pc: Option<String>,
+    /// The arrival of `warm_until_pc` (default 1).
+    #[serde(default = "default_hit")]
+    pub warm_hit: u64,
+    /// Start the sweep at this absolute frame number.
+    #[serde(default)]
+    pub warm_frames: Option<u64>,
+    /// End of every run: the arrival on this routine ...
+    #[serde(default)]
+    pub until_pc: Option<String>,
+    /// ... its arrival (default 1), or
+    #[serde(default = "default_hit")]
+    pub until_hit: u64,
+    /// ... an absolute frame number.
+    #[serde(default)]
+    pub until_frame: Option<u64>,
+    /// Bytes that must be equal at the end: `SPEC` or `SPEC:COUNT`.
+    #[serde(default)]
+    pub compare: Vec<String>,
+    /// Instruction budget of the baseline (default 20 000 000).
+    #[serde(default = "default_race_steps")]
+    pub max_steps: u64,
+}
+
+const fn default_race_steps() -> u64 {
+    20_000_000
 }
 
 /// `run_until_gsu_stop` / `run_until_gsu_go` parameters.
@@ -2936,6 +2982,60 @@ impl LunaServer {
             frame: found.frame,
             line: found.line,
         }))
+    }
+
+    #[rmcp::tool(
+        description = "Search the interrupt races of a routine, as `luna race-sweep`: from the \
+                                warmed-up state (`warm_until_pc` / `warm_frames`, else where the \
+                                session stands) snapshot, run the baseline to the end \
+                                (`until_pc` + `until_hit`, or `until_frame`), read the `compare` \
+                                bytes (`SPEC` or `SPEC:COUNT`), then for each instruction \
+                                address of `from`..`to` that the baseline executed, and each \
+                                of `kinds` (nmi, irq), restore, force the interrupt before it, \
+                                run to the same end and compare. Each trial is `identical`, \
+                                `differs` (the bytes listed), `not_taken` (NMITIMEN.7 clear / \
+                                I flag set: never a pass), `not_reached` or `end_not_reached` \
+                                (a hang or lost wake-up). Returns the schema-1 report with \
+                                `summary.racy_addresses`. The synthetic edge is not hardware. \
+                                The session is left at the warmed-up state."
+    )]
+    async fn race_sweep(
+        &self,
+        Parameters(p): Parameters<RaceSweepParams>,
+    ) -> Result<rmcp::Json<luna_api::RaceSweepReport>, ErrorData> {
+        let report = {
+            let mut em = self.emulator.lock().await;
+            let warm = match (&p.warm_until_pc, p.warm_frames) {
+                (Some(_), Some(_)) => {
+                    return Err(ErrorData::invalid_params(
+                        "warm_until_pc and warm_frames are exclusive",
+                        None,
+                    ));
+                }
+                (Some(spec), None) => luna_api::RaceWarm::Pc {
+                    spec: spec.clone(),
+                    hit: p.warm_hit,
+                },
+                (None, Some(n)) => luna_api::RaceWarm::Frame(n),
+                (None, None) => luna_api::RaceWarm::None,
+            };
+            let spec = em
+                .race_sweep_spec(&luna_api::RaceSweepRequest {
+                    from: p.from,
+                    to: p.to,
+                    kinds: p.kinds,
+                    hit: p.hit,
+                    until_pc: p.until_pc,
+                    until_hit: p.until_hit,
+                    until_frame: p.until_frame,
+                    compare: p.compare,
+                    max_steps: p.max_steps,
+                })
+                .map_err(|e| api_err_to_mcp(&e))?;
+            em.race_sweep_warm(&warm).map_err(|e| api_err_to_mcp(&e))?;
+            em.race_sweep(&spec).map_err(|e| api_err_to_mcp(&e))?
+        };
+        Ok(rmcp::Json(report))
     }
 
     #[rmcp::tool(

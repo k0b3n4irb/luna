@@ -80,6 +80,7 @@ pub mod memory_view;
 pub mod paths;
 mod power_on;
 pub mod provenance;
+pub mod race_sweep;
 pub mod strict;
 pub mod symbols;
 pub mod ticks;
@@ -108,6 +109,10 @@ pub use listing::{
 };
 pub use memory::{MemoryKind, MemoryLocation};
 pub use power_on::parse_power_on;
+pub use race_sweep::{
+    RACE_SWEEP_SCHEMA, RaceBaseline, RaceCompare, RaceCompareOut, RaceDiff, RaceEnd, RaceSummary,
+    RaceSweepReport, RaceSweepRequest, RaceSweepSpec, RaceTrial, RaceVerdict, RaceWarm,
+};
 pub use ticks::{
     TICK_RECORD_VERSION, TickInput, TickInputTable, TickOutcome, TickPoint, TickPoke, TickPokeOn,
     TickRecordOptions, TickShots, TickSpec, TickStart, TickZone, check_tick_condition,
