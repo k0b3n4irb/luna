@@ -99,6 +99,24 @@ then gets its debugger tools. All ⬜.
 
 ## N — Netplay (last) · ⬜
 
+## Second opinion: what a screen comparison can and cannot see
+
+Mesen2 plays the same ROM and its picture is compared with luna's, pixel for
+pixel (`row0 = 7`, the 7-line offset of Mesen2's core, is mandatory). Measured
+2026-11-10 on the 25 ROMs of an SDK's console-verification corpus: 23 identical,
+2 different (a hi-colour ROM whose per-scanline CGRAM DMA differs on 3 438
+pixels, open: one of the two is wrong, a third emulator decides; and a Mode 7
+ROM that needs a DSP-1 firmware Mesen2 did not have).
+
+A settled screen does not see a one-line shift of VBlank: with the start of
+VBlank moved from line 225 to 226 in a throwaway luna, the same 25 screens
+stayed identical. `tools/make-nmi-line-probe.py` writes a synthetic ROM that
+shows the line of its NMI as the backdrop colour; with it the comparison is
+**identical** for luna as it is and **different on 114 688 pixels** with the
+fault, and it is identical against Mesen2 for the real luna, which also
+confirms line 225 independently. Any comparison corpus that must catch timing
+drift carries such a probe.
+
 ## Out of scope
 
 Super Game Boy (another system), NTSC (Bisqwit) (NES-only in Mesen2), the
