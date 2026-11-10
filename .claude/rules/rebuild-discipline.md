@@ -29,7 +29,9 @@ fmt and clippy are the exact CI commands. Never verify through a pipe
 
 - The `PostToolUse` hook of `.claude/settings.json` rebuilds (debug +
   release) and runs clippy after a `*.rs` edit, under the
-  `heavy-jobs.lock` flock. It is asynchronous (it only re-wakes on
+  `heavy-jobs.lock` flock, with `-j2`: a lock place bounds how many heavy
+  jobs run, not their memory, and an incremental build without `-j` peaked
+  at 4 108 MiB (111 s) against 1 919 MiB (56 s) with it (2026-11-10). It is asynchronous (it only re-wakes on
   failure) and sees only Edit/Write/MultiEdit: an edit through the shell
   (sed, python, git checkout) bypasses it, and it never blocks a commit.
   After a shell edit, `cargo build -p luna-gui` explicitly.
