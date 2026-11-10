@@ -65,6 +65,7 @@ pub use memory_view::{
 pub use trace_logger::{
     StatusFormat, TRACE_ROWS, TraceCpu, TraceFormatOptions, TraceOptions, TraceRow, auto_format,
 };
+pub mod audio_check;
 pub mod code_log;
 pub mod debugger;
 pub mod dsp1_commands;
@@ -90,6 +91,11 @@ mod vocab;
 mod vram_writers;
 pub mod workspace;
 
+pub use audio_check::{
+    AUDIO_CHECK_SCHEMA, AudioCheckOptions, AudioClip, AudioFault, AudioRegion, AudioReport,
+    AudioSummary, AudioThresholds, FaultKind, FaultSeverity, audio_check, audio_check_files,
+    parse_wav,
+};
 pub use debugger::{
     CallStackRow, DebuggerStatus, FindResult, FunctionRow, GotoResult, LabelRow, SpcCallFrame,
     WatchStyle,

@@ -835,6 +835,65 @@ pub struct OamResult {
     pub bytes: Vec<u8>,
 }
 
+/// `audio_check` parameters. Every threshold is optional; the defaults are
+/// those of `luna audio-check`.
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+pub struct AudioCheckParams {
+    /// Absolute path to a WAV (16-bit PCM, mono or stereo), e.g. the file
+    /// of `state --audio-out`.
+    pub path: String,
+    /// Directory with `voice0.wav` .. `voice7.wav` (`--voice-wav-dir`): enables the
+    /// voice-cut check.
+    #[serde(default)]
+    pub voices_dir: Option<String>,
+    /// `ntsc` (default) or `pal`: sets the nominal frame length.
+    #[serde(default)]
+    pub region: Option<String>,
+    /// Kinds that fail the verdict: any of `gap`, `click`, `saturation`,
+    /// `voice-cut` (default: all).
+    #[serde(default)]
+    pub fail_on: Option<Vec<String>>,
+    /// RMS below which a stretch is silent (default 16).
+    #[serde(default)]
+    pub gap_floor: Option<f64>,
+    /// RMS the sound before a gap must average (default 256).
+    #[serde(default)]
+    pub gap_level: Option<f64>,
+    /// Frames of sound required before a gap (default 3).
+    #[serde(default)]
+    pub gap_before: Option<usize>,
+    /// Shortest gap, in frames (default 0.75).
+    #[serde(default)]
+    pub gap_min_frames: Option<f64>,
+    /// Longest gap, in frames (default 60).
+    #[serde(default)]
+    pub gap_max_frames: Option<f64>,
+    /// Gap start: the RMS of the 32 samples before the hole must be this
+    /// fraction of the sound's level; a musical rest fades out and fails
+    /// it (default 0.35).
+    #[serde(default)]
+    pub gap_edge_ratio: Option<f64>,
+    /// Click: second difference over the local mean (default 40).
+    #[serde(default)]
+    pub click_ratio: Option<f64>,
+    /// Click: smallest absolute second difference (default 4000).
+    #[serde(default)]
+    pub click_floor: Option<f64>,
+    /// Saturation: consecutive samples at the rails (default 4).
+    #[serde(default)]
+    pub sat_run: Option<usize>,
+    /// Voice cut: the voice peaked above this (default 2000).
+    #[serde(default)]
+    pub voice_level: Option<i32>,
+    /// Voice cut: falls to silence in fewer samples than this (default 32).
+    #[serde(default)]
+    pub voice_cut_samples: Option<usize>,
+    /// Voice cut: fraction of the earlier peak a release decay leaves below
+    /// (default 0.25).
+    #[serde(default)]
+    pub voice_decay_ratio: Option<f64>,
+}
+
 /// `cart_check` parameters.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct CartCheckParams {
@@ -3110,6 +3169,57 @@ impl LunaServer {
             em.peek_oam().map_err(|e| api_err_to_mcp(&e))?
         };
         Ok(rmcp::Json(OamResult { bytes }))
+    }
+
+    #[rmcp::tool(
+        description = "Audio fault analyzer, as `luna audio-check`: reads a WAV (state \
+                                --audio-out) and reports gaps (a hole in a sound that was \
+                                playing), clicks (a jump out of the signal's slope), saturation \
+                                (clipped runs) and, with `voices_dir`, voice cuts (a voice that \
+                                falls to silence with no release decay), each with its frame, \
+                                time, measured numbers and threshold name. Frames are nominal \
+                                (`region`). Returns the schema-1 report; `verdict` is `ok` or \
+                                `faults`. Reads files only; the loaded ROM is untouched."
+    )]
+    async fn audio_check(
+        &self,
+        Parameters(p): Parameters<AudioCheckParams>,
+    ) -> Result<rmcp::Json<luna_api::AudioReport>, ErrorData> {
+        let bad = |e: String| ErrorData::invalid_params(e, None);
+        let mut th = luna_api::AudioThresholds::default();
+        macro_rules! set {
+            ($($f:ident),*) => { $(if let Some(v) = p.$f { th.$f = v; })* };
+        }
+        set!(
+            gap_floor,
+            gap_level,
+            gap_before,
+            gap_min_frames,
+            gap_max_frames,
+            gap_edge_ratio,
+            click_ratio,
+            click_floor,
+            sat_run,
+            voice_level,
+            voice_cut_samples,
+            voice_decay_ratio
+        );
+        let opts = luna_api::AudioCheckOptions {
+            region: luna_api::AudioRegion::parse(p.region.as_deref().unwrap_or("ntsc"))
+                .map_err(bad)?,
+            thresholds: th,
+            fail_on: match &p.fail_on {
+                Some(l) => luna_api::FaultKind::parse_list(&l.join(",")).map_err(bad)?,
+                None => luna_api::FaultKind::DEFAULT_FAIL_ON.to_vec(),
+            },
+        };
+        let report = luna_api::audio_check_files(
+            std::path::Path::new(&p.path),
+            p.voices_dir.as_deref().map(std::path::Path::new),
+            &opts,
+        )
+        .map_err(bad)?;
+        Ok(rmcp::Json(report))
     }
 
     #[rmcp::tool(

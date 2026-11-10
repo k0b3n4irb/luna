@@ -9,6 +9,7 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
+mod audio_check;
 mod bench;
 mod cart_check;
 mod csv;
@@ -1525,6 +1526,77 @@ enum Command {
         #[arg(long, default_value_t = 1)]
         jobs: usize,
     },
+    /// Audio fault analyzer: find a gap (a hole in a sound that was playing),
+    /// a click (a jump out of the slope of the signal), saturation (clipped
+    /// runs) and, with --voices-dir, a voice cut (a voice that falls to
+    /// silence with no release decay) in a WAV written by
+    /// `luna state --audio-out` (and `--voice-wav-dir`). One line per fault
+    /// (kind, frame, time, measured numbers, threshold name), or --json
+    /// (schema 1). Frames are nominal: a WAV has no frame marks. It reads the
+    /// core's stream, not the host's resampling or pacing.
+    ///
+    /// Exit 0 = clean, 1 = at least one fault of a --fail-on kind, 2 = usage
+    /// or I/O error.
+    AudioCheck {
+        /// The WAV to analyse (16-bit PCM, mono or stereo).
+        wav: PathBuf,
+        /// Directory holding voice0.wav .. voice7.wav (`state --voice-wav-dir`):
+        /// enables the voice-cut check.
+        #[arg(long)]
+        voices_dir: Option<PathBuf>,
+        /// Video region, which sets the nominal frame length: ntsc (default,
+        /// ~533.1 samples at 32040 Hz) or pal (~640.7).
+        #[arg(long, default_value = "ntsc")]
+        region: String,
+        /// Print the report as JSON (schema 1).
+        #[arg(long)]
+        json: bool,
+        /// Comma-separated kinds that fail the exit code (gap, click,
+        /// saturation, voice-cut). Default: gap,click,saturation (a voice cut
+        /// is listed, but the hardware does the same at the end of an unlooped
+        /// BRR sample, so it fails only when asked for).
+        #[arg(long)]
+        fail_on: Option<String>,
+        /// A stretch is silent below this RMS (default 16).
+        #[arg(long)]
+        gap_floor: Option<f64>,
+        /// The sound before a gap must average at least this RMS (default 256).
+        #[arg(long)]
+        gap_level: Option<f64>,
+        /// Frames of sound required before a gap (default 3).
+        #[arg(long)]
+        gap_before: Option<usize>,
+        /// Shortest gap, in frames (default 0.75).
+        #[arg(long)]
+        gap_min_frames: Option<f64>,
+        /// Longest gap, in frames; longer is a pause (default 60).
+        #[arg(long)]
+        gap_max_frames: Option<f64>,
+        /// Gap start: the RMS of the 32 samples before the hole must be this
+        /// fraction of the sound's level; a musical rest fades out and
+        /// fails it (default 0.35).
+        #[arg(long)]
+        gap_edge_ratio: Option<f64>,
+        /// Click: second difference over the local mean (default 40).
+        #[arg(long)]
+        click_ratio: Option<f64>,
+        /// Click: smallest second difference, absolute (default 4000).
+        #[arg(long)]
+        click_floor: Option<f64>,
+        /// Saturation: consecutive samples at the rails (default 4).
+        #[arg(long)]
+        sat_run: Option<usize>,
+        /// Voice cut: the voice peaked above this (default 2000).
+        #[arg(long)]
+        voice_level: Option<i32>,
+        /// Voice cut: falls to silence in fewer samples than this (default 32).
+        #[arg(long)]
+        voice_cut_samples: Option<usize>,
+        /// Voice cut: a release decay leaves less than this fraction of the
+        /// earlier peak in the last samples (default 0.25).
+        #[arg(long)]
+        voice_decay_ratio: Option<f64>,
+    },
     /// Audit a ROM's header for a physical cartridge (repro board / flash):
     /// copier header, checksum, sizes, map byte, vectors, SRAM and chipset,
     /// country, title. One line per finding, `SEVERITY CODE: message`.
@@ -2363,6 +2435,52 @@ fn main() -> ExitCode {
                 None => None,
             };
             bench::run_bench(&dir, &out, frames, script, jobs)
+        }
+        Command::AudioCheck {
+            wav,
+            voices_dir,
+            region,
+            json,
+            fail_on,
+            gap_floor,
+            gap_level,
+            gap_before,
+            gap_min_frames,
+            gap_max_frames,
+            gap_edge_ratio,
+            click_ratio,
+            click_floor,
+            sat_run,
+            voice_level,
+            voice_cut_samples,
+            voice_decay_ratio,
+        } => {
+            let mut th = luna_api::AudioThresholds::default();
+            macro_rules! set {
+                ($($f:ident),*) => { $(if let Some(v) = $f { th.$f = v; })* };
+            }
+            set!(
+                gap_floor,
+                gap_level,
+                gap_before,
+                gap_min_frames,
+                gap_max_frames,
+                gap_edge_ratio,
+                click_ratio,
+                click_floor,
+                sat_run,
+                voice_level,
+                voice_cut_samples,
+                voice_decay_ratio
+            );
+            audio_check::run_audio_check(
+                &wav,
+                voices_dir.as_deref(),
+                &region,
+                fail_on.as_deref(),
+                th,
+                json,
+            )
         }
         Command::CartCheck { rom, json, no_sram } => {
             cart_check::run_cart_check(&rom, json, no_sram)

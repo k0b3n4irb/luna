@@ -1109,6 +1109,117 @@ music has started before the snapshot.
 luna spc-dump "game.sfc" -n 8000000 -o /tmp/song.spc
 ```
 
+## `luna audio-check` — did the sound break?
+
+```
+luna audio-check [OPTIONS] <WAV>
+```
+
+Listening to a long run to find a lag, a noise or a silence does not scale,
+and it cannot be repeated. `audio-check` reads the WAV the core produced
+(`luna state --audio-out`, 32 040 Hz) and reports, with the numbers it
+measured, four kinds of fault. It reads files only; it never starts the
+emulator.
+
+| Kind | What it is | How it is told |
+|---|---|---|
+| `gap` | a hole in a sound that was playing | stretches of one eighth of a frame whose RMS is under `--gap-floor`, lasting `--gap-min-frames` to `--gap-max-frames`, after `--gap-before` frames averaging at least `--gap-level`, with sound again after. The sound must stop abruptly (the RMS of the 32 samples before the hole is at least `--gap-edge-ratio` of the level before): a musical rest fades out and is not a gap. Silence at the start, and a fade at the end, are never gaps. |
+| `click` | a jump out of the slope of the signal | the second difference of a channel is at least `--click-floor` and `--click-ratio` times the mean second difference of the 32 samples around it. A click whose preceding 32 samples are 8 times quieter than the following ones is an attack from silence and is kept as a `note`, not a fault. |
+| `saturation` | clipping | at least `--sat-run` consecutive samples at +32767 / -32768 on one channel. |
+| `voice-cut` | a voice that vanished with no release | with `--voices-dir` (the `voice0.wav`..`voice7.wav` of `luna state --voice-wav-dir`): a voice above `--voice-level` that falls to exact silence in fewer than `--voice-cut-samples` samples, keeping at least `--voice-decay-ratio` of its earlier peak (a hardware key-off decays over about 8 ms, 256 samples, and does not). |
+
+```
+luna audio-check run.wav --region pal --voices-dir voices/ --json
+GAP frame 145 t=2.416s sample 77400 duration 2.19 frames (1170 samples) level 647.1 -> 499.4 edge rms 184 [gap_floor, gap_level, ...]
+CLICK frame 85 t=1.719s sample 55071 ch L level 13091.8 -> 5010.8 jump 20475 ratio 99.3 [click_ratio, click_floor, click_span]
+faults: 399 frame(s) of 640.7 samples at 32040 Hz (Pal), gap 0 click 1 saturation 0 voice-cut 0 (notes 0)
+```
+
+One line per fault: kind, nominal frame, time, sample, the measured values and
+the names of the thresholds that decided it. Exit code: `0` = no fault of a
+`--fail-on` kind, `1` = at least one, `2` = usage or I/O error.
+
+| Option | Default | Purpose |
+|---|---|---|
+| `<WAV>` | — | 16-bit PCM, mono or stereo. |
+| `--voices-dir <DIR>` | — | Enables the voice-cut check. |
+| `--region <ntsc\|pal>` | `ntsc` | Sets the frame length: 533.1 samples (NTSC, 60.0988 Hz) or 640.7 (PAL, 50.007 Hz) at 32 040 Hz. |
+| `--json` | off | The report below instead of text. |
+| `--fail-on <LIST>` | `gap,click,saturation` | The kinds that make the exit code 1. A voice cut is listed but does not fail unless asked for (see the limits). |
+| `--gap-floor` | `16` | RMS under which a stretch is silent. |
+| `--gap-level` | `256` | RMS the sound before a gap averages at least. |
+| `--gap-before` | `3` | Frames of sound required before a gap. |
+| `--gap-min-frames` | `0.75` | Shortest gap. Under one frame, because a hole does not fall on the frame grid. |
+| `--gap-max-frames` | `60` | Longer silence is a pause. |
+| `--gap-edge-ratio` | `0.35` | How abruptly the sound must stop. |
+| `--click-ratio` | `40` | Second difference over its local mean. |
+| `--click-floor` | `4000` | Smallest second difference, so quiet noise does not trigger. |
+| `--sat-run` | `4` | Consecutive samples at the rails. |
+| `--voice-level` | `2000` | A voice cut falls from above this peak. |
+| `--voice-cut-samples` | `32` | The fall takes fewer samples than this. |
+| `--voice-decay-ratio` | `0.25` | A release decay leaves less than this fraction of the earlier peak in those samples. |
+
+`--json` prints schema 1: `{schema, wav, rate, channels, samples, duration_s,
+region, frame_samples, frames, voices, thresholds{...}, fail_on, faults[],
+summary{gap, click, saturation, voice_cut, notes}, verdict: "ok"|"faults"}`.
+Each fault has `kind`, `severity` (`fault` or `note`), `frame`, `sample`,
+`time_s`, `threshold`, and the numbers of its kind (`duration_frames`,
+`level_before`, `level_after`, `edge_rms`, `magnitude`, `ratio`, `run`,
+`channel`, `voice`). The MCP tool `audio_check` takes the same options and
+returns the same JSON.
+
+What it cannot see, honestly:
+
+- **The core's stream, not the host's.** The WAV is what the S-DSP produced.
+  The resampling, the pacing and the underruns of the GUI's audio thread are
+  not in it: a crackle heard in the GUI and absent here is the host's.
+- **Nominal frames.** A WAV has no frame marks; a frame is the region's
+  nominal length cut on a grid from sample 0, so `frame` is accurate to a
+  frame or so, and a hole is not tied to the grid.
+- **A voice cut can be legitimate.** The hardware ends a voice with no release
+  at the end of a BRR sample that is not looped, which looks like a forced
+  stop. That is why a voice cut does not fail by default; the list of cuts and
+  their positions is the tool for a voice that must not stop.
+- **A truncated file is silent.** A WAV that simply ends (a crash, a short
+  run) shows no gap: an ending is not a hole.
+- **A click is not proof of a fault.** A sharp attack over a sound already
+  playing looks like a click. The ratio and the levels are in the line;
+  tune `--click-ratio` / `--click-floor` for the material.
+
+### How the defaults were chosen
+
+On 2026-11-10, with the build of that day. Three sets, none with a game in
+the repository.
+
+- **Clean music** (the SPC700 test ROMs, PAL, 400 frames, `--voices-dir`):
+  `ItaloTest`, `Axel-F`, `FFVIIPrelude`, `SpeechSynth`, `PlayTwoSong`,
+  `Twinkle` and `PitchMod` all give `ok` (no gap, click or saturation). The
+  voice files list 22 cuts for `Axel-F` and 10 for `SpeechSynth`: short
+  samples that end without a loop, the case above.
+- **A census of 41 commercial titles** (local only; the first 900 frames of
+  each, no input):
+
+  | Kind | Titles raising it | Faults |
+  |---|---|---|
+  | `gap` | 1 of 41 | 1 (a 1.1-frame hole in a level of about 600, abrupt: unexplained, left for a listener) |
+  | `click` | 0 of 41 | 0 |
+  | `saturation` | 0 of 41 | 0 |
+
+  The first gap rule (silence under the floor after sound) raised 74 gaps in
+  11 titles: music has rests. The abruptness rule (`--gap-edge-ratio`) brought
+  it to 1. For the margin: at `--click-ratio 15 --click-floor 1500` the census
+  gives 26 clicks in 5 titles, at `10` / `800` it gives 204 in 12, mostly the
+  ends of sounds that stop short; the defaults sit above that noise.
+- **A known glitch**: `PitchMod` before the S-DSP stepping fix, where a voice
+  restarts at 1.72 s. The analyzer sees it as a `click` (a jump of 20 475 in a
+  signal at 13 092 RMS, ratio 99), not as a gap, at frame 85; the file after
+  the fix shows the same jump, so it is still in the stream.
+
+```bash
+luna state game.sfc --until-frame 1200 --audio-out run.wav --voice-wav-dir voices/
+luna audio-check run.wav --voices-dir voices/ --json | jq '.faults[] | {kind, frame, time_s}'
+```
+
 ## `luna cart-check` — is the header ready for a physical cartridge?
 
 ```

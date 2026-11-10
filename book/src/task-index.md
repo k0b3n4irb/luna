@@ -122,6 +122,7 @@ means that transport has no form of it.
 | I want to… | CLI | MCP | Shown in |
 |---|---|---|---|
 | the audio as a WAV | `--audio-out out.wav` | `drain_audio` | [`luna run`](using/cli-run-state.md#luna-run--quick-render--audio-dump) |
+| whether a recorded run's sound broke (a hole, a click, clipping, a voice cut short), with numbers | `luna audio-check run.wav` | `audio_check` | [`luna audio-check`](using/cli-analysis.md#luna-audio-check--did-the-sound-break) |
 | whether a ROM's header is ready for a physical cartridge | `luna cart-check` | `cart_check` | [`luna cart-check`](using/cli-analysis.md#luna-cart-check--is-the-header-ready-for-a-physical-cartridge) |
 | what a real console would refuse that an emulator lets through (a VRAM write while the picture is drawn, a DMA through the blocked zone) | `luna strict`, `luna run --strict-hw` | `enable_hw_strict`, `take_hw_faults` | [`luna strict`](using/cli-analysis.md#luna-strict--what-a-real-console-would-have-refused) |
 | a sprite that draws a tile no write ever filled, or one uploaded under another `OBSEL` layout | `luna strict`, `luna run --strict-hw` | `enable_vram_provenance`, `take_vram_provenance` | [`luna strict`](using/cli-analysis.md#luna-strict--what-a-real-console-would-have-refused) |

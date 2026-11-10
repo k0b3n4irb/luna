@@ -2485,3 +2485,72 @@ async fn server_inject_interrupt_at_round_trip() {
     assert!(!r.reached && !r.delivered, "{r:?}");
     assert!(r.reason.unwrap().contains("not reached"));
 }
+
+/// `audio_check` reports an injected hole from a WAV on disk, takes a
+/// region and a threshold, refuses a bad one, and is in the catalogue.
+#[tokio::test]
+async fn server_audio_check_round_trip() {
+    let dir = std::env::temp_dir().join("luna_mcp_audio_check");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut b = Vec::new();
+    let frames: Vec<i16> = (0..32_040 * 2)
+        .map(|i| {
+            let t = f64::from(i) / 32_040.0;
+            (5000.0 * (std::f64::consts::TAU * 300.0 * t).sin()) as i16
+        })
+        .collect();
+    let mut mono = frames.clone();
+    for s in &mut mono[30_000..30_700] {
+        *s = 0;
+    }
+    let data = mono.len() as u32 * 2;
+    b.extend_from_slice(b"RIFF");
+    b.extend_from_slice(&(36 + data).to_le_bytes());
+    b.extend_from_slice(b"WAVEfmt ");
+    b.extend_from_slice(&16u32.to_le_bytes());
+    for v in [1u16, 1] {
+        b.extend_from_slice(&v.to_le_bytes());
+    }
+    b.extend_from_slice(&32_040u32.to_le_bytes());
+    b.extend_from_slice(&64_080u32.to_le_bytes());
+    b.extend_from_slice(&2u16.to_le_bytes());
+    b.extend_from_slice(&16u16.to_le_bytes());
+    b.extend_from_slice(b"data");
+    b.extend_from_slice(&data.to_le_bytes());
+    for s in &mono {
+        b.extend_from_slice(&s.to_le_bytes());
+    }
+    let path = dir.join("m.wav");
+    std::fs::write(&path, &b).unwrap();
+    let ask = |region: Option<&str>, gap_floor: Option<f64>| AudioCheckParams {
+        path: path.to_str().unwrap().into(),
+        region: region.map(Into::into),
+        gap_floor,
+        ..AudioCheckParams::default()
+    };
+    let s = LunaServer::new();
+    let r = s
+        .audio_check(Parameters(ask(Some("pal"), None)))
+        .await
+        .unwrap()
+        .0;
+    assert_eq!(r.verdict, "faults");
+    assert_eq!(r.summary.gap, 1);
+    assert_eq!(r.channels, 1);
+    // A floor of 0 means nothing is silent.
+    let r = s
+        .audio_check(Parameters(ask(None, Some(0.0))))
+        .await
+        .unwrap()
+        .0;
+    assert_eq!(r.summary.gap, 0);
+    assert!(
+        s.audio_check(Parameters(ask(Some("secam"), None)))
+            .await
+            .is_err()
+    );
+    let caps = s.capabilities().await;
+    assert!(caps.0.tools.iter().any(|t| t == "audio_check"));
+    let _ = std::fs::remove_dir_all(&dir);
+}

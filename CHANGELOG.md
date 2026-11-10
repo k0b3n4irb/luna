@@ -7,6 +7,17 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ## [Unreleased]
 
+- `luna audio-check WAV` (`--voices-dir`, `--region ntsc|pal`, `--json`, `--fail-on`, and every
+  threshold by name: `--gap-floor`, `--gap-level`, `--gap-before`, `--gap-min-frames`,
+  `--gap-max-frames`, `--gap-edge-ratio`, `--click-ratio`, `--click-floor`, `--sat-run`,
+  `--voice-level`, `--voice-cut-samples`, `--voice-decay-ratio`), MCP `audio_check`, `luna-api`
+  `audio_check`: an audio fault analyzer for the WAV of `state --audio-out` (and the per-voice
+  files of `--voice-wav-dir`). It reports gaps (a hole in a sound that was playing), clicks,
+  saturation and voice cuts, each with its nominal frame, time and measured numbers, as text or
+  schema-1 JSON; exit 0 clean, 1 faults, 2 usage or I/O. Defaults tuned on the SPC700 corpus
+  (clean) and a 41-title census (1 gap, no click, no clipping); the guide lists the census and
+  what it cannot see (the host's resampling, a legitimate unlooped-sample cut).
+
 ## [1.43.0] — 2026-11-09
 
 The S-DSP now steps once per SPC cycle, as ares and Mesen2 do, which settles
