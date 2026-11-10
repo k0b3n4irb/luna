@@ -7,6 +7,12 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ## [Unreleased]
 
+- `state --dsp-events` (and `take_dsp_notes`) read a note's `srcn`, `pitch` and volumes when the
+  voice really starts (the end of the 5-sample KON delay) instead of at the `KON` write: a driver
+  that writes `PITCH` a few cycles after `KON` no longer gives the previous note's pitch. New keys
+  at the end of each JSON line: `start_spc_cycles`, `adsr1`, `adsr2`, `gain`; `frame` and
+  `spc_cycles` still are the `KON` write's. A `PITCH` written later than the delay is not seen
+  (use `--dsp-trace`). Trace only: the audio is unchanged.
 - `luna audio-check WAV` (`--voices-dir`, `--region ntsc|pal`, `--json`, `--fail-on`, and every
   threshold by name: `--gap-floor`, `--gap-level`, `--gap-before`, `--gap-min-frames`,
   `--gap-max-frames`, `--gap-edge-ratio`, `--click-ratio`, `--click-floor`, `--sat-run`,

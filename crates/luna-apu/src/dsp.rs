@@ -316,14 +316,26 @@ pub struct DspWriteEvent {
     pub value: u8,
 }
 
-/// One note: a voice keyed on, with the voice registers as they stood at
-/// the `KON` (`$4C`) write that raised its bit.
+/// One note: a voice keyed on by a `KON` (`$4C`) write, with the voice
+/// registers as they stand when the voice really starts (the end of the
+/// 5-sample KON delay of the pipeline: ares `voice3c`, Mesen2
+/// `DspVoice.cpp:245-258`), not as they stood at the `KON` write. A driver
+/// that writes `PITCH` a few SPC cycles after `KON` is therefore seen with
+/// the new pitch; one that writes it later than the delay is not (use the
+/// register trace for that).
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct DspNoteEvent {
-    /// PPU frame number at the write.
+    /// PPU frame number at the `KON` write (when the driver played the note).
     pub frame: u64,
-    /// SPC700 cycles since the trace was enabled, as in [`DspWriteEvent`].
+    /// SPC700 cycles since the trace was enabled, at the `KON` write, as in
+    /// [`DspWriteEvent`].
     pub spc_cycles: u64,
+    /// SPC700 cycles at the voice's real start (when the registers below
+    /// were read). A voice keyed again or keyed off before its start, or
+    /// still pending when the events are drained, is completed at that
+    /// instant.
+    #[serde(default)]
+    pub start_spc_cycles: u64,
     /// Voice `0-7`.
     pub voice: u8,
     /// `SRCN` (`$x4`), the sample directory entry.
@@ -334,6 +346,15 @@ pub struct DspNoteEvent {
     pub vol_l: i8,
     /// `VOLR` (`$x1`), signed.
     pub vol_r: i8,
+    /// `ADSR1` (`$x5`).
+    #[serde(default)]
+    pub adsr1: u8,
+    /// `ADSR2` (`$x6`).
+    #[serde(default)]
+    pub adsr2: u8,
+    /// `GAIN` (`$x7`).
+    #[serde(default)]
+    pub gain: u8,
 }
 
 /// Bounded ring for [`DspWriteEvent`]s (and the [`DspNoteEvent`]s, each
@@ -343,6 +364,9 @@ pub struct DspWriteLog {
     pub events: Vec<DspWriteEvent>,
     pub notes: Vec<DspNoteEvent>,
     pub max_events: usize,
+    /// Per voice: the note keyed on but not started yet (registers still to
+    /// read); see [`Dsp::complete_note`].
+    pub pending: [Option<DspNoteEvent>; 8],
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -483,6 +507,39 @@ impl Dsp {
 
     // ---------------- memory.cpp -----------------
 
+    /// Complete voice `n`'s pending note event (trace only, no effect on
+    /// the audio): read its registers as they stand now and push it.
+    fn complete_note(&mut self, n: usize) {
+        let Some(log) = self.write_log.as_mut() else {
+            return;
+        };
+        let Some(mut ev) = log.pending[n].take() else {
+            return;
+        };
+        let r = &self.registers[n * 0x10..n * 0x10 + 8];
+        ev.start_spc_cycles = self.trace_cycles;
+        ev.srcn = r[4];
+        ev.pitch = u16::from(r[2]) | (u16::from(r[3] & 0x3F) << 8);
+        ev.vol_l = r[0] as i8;
+        ev.vol_r = r[1] as i8;
+        ev.adsr1 = r[5];
+        ev.adsr2 = r[6];
+        ev.gain = r[7];
+        log.notes.push(ev);
+    }
+
+    /// Complete every note still waiting for its start (end of the trace
+    /// window) with the registers as they stand now, and put the notes in
+    /// the order of their `KON` writes.
+    pub fn flush_pending_notes(&mut self) {
+        for n in 0..8 {
+            self.complete_note(n);
+        }
+        if let Some(log) = self.write_log.as_mut() {
+            log.notes.sort_by_key(|e| (e.spc_cycles, e.voice));
+        }
+    }
+
     pub const fn read(&self, address: u8) -> u8 {
         self.registers[(address & 0x7F) as usize]
     }
@@ -511,27 +568,41 @@ impl Dsp {
                     self.voices[n].keyon = bit(data, n as u8);
                     self.voices[n]._keylatch = bit(data, n as u8);
                 }
-                if let Some(log) = self.write_log.as_mut() {
+                if self.write_log.is_some() {
                     for n in (0..8usize).filter(|&n| bit(data, n as u8)) {
-                        if log.notes.len() >= log.max_events {
-                            break;
+                        // Keyed again before its start: the first note is
+                        // completed now, so each KON gives one event.
+                        self.complete_note(n);
+                        let (frame, spc_cycles) = (self.trace_frame, self.trace_cycles);
+                        if let Some(log) = self.write_log.as_mut() {
+                            let pending = log.pending.iter().flatten().count();
+                            if log.notes.len() + pending >= log.max_events {
+                                break;
+                            }
+                            log.pending[n] = Some(DspNoteEvent {
+                                frame,
+                                spc_cycles,
+                                start_spc_cycles: spc_cycles,
+                                voice: n as u8,
+                                srcn: 0,
+                                pitch: 0,
+                                vol_l: 0,
+                                vol_r: 0,
+                                adsr1: 0,
+                                adsr2: 0,
+                                gain: 0,
+                            });
                         }
-                        let r = &self.registers[n * 0x10..n * 0x10 + 5];
-                        log.notes.push(DspNoteEvent {
-                            frame: self.trace_frame,
-                            spc_cycles: self.trace_cycles,
-                            voice: n as u8,
-                            srcn: r[4],
-                            pitch: u16::from(r[2]) | (u16::from(r[3] & 0x3F) << 8),
-                            vol_l: r[0] as i8,
-                            vol_r: r[1] as i8,
-                        });
                     }
                 }
             }
             0x5C => {
                 for n in 0..8 {
                     self.voices[n].keyoff = bit(data, n as u8);
+                    if self.voices[n].keyoff {
+                        // Keyed off before its start: completed now.
+                        self.complete_note(n);
+                    }
                 }
             }
             0x6C => {
@@ -849,6 +920,11 @@ impl Dsp {
             self.voices[vi]._envelope = 0;
             self.voices[vi].gaussian_offset = 0;
             self.voices[vi].keyon_delay -= 1;
+            if self.voices[vi].keyon_delay == 0 {
+                // The voice really starts: complete its trace note (no-op
+                // when the trace is off).
+                self.complete_note(vi);
+            }
             if self.voices[vi].keyon_delay & 3 != 0 {
                 self.voices[vi].gaussian_offset = 0x4000;
             }
@@ -1354,6 +1430,127 @@ mod tests {
             }
         }
         assert_eq!(done, 2);
+    }
+
+    /// A traced DSP with voice 0 given a pitch/srcn/volumes/ADSR/GAIN.
+    fn traced_dsp() -> (Dsp, Box<[u8; 0x10000]>) {
+        let mut dsp = Dsp::new();
+        dsp.write_log = Some(DspWriteLog {
+            max_events: 64,
+            ..DspWriteLog::default()
+        });
+        dsp.write(0x04, 0x11); // SRCN
+        dsp.write(0x02, 0x00); // PITCH low (old note)
+        dsp.write(0x03, 0x10);
+        dsp.write(0x00, 0x7F);
+        dsp.write(0x01, 0x80);
+        dsp.write(0x05, 0xFE);
+        dsp.write(0x06, 0xE0);
+        dsp.write(0x07, 0x5A);
+        (
+            dsp,
+            vec![0u8; 0x10000].into_boxed_slice().try_into().unwrap(),
+        )
+    }
+
+    /// Run `n` SPC cycles (pipeline steps), ticking the trace clock.
+    fn run(dsp: &mut Dsp, ram: &mut [u8; 0x10000], n: u32) {
+        for _ in 0..n {
+            dsp.trace_cycles += 1;
+            dsp.step_one(ram);
+        }
+    }
+
+    fn notes(dsp: &mut Dsp) -> Vec<DspNoteEvent> {
+        dsp.flush_pending_notes();
+        dsp.write_log.as_mut().unwrap().notes.clone()
+    }
+
+    #[test]
+    fn note_reads_pitch_written_just_after_kon() {
+        let (mut dsp, mut ram) = traced_dsp();
+        run(&mut dsp, &mut ram, 100);
+        dsp.write(0x4C, 0x01);
+        let kon = dsp.trace_cycles;
+        run(&mut dsp, &mut ram, 10);
+        dsp.write(0x02, 0x34); // PITCH, 10 SPC cycles after KON
+        dsp.write(0x03, 0x02);
+        run(&mut dsp, &mut ram, 32 * 12);
+        let n = notes(&mut dsp);
+        assert_eq!(n.len(), 1);
+        assert_eq!(n[0].pitch, 0x0234, "the new pitch");
+        assert_eq!(n[0].spc_cycles, kon, "spc_cycles stays the KON write");
+        assert!(
+            n[0].start_spc_cycles > kon + 10,
+            "completed at the real start"
+        );
+        assert!(n[0].start_spc_cycles <= kon + 32 * 8);
+        assert_eq!((n[0].srcn, n[0].vol_l, n[0].vol_r), (0x11, 127, -128));
+        assert_eq!((n[0].adsr1, n[0].adsr2, n[0].gain), (0xFE, 0xE0, 0x5A));
+    }
+
+    #[test]
+    fn note_keeps_old_pitch_when_written_after_the_delay() {
+        let (mut dsp, mut ram) = traced_dsp();
+        dsp.write(0x4C, 0x01);
+        run(&mut dsp, &mut ram, 32 * 12); // well past the KON delay
+        dsp.write(0x02, 0x34);
+        dsp.write(0x05, 0x00);
+        run(&mut dsp, &mut ram, 32);
+        let n = notes(&mut dsp);
+        assert_eq!(n.len(), 1);
+        assert_eq!(n[0].pitch, 0x1000, "documented: a late PITCH is not seen");
+        assert_eq!(n[0].adsr1, 0xFE);
+    }
+
+    #[test]
+    fn rekey_or_keyoff_before_start_gives_one_event_per_kon() {
+        let (mut dsp, mut ram) = traced_dsp();
+        dsp.write(0x4C, 0x01);
+        run(&mut dsp, &mut ram, 4);
+        dsp.write(0x02, 0x11); // new pitch before the second KON
+        dsp.write(0x4C, 0x01); // keyed again before the start
+        run(&mut dsp, &mut ram, 4);
+        dsp.write(0x02, 0x33);
+        dsp.write(0x4C, 0x01); // and again; the third gets the pitch below
+        dsp.write(0x02, 0x22);
+        run(&mut dsp, &mut ram, 32 * 12);
+        dsp.write(0x4C, 0x02); // voice 1, keyed off before its start
+        dsp.write(0x5C, 0x02);
+        let n = notes(&mut dsp);
+        assert_eq!(n.len(), 4, "one completed event per KON, none lost");
+        assert_eq!(n[0].pitch & 0xFF, 0x11, "first: registers when re-keyed");
+        assert_eq!(n[1].pitch & 0xFF, 0x33, "second: registers when re-keyed");
+        assert_eq!(n[2].pitch & 0xFF, 0x22, "third: at its real start");
+        assert_eq!(n[3].voice, 1);
+        assert!(n.windows(2).all(|w| w[0].spc_cycles <= w[1].spc_cycles));
+    }
+
+    #[test]
+    fn trace_does_not_change_the_audio() {
+        let mut out = Vec::new();
+        for traced in [false, true] {
+            let (mut dsp, mut ram) = traced_dsp();
+            if !traced {
+                dsp.write_log = None;
+            }
+            for k in 0..6u32 {
+                dsp.write(0x4C, 0x01);
+                for _ in 0..32 * 40 {
+                    dsp.trace_cycles += 1;
+                    if let Some(s) = dsp.step_one(&mut ram) {
+                        out.push((traced, k, s));
+                    }
+                }
+            }
+        }
+        let half = out.len() / 2;
+        assert!(
+            out[..half]
+                .iter()
+                .zip(&out[half..])
+                .all(|(a, b)| a.2 == b.2)
+        );
     }
 
     #[test]

@@ -1,5 +1,5 @@
 //! `luna state --dsp-events notes.jsonl`: one JSON line per voice keyed on,
-//! with the PPU frame number, read from the voice registers at the `KON`.
+//! with the PPU frame number, read from the voice registers when the voice starts.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -157,7 +157,9 @@ fn dsp_events_prints_one_json_line_per_key_on() {
         "\"srcn\":165,",
         "\"pitch\":16161,", // $3F21
         "\"vol_l\":127,",
-        "\"vol_r\":-128}",
+        "\"vol_r\":-128,",
+        "\"start_spc_cycles\":",
+        "\"adsr1\":0,\"adsr2\":0,\"gain\":0}",
     ] {
         assert!(l.contains(field), "{field} in {l}");
     }

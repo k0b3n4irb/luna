@@ -699,9 +699,13 @@ enum Command {
         dsp_trace_max: usize,
         /// Optional DSP note events, JSON lines: one per voice keyed on
         /// by a `KON` (`$4C`) write, with the PPU frame number, the SPC
-        /// cycle and that voice's `srcn`, `pitch` (14 bits), `vol_l` and
-        /// `vol_r` (signed) read at the write. A whole piece of music
-        /// lines up with the picture from one command.
+        /// cycle of the write and that voice's `srcn`, `pitch` (14 bits),
+        /// `vol_l`, `vol_r` (signed), `adsr1`, `adsr2` and `gain`, read
+        /// when the voice really starts (the end of the 5-sample KON delay,
+        /// `start_spc_cycles`), so a `PITCH` written just after the `KON`
+        /// is seen. A `PITCH` written later than that delay is not: use
+        /// `--dsp-trace` for the full register story. A whole piece of
+        /// music lines up with the picture from one command.
         #[arg(long = "dsp-events")]
         dsp_events: Option<PathBuf>,
         /// Cap on captured notes (see `--dsp-events`).

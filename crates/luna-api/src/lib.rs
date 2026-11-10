@@ -5530,6 +5530,7 @@ impl Emulator {
             events: Vec::new(),
             notes: Vec::new(),
             max_events,
+            pending: Default::default(),
         });
         snes.apu_real.dsp.trace_cycles = 0;
         snes.apu_real.dsp.trace_frame = snes.frame_count;
@@ -5546,11 +5547,15 @@ impl Emulator {
     }
 
     /// Drain the notes the DSP trace saw: one per voice bit raised by a
-    /// `KON` (`$4C`) write, with that voice's `SRCN`, `PITCH` and volumes as
-    /// they stood at the write and the PPU frame number (empty if the
-    /// trace is disabled). Enabled by [`Self::enable_dsp_trace`].
+    /// `KON` (`$4C`) write, with that voice's `SRCN`, `PITCH`, volumes,
+    /// `ADSR1`, `ADSR2` and `GAIN` as they stand when the voice really
+    /// starts (the KON delay of the pipeline), the `KON` write's frame and
+    /// cycle and the start cycle (empty if the trace is disabled). Notes
+    /// still waiting for their start are completed with the registers as
+    /// they stand now. Enabled by [`Self::enable_dsp_trace`].
     pub fn take_dsp_notes(&mut self) -> Result<Vec<DspNoteEvent>, ApiError> {
         let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        snes.apu_real.dsp.flush_pending_notes();
         Ok(match snes.apu_real.dsp.write_log.as_mut() {
             Some(log) => std::mem::take(&mut log.notes),
             None => Vec::new(),

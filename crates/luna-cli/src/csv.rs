@@ -362,7 +362,10 @@ pub(crate) fn write_dsp_trace_csv(
 }
 
 /// Write the DSP notes as JSON lines, one per voice keyed on by a `KON`
-/// write: `{"frame","spc_cycles","voice","srcn","pitch","vol_l","vol_r"}`.
+/// write: `{"frame","spc_cycles","voice","srcn","pitch","vol_l","vol_r",
+/// "start_spc_cycles","adsr1","adsr2","gain"}` (the new keys at the end; the
+/// registers are read at the voice's real start, `frame` and `spc_cycles`
+/// are the `KON` write's).
 pub(crate) fn write_dsp_events_jsonl(
     path: &std::path::Path,
     notes: &[luna_api::DspNoteEvent],
@@ -372,8 +375,18 @@ pub(crate) fn write_dsp_events_jsonl(
     for n in notes {
         writeln!(
             f,
-            "{{\"frame\":{},\"spc_cycles\":{},\"voice\":{},\"srcn\":{},\"pitch\":{},\"vol_l\":{},\"vol_r\":{}}}",
-            n.frame, n.spc_cycles, n.voice, n.srcn, n.pitch, n.vol_l, n.vol_r
+            "{{\"frame\":{},\"spc_cycles\":{},\"voice\":{},\"srcn\":{},\"pitch\":{},\"vol_l\":{},\"vol_r\":{},\"start_spc_cycles\":{},\"adsr1\":{},\"adsr2\":{},\"gain\":{}}}",
+            n.frame,
+            n.spc_cycles,
+            n.voice,
+            n.srcn,
+            n.pitch,
+            n.vol_l,
+            n.vol_r,
+            n.start_spc_cycles,
+            n.adsr1,
+            n.adsr2,
+            n.gain
         )?;
     }
     f.flush()
