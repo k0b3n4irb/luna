@@ -170,6 +170,27 @@ fn wake_rom(dir: &Path) -> PathBuf {
     write_rom(dir, &m, &h)
 }
 
+/// A window that holds a real NMI: reset enables the NMI and spins on a flag
+/// that the handler sets (and counts its entries in `$23`); the main line
+/// then turns the NMI off. The window starts at the spin, before `VBlank`.
+fn natural_nmi_rom(dir: &Path) -> PathBuf {
+    let mut m = Asm::new();
+    m.op("reset", &[0x78, 0xA2, 0xFF, 0x9A]); // SEI ; LDX #$FF ; TXS
+    m.op("zero", &[0x64, 0x23, 0x64, 0x30]); // STZ $23 ; STZ $30
+    m.op("enable", &[0xA9, 0x80, 0x8D, 0x00, 0x42]); // NMI on
+    m.label("spin");
+    m.op("spin_lda", &[0xA5, 0x30]); // LDA $30
+    m.back("spin_beq", 0xF0, "spin"); // BEQ spin
+    m.op("off", &[0x9C, 0x00, 0x42]); // STZ $4200
+    m.op("done", &[0x80, 0xFE]); // BRA done
+    let mut h = Asm::at_base(0x8100);
+    h.op("handler", &[0xE6, 0x23]); // INC $23
+    h.op("h_lda", &[0xA9, 0x01]); // LDA #1
+    h.op("h_sta", &[0x85, 0x30]); // STA $30
+    h.op("h_rti", &[0x40]); // RTI
+    write_rom(dir, &m, &h)
+}
+
 fn sweep(rom: &Path, args: &[&str]) -> Output {
     Command::new(luna_bin())
         .arg("race-sweep")
@@ -230,6 +251,10 @@ fn the_window_between_the_load_and_the_store_is_the_race() {
     assert_eq!(out.status.code(), Some(1), "--fail-on-race\n{}", text(&out));
     let v = json(&out);
     assert_eq!(v["schema"], 1);
+    // A window with no interrupt of its own: nothing to report.
+    assert_eq!(v["baseline_interrupts"].as_array().unwrap().len(), 0);
+    assert!(v.get("warnings").is_none(), "{}", text(&out));
+    assert_eq!(v["summary"]["nested"], 0);
     assert_eq!(
         symbols_with(&v, "nmi", "differs"),
         ["clc", "adc", "store"],
@@ -326,7 +351,8 @@ fn a_sweep_where_nothing_was_injected_is_not_green() {
 
 /// (E) The lost wake-up: an NMI between the flag test and the `WAI` leaves
 /// the program waiting for an NMI that already came. The end is never
-/// reached, which is a finding.
+/// reached, which is a finding. The window ends on the very NMI it waits
+/// for, so it holds a real one: `--allow-baseline-interrupt`.
 #[test]
 fn a_lost_wake_up_is_a_trial_that_never_ends() {
     let dir = fresh_dir("wake");
@@ -342,6 +368,7 @@ fn a_lost_wake_up_is_a_trial_that_never_ends() {
             "done",
             "--compare",
             "flag",
+            "--allow-baseline-interrupt",
             "--json",
         ],
     );
@@ -492,4 +519,104 @@ fn the_compare_forms() {
         ],
     );
     assert_eq!(out.status.code(), Some(2), "{}", text(&out));
+}
+
+const NATURAL_ARGS: [&str; 12] = [
+    "--warm-until-pc",
+    "spin",
+    "--from",
+    "spin",
+    "--to",
+    "h_rti",
+    "--until-pc",
+    "done",
+    "--compare",
+    "handled",
+    "--json",
+    "--jobs=1",
+];
+
+/// (I) A real NMI inside the window: every trial would add a second one,
+/// so the sweep is refused with the reason.
+#[test]
+fn a_window_with_a_real_nmi_is_refused() {
+    let dir = fresh_dir("natural_refused");
+    let rom = natural_nmi_rom(&dir);
+    let out = sweep(&rom, &NATURAL_ARGS);
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("real NMI at instruction"), "{err}");
+    assert!(err.contains("--allow-baseline-interrupt"), "{err}");
+    assert!(out.stdout.is_empty(), "{}", text(&out));
+}
+
+/// (J) With `--allow-baseline-interrupt` the addresses of the real handler
+/// are NESTED (not run, not racy), the interrupt is reported with where it
+/// entered and returned, and the report warns about the others.
+#[test]
+fn nested_trials_inside_the_real_handler_are_not_races() {
+    let dir = fresh_dir("natural_allowed");
+    let rom = natural_nmi_rom(&dir);
+    let mut args = NATURAL_ARGS.to_vec();
+    args.push("--allow-baseline-interrupt");
+    let out = sweep(&rom, &args);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    let v = json(&out);
+    let ints = v["baseline_interrupts"].as_array().unwrap();
+    assert_eq!(ints.len(), 1, "{}", text(&out));
+    assert_eq!(ints[0]["kind"], "nmi");
+    let (at, back) = (
+        ints[0]["at_step"].as_u64().unwrap(),
+        ints[0]["returned_at_step"].as_u64().unwrap(),
+    );
+    // Entry, then the 4 instructions of the handler, then the return lands.
+    assert_eq!(back, at + 1 + 4, "{}", text(&out));
+    assert!(at > 100, "the NMI comes at VBlank, after the spin: {at}");
+    assert_eq!(
+        symbols_with(&v, "nmi", "nested"),
+        ["handler", "h_lda", "h_sta", "h_rti"],
+        "{}",
+        text(&out)
+    );
+    assert_eq!(v["summary"]["nested"], 4);
+    // Nothing nested is racy; the injection after the natural NMI stacks a
+    // second one (the real race this window cannot tell from the artifact).
+    let racy = symbols_with(&v, "nmi", "differs");
+    assert!(racy.iter().all(|n| !n.starts_with('h')), "{racy:?}");
+    assert!(v["warnings"][0].as_str().unwrap().contains("NESTED"));
+    let mut t = args.clone();
+    t.retain(|a| *a != "--json");
+    let out = sweep(&rom, &t);
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("WARNING:"), "{s}");
+    assert!(s.contains("NESTED"), "{s}");
+}
+
+/// (K) NESTED does not fail `--fail-on-race`: sweeping the handler alone
+/// finds only nested trials.
+#[test]
+fn nested_does_not_fail_the_gate() {
+    let dir = fresh_dir("natural_gate");
+    let rom = natural_nmi_rom(&dir);
+    let out = sweep(
+        &rom,
+        &[
+            "--warm-until-pc",
+            "spin",
+            "--from",
+            "handler",
+            "--to",
+            "h_rti",
+            "--until-pc",
+            "done",
+            "--compare",
+            "handled",
+            "--allow-baseline-interrupt",
+            "--fail-on-race",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("4 NESTED: not run"), "{s}");
+    assert!(s.contains("0 racy"), "{s}");
 }

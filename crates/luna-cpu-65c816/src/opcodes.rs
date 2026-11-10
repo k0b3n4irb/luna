@@ -152,6 +152,7 @@ impl Cpu {
     /// BRK from an NMI/IRQ in emulation mode.
     fn service_nmi<B: Bus>(&mut self, bus: &mut B) {
         self.interrupts_serviced += 1;
+        self.nmis_serviced += 1;
         self.hardware_interrupt_entry(bus);
         self.service_software_interrupt(
             bus, /* vec_native */ 0xFFEA, /* vec_emulation */ 0xFFFA,

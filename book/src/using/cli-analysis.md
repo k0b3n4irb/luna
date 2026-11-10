@@ -1244,6 +1244,7 @@ does one such run by hand) and compares the outcome with the baseline's.
 | `--until-pc SPEC` [`--until-hit N`], or `--until-frame N` | the end of every run, baseline and trials: the N-th arrival on a routine (counted from the snapshot; standing on it counts), or an absolute frame number. One of the two is required. |
 | `--compare SPEC[:COUNT]` | bytes that must be equal at the end (repeatable): `BANK:OFFSET` in hex or a symbol, `:COUNT` bytes (a symbol defaults to its size in the `.sym`; a bare `BANK:OFFSET` takes its count as `BANK:OFFSET:COUNT`). |
 | `--max-steps N` | instruction budget of the baseline (default 20 000 000); a trial gets four times the baseline plus 100 000, within this. |
+| `--allow-baseline-interrupt` | run although the window takes a real interrupt of its own (see below). Default: refused, exit 2. |
 | `--jobs N` | trials in parallel (0 = one per CPU). The report is the same for any value. |
 | `--json`, `--out PATH` | the report as JSON (schema 1) instead of text; into a file instead of stdout. |
 | `--fail-on-race` | exit 1 when a race was found, or when every injection was refused. |
@@ -1257,7 +1258,7 @@ count, or the flag a wait loop sets. The end is a place the program reaches
 (`--until-pc`) or a frame, never an instruction count, so the extra NMI the
 trial adds does not shift it.
 
-Each trial ends one of five ways:
+Each trial ends one of six ways:
 
 | Verdict | Meaning |
 |---|---|
@@ -1266,6 +1267,25 @@ Each trial ends one of five ways:
 | `not taken` | the injection was refused, with the reason: `NMITIMEN.7` clear for an NMI, the I flag set for an IRQ, a stopped CPU. **Nothing was tested at that address**, and the summary says so; it is never counted as a pass. |
 | `END NOT REACHED` | the end was not reached within the budget: a hang, or a lost wake-up. A finding like `DIFFERS`. |
 | `not reached` | the arrival to inject at never came (the run ended first). |
+| `NESTED` | only with `--allow-baseline-interrupt`: the baseline runs this address inside the handler of an interrupt the window took by itself. A second interrupt there is a nested NMI, which hardware does not give: the trial is not run, is never counted as racy, and does not fail `--fail-on-race`. |
+
+**Pick a window with no interrupt of its own.** The baseline counts the
+interrupts the CPU takes (`baseline_interrupts` in the JSON: kind, the
+instruction index it was taken at, the index after its `RTI`). If the window
+holds one (a natural NMI at line 225 landing inside it), each trial would add
+a second interrupt a few thousand cycles after the first, or nest one inside
+the handler: neither can happen on hardware (one NMI per frame), so every
+difference found would be an artifact. The sweep is therefore refused (exit 2,
+`error: the window contains a real NMI at instruction N of M; …`): warm up at
+a point with no interrupt in the next M instructions, or shorten the window.
+`--allow-baseline-interrupt` runs it anyway: the trials at addresses the
+baseline executes inside the real handler are `NESTED` (not run), and the
+report carries a `WARNING:` line (`warnings` in the JSON) saying the other
+trials, before or after the real interrupt, stack a second one and must be read
+with that in mind. A window that is the wait for an interrupt (the end
+condition is the return of the very NMI it waits for, as in a lost wake-up
+search) holds a real one by construction: use the flag there, and read each
+forced NMI as that one arriving early.
 
 The baseline is run twice from the snapshot before any trial: a run that
 does not reproduce from its snapshot cannot be compared, and the command
@@ -1324,7 +1344,7 @@ bytes you compared, from the state you warmed up to; it does not say the
 bytes you did not compare are right. The MCP tool `race_sweep` takes the
 same options (`from`, `to`, `kinds`, `hit`, `warm_until_pc`, `warm_hit`,
 `warm_frames`, `until_pc`, `until_hit`, `until_frame`, `compare`,
-`max_steps`) and returns the schema-1 report; it sweeps from where the
+`max_steps`, `allow_baseline_interrupt`) and returns the schema-1 report; it sweeps from where the
 session stands (or from the warm-up) and leaves the session at that state.
 `luna-api`: `Emulator::race_sweep` (and `race_sweep_baseline`,
 `race_sweep_trial`, `race_sweep_report` to spread the trials over several

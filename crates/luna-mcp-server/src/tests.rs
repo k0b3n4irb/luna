@@ -2536,6 +2536,7 @@ async fn server_race_sweep_round_trip() {
         until_frame: None,
         compare: vec!["7e:0024".into()],
         max_steps: 100_000,
+        allow_baseline_interrupt: false,
     };
     let r = s
         .race_sweep(Parameters(ask(vec![luna_api::InterruptKind::Nmi])))

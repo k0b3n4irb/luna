@@ -16,6 +16,12 @@ fast-forwarded to (binaries attached by CI). Format inspired by
   NOT REACHED (a hang or lost wake-up). Deterministic for any `--jobs`; exit 1 under `--fail-on-race`;
   the baseline is run twice from its snapshot and refused if it does not reproduce. What a shell
   loop of `--inject-nmi-at` runs did slowly and unreproducibly, from one in-memory snapshot.
+  The baseline counts the interrupts the CPU takes in the window (`baseline_interrupts`: kind,
+  `at_step`, `returned_at_step`): a window holding a real NMI is **refused** (exit 2), since every
+  trial would add a second interrupt the hardware cannot give. `--allow-baseline-interrupt` (MCP
+  `allow_baseline_interrupt`) runs it anyway: the addresses the baseline runs inside the real
+  handler are NESTED (not run, never racy, do not fail `--fail-on-race`) and the report warns about
+  the other trials.
 - GUI *Emulation ▸ ● Record input* also writes the core's audio stream: stopping the recording
   saves `<name>.wav` next to the `.input` script (16-bit stereo, 32 040 Hz, the samples the S-DSP
   produced, before the host device and its pacing). Feed it to `luna audio-check`.

@@ -1542,7 +1542,9 @@ enum Command {
     /// NOT TAKEN (injection refused: NMITIMEN.7 clear, I flag set; never a
     /// pass) or END NOT REACHED (a hang, a lost wake-up). The injected edge
     /// is synthetic, as for `--inject-nmi-at`. Deterministic: the report is
-    /// the same for any `--jobs`.
+    /// the same for any `--jobs`. The window must hold no interrupt of its
+    /// own (a natural NMI): the baseline counts them and the sweep is
+    /// refused unless `--allow-baseline-interrupt` (then NESTED trials).
     ///
     /// Exit 0 = report printed, 1 = with `--fail-on-race`: a race was found
     /// (or every injection was refused), 2 = usage error.
@@ -1597,6 +1599,14 @@ enum Command {
         /// (a trial gets 4x the baseline + 100000, within this).
         #[arg(long = "max-steps", default_value_t = 20_000_000)]
         max_steps: u64,
+        /// Run although the window takes a real interrupt by itself (a
+        /// natural NMI): without it the sweep is refused (exit 2), since
+        /// every trial would add a second interrupt the hardware cannot
+        /// give. With it, the addresses the baseline runs inside the
+        /// handler are NESTED (not run, never a race) and the report
+        /// warns that the other trials stack a second interrupt.
+        #[arg(long = "allow-baseline-interrupt")]
+        allow_baseline_interrupt: bool,
         /// Trials in parallel (0 = one per CPU). Same report for any value.
         #[arg(long, default_value_t = 1)]
         jobs: usize,
@@ -2547,6 +2557,7 @@ fn main() -> ExitCode {
             until_frame,
             compare,
             max_steps,
+            allow_baseline_interrupt,
             jobs,
             json,
             out,
@@ -2569,6 +2580,7 @@ fn main() -> ExitCode {
             until_frame,
             compare: &compare,
             max_steps,
+            allow_baseline_interrupt,
             jobs,
             json,
             out: out.as_deref(),

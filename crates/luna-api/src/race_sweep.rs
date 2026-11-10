@@ -21,7 +21,17 @@
 //! listed); `NotTaken` (the injection was refused: `NMITIMEN.7` clear, `I`
 //! set; never counted as a pass); `NotReached` (the arrival never came);
 //! `EndNotReached` (the end condition was not reached within the budget: a
-//! hang or a lost wake-up, a finding in itself).
+//! hang or a lost wake-up, a finding in itself); `Nested` (only with
+//! `allow_baseline_interrupt`: the address runs, in the baseline, inside a
+//! handler of an interrupt the window took by itself, so forcing another
+//! one there nests two interrupts, which hardware cannot do; not run, never
+//! racy).
+//!
+//! **The window must be free of real interrupts.** The baseline counts the
+//! interrupts the CPU takes (and where each handler returns). One in the
+//! window makes every trial stack a second interrupt within a few thousand
+//! cycles (or nest one in the handler): the sweep refuses, unless
+//! `allow_baseline_interrupt` is set.
 //!
 //! What it proves and what it does not: it forces the interrupt on the
 //! *instruction boundaries* of the routine, which is where a real NMI can
@@ -31,7 +41,7 @@
 //! invariants you compared, from this warm state; the end condition is the
 //! one place a legitimate extra interrupt must not move.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 use serde::{Deserialize, Serialize};
@@ -93,6 +103,10 @@ pub struct RaceSweepSpec {
     pub compare: Vec<RaceCompare>,
     /// Instruction budget of the baseline (and the cap of a trial's).
     pub max_steps: u64,
+    /// Run although the baseline window takes a real interrupt (the trials
+    /// inside its handler are `nested`, the others carry a warning).
+    #[serde(default)]
+    pub allow_baseline_interrupt: bool,
 }
 
 /// Where the sweep starts.
@@ -132,6 +146,22 @@ pub struct RaceSweepRequest {
     pub compare: Vec<String>,
     /// Instruction budget.
     pub max_steps: u64,
+    /// See [`RaceSweepSpec::allow_baseline_interrupt`].
+    pub allow_baseline_interrupt: bool,
+}
+
+/// An interrupt the baseline run took by itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+pub struct BaselineInterrupt {
+    /// NMI or IRQ.
+    pub kind: InterruptKind,
+    /// Index (from 0, in the window's instruction count) of the step that
+    /// took the interrupt.
+    pub at_step: u64,
+    /// Index of the first step after its `RTI` (the handler's end); absent
+    /// when the window ended inside the handler.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub returned_at_step: Option<u64>,
 }
 
 /// What the unperturbed run gave, and the snapshot every trial restores.
@@ -147,6 +177,11 @@ pub struct RaceBaseline {
     pub trial_budget: u64,
     /// The addresses to sweep (ascending).
     pub addresses: Vec<u32>,
+    /// The interrupts the baseline took by itself, in order.
+    pub interrupts: Vec<BaselineInterrupt>,
+    /// Swept addresses whose injection arrival runs inside a handler of one
+    /// of `interrupts`.
+    pub nested: BTreeSet<u32>,
 }
 
 impl RaceBaseline {
@@ -175,6 +210,9 @@ pub enum RaceVerdict {
     NotReached,
     /// The end condition was not reached within the budget.
     EndNotReached,
+    /// The address runs inside a handler of a real interrupt of the
+    /// baseline: not run (an injection there is not hardware).
+    Nested,
 }
 
 impl RaceVerdict {
@@ -187,6 +225,7 @@ impl RaceVerdict {
             Self::NotTaken => "not taken",
             Self::NotReached => "not reached",
             Self::EndNotReached => "END NOT REACHED",
+            Self::Nested => "NESTED",
         }
     }
 }
@@ -266,6 +305,9 @@ pub struct RaceSummary {
     pub not_reached: usize,
     /// Trials whose end was not reached.
     pub end_not_reached: usize,
+    /// Trials not run: the address is inside a handler of a real interrupt
+    /// of the baseline. Not a pass, not a race.
+    pub nested: usize,
     /// Addresses where at least one trial `differs` or lost its end.
     pub racy_addresses: usize,
 }
@@ -291,6 +333,11 @@ pub struct RaceSweepReport {
     pub baseline_steps: u64,
     /// Instructions a trial could take.
     pub trial_budget: u64,
+    /// The interrupts the baseline took by itself (empty for a sound sweep).
+    pub baseline_interrupts: Vec<BaselineInterrupt>,
+    /// What to distrust in this report (empty for a sound sweep).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
     /// The figures.
     pub summary: RaceSummary,
     /// Every trial, by address then kind.
@@ -345,8 +392,53 @@ struct LegState {
 struct Census {
     from: u32,
     to: u32,
+    /// Injection arrival: the one whose handler depth is noted.
+    hit: u64,
     /// Folded address -> (arrivals, the address as first executed).
     arrivals: BTreeMap<u32, (u64, u32)>,
+    /// Folded addresses whose `hit`-th arrival ran inside a handler.
+    nested: BTreeSet<u32>,
+    /// Interrupts taken, in order.
+    interrupts: Vec<BaselineInterrupt>,
+    /// `interrupts_serviced` at the previous step, once known.
+    serviced: Option<u64>,
+    /// `nmis_serviced` at the previous step: which kind a new entry was.
+    nmis: u64,
+    /// Open handlers: index in `interrupts` and the stack pointer right
+    /// after the entry (the `RTI` lifts it by 3 or 4).
+    open: Vec<(usize, u16)>,
+}
+
+impl Census {
+    /// Note the interrupts the CPU took since the previous step, and the
+    /// handlers it left. `step` is the number of instructions done.
+    fn observe(&mut self, snes: &luna_core::Snes, step: u64) {
+        let cpu = &snes.cpu;
+        while let Some(&(i, sp)) = self.open.last() {
+            if cpu.sp >= sp.wrapping_add(3) && cpu.sp.wrapping_sub(sp) < 0x100 {
+                self.interrupts[i].returned_at_step = Some(step);
+                self.open.pop();
+            } else {
+                break;
+            }
+        }
+        if let Some(prev) = self.serviced
+            && cpu.interrupts_serviced != prev
+        {
+            self.interrupts.push(BaselineInterrupt {
+                kind: if cpu.nmis_serviced == self.nmis {
+                    InterruptKind::Irq
+                } else {
+                    InterruptKind::Nmi
+                },
+                at_step: step.saturating_sub(1),
+                returned_at_step: None,
+            });
+            self.open.push((self.interrupts.len() - 1, cpu.sp));
+        }
+        self.serviced = Some(cpu.interrupts_serviced);
+        self.nmis = cpu.nmis_serviced;
+    }
 }
 
 /// An address with its bank-bit-7 mirror folded (not for WRAM nor `ExHiROM`).
@@ -430,6 +522,7 @@ impl Emulator {
             end,
             compare,
             max_steps: req.max_steps,
+            allow_baseline_interrupt: req.allow_baseline_interrupt,
         })
     }
 
@@ -485,7 +578,10 @@ impl Emulator {
             false,
             budget,
             None,
-            |snes, _| {
+            |snes, step| {
+                if let Some(c) = census.as_deref_mut() {
+                    c.observe(snes, step);
+                }
                 if let RaceEnd::Frame { frame } = end
                     && snes.frame_count >= *frame
                 {
@@ -501,7 +597,11 @@ impl Emulator {
                 if let Some(c) = census.as_deref_mut() {
                     let k = fold(cur, mirrored);
                     if (c.from..=c.to).contains(&k) {
-                        c.arrivals.entry(k).or_insert((0, cur)).0 += 1;
+                        let n = &mut c.arrivals.entry(k).or_insert((0, cur)).0;
+                        *n += 1;
+                        if *n == c.hit && !c.open.is_empty() {
+                            c.nested.insert(k);
+                        }
                     }
                 }
                 if let Some((addr, hit)) = st.inject
@@ -581,7 +681,13 @@ impl Emulator {
         let mut census = Census {
             from: fold(spec.from, mirrored),
             to: fold(spec.to, mirrored),
+            hit: spec.hit,
             arrivals: BTreeMap::new(),
+            nested: BTreeSet::new(),
+            interrupts: Vec::new(),
+            serviced: None,
+            nmis: 0,
+            open: Vec::new(),
         };
         let lost = |steps: u64| {
             ApiError::BadArg(format!(
@@ -598,6 +704,19 @@ impl Emulator {
         if leg != Leg::End {
             return Err(lost(spec.max_steps));
         }
+        if !census.interrupts.is_empty() && !spec.allow_baseline_interrupt {
+            let first = &census.interrupts[0];
+            return Err(ApiError::BadArg(format!(
+                "the window contains a real {} at instruction {} of {steps}; every trial \
+                 would add a second interrupt that the hardware cannot give (or nest one \
+                 inside its handler): pick a warm point with no interrupt in the next \
+                 {steps} instructions, or --allow-baseline-interrupt \
+                 ({} interrupt(s) in the window)",
+                first.kind.name(),
+                first.at_step + 1,
+                census.interrupts.len()
+            )));
+        }
         let values = self.race_read(&spec.compare)?;
         // The snapshot must reproduce the run, or no trial means anything.
         self.load_state(&snapshot)?;
@@ -612,6 +731,11 @@ impl Emulator {
             ));
         }
         self.load_state(&snapshot)?;
+        let nested = census
+            .nested
+            .iter()
+            .filter_map(|k| census.arrivals.get(k).map(|&(_, first)| first))
+            .collect();
         let addresses = census
             .arrivals
             .into_iter()
@@ -626,6 +750,8 @@ impl Emulator {
                 .max_steps
                 .min(steps.saturating_mul(4).saturating_add(100_000)),
             addresses,
+            interrupts: census.interrupts,
+            nested,
         })
     }
 
@@ -649,6 +775,14 @@ impl Emulator {
             diffs: Vec::new(),
             steps: 0,
         };
+        if base.nested.contains(&address) {
+            trial.verdict = RaceVerdict::Nested;
+            trial.reason = Some(
+                "injection inside a handler of a real interrupt of the baseline: not hardware"
+                    .to_string(),
+            );
+            return Ok(trial);
+        }
         let mut st = LegState {
             inject: Some((address, spec.hit)),
             ..LegState::default()
@@ -740,6 +874,7 @@ impl Emulator {
             not_taken: count(RaceVerdict::NotTaken),
             not_reached: count(RaceVerdict::NotReached),
             end_not_reached: count(RaceVerdict::EndNotReached),
+            nested: count(RaceVerdict::Nested),
             racy_addresses: racy.len(),
         };
         RaceSweepReport {
@@ -774,6 +909,24 @@ impl Emulator {
             },
             baseline_steps: base.steps,
             trial_budget: base.trial_budget,
+            warnings: base
+                .interrupts
+                .first()
+                .map(|first| {
+                    vec![format!(
+                        "the baseline window took {} real interrupt(s) (first: {} at instruction \
+                         {} of {}): the trials outside its handler stack a second interrupt \
+                         within a few thousand cycles, which hardware cannot do; the {} trial(s) \
+                         inside the handler are NESTED and not run",
+                        base.interrupts.len(),
+                        first.kind.name(),
+                        first.at_step + 1,
+                        base.steps,
+                        summary.nested
+                    )]
+                })
+                .unwrap_or_default(),
+            baseline_interrupts: base.interrupts.clone(),
             summary,
             trials,
         }
@@ -826,6 +979,9 @@ impl RaceSweepReport {
             self.hit,
             self.baseline_steps
         );
+        for w in &self.warnings {
+            let _ = writeln!(s, "  WARNING: {w}");
+        }
         for c in &self.compare {
             let _ = writeln!(
                 s,
@@ -894,6 +1050,9 @@ impl RaceSweepReport {
             m.differs,
             m.end_not_reached
         );
+        if m.nested > 0 {
+            let _ = write!(s, ", {} NESTED: not run", m.nested);
+        }
         if m.not_taken > 0 {
             let _ = write!(s, ", {} NOT TAKEN: not tested", m.not_taken);
         }

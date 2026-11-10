@@ -448,6 +448,11 @@ pub struct RaceSweepParams {
     /// Instruction budget of the baseline (default 20 000 000).
     #[serde(default = "default_race_steps")]
     pub max_steps: u64,
+    /// Run although the baseline window takes a real interrupt (default
+    /// false: refused, since every trial would add a second one). The
+    /// addresses inside its handler are then `nested`.
+    #[serde(default)]
+    pub allow_baseline_interrupt: bool,
 }
 
 const fn default_race_steps() -> u64 {
@@ -2995,7 +3000,11 @@ impl LunaServer {
                                 run to the same end and compare. Each trial is `identical`, \
                                 `differs` (the bytes listed), `not_taken` (NMITIMEN.7 clear / \
                                 I flag set: never a pass), `not_reached` or `end_not_reached` \
-                                (a hang or lost wake-up). Returns the schema-1 report with \
+                                (a hang or lost wake-up). The window must hold no real \
+                                interrupt of its own: the baseline counts them \
+                                (`baseline_interrupts`) and the call is refused unless \
+                                `allow_baseline_interrupt`, which makes the addresses inside \
+                                the real handler `nested` (not run, never racy). Returns the schema-1 report with \
                                 `summary.racy_addresses`. The synthetic edge is not hardware. \
                                 The session is left at the warmed-up state."
     )]
@@ -3030,6 +3039,7 @@ impl LunaServer {
                     until_frame: p.until_frame,
                     compare: p.compare,
                     max_steps: p.max_steps,
+                    allow_baseline_interrupt: p.allow_baseline_interrupt,
                 })
                 .map_err(|e| api_err_to_mcp(&e))?;
             em.race_sweep_warm(&warm).map_err(|e| api_err_to_mcp(&e))?;

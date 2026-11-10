@@ -27,6 +27,7 @@ pub(crate) struct RaceSweepOpts<'a> {
     pub until_frame: Option<u64>,
     pub compare: &'a [String],
     pub max_steps: u64,
+    pub allow_baseline_interrupt: bool,
     pub jobs: usize,
     pub json: bool,
     pub out: Option<&'a Path>,
@@ -184,6 +185,7 @@ pub(crate) fn run_race_sweep(o: &RaceSweepOpts) -> ExitCode {
         until_frame: o.until_frame,
         compare: o.compare.to_vec(),
         max_steps: o.max_steps,
+        allow_baseline_interrupt: o.allow_baseline_interrupt,
     };
     let spec = match em.race_sweep_spec(&request) {
         Ok(s) => s,
