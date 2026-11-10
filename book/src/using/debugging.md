@@ -187,7 +187,9 @@ A few workflow helpers in the **File** and **Emulation** menus:
   replayable `frame:mask` script. A red **⏺ REC** badge shows while recording;
   stopping writes a `.input` file to `~/.local/luna/recordings/`
   (`%APPDATA%\luna\recordings\` on Windows) that replays
-  with `luna state --input @<file>`.
+  with `luna state --input @<file>`. It also writes `<name>.wav` beside it: the
+  audio the core produced during the take (16-bit stereo, 32 040 Hz, before the
+  host device and the GUI's resampling), ready for `luna audio-check`.
 - **Reload ROM** (*File ▸ Reload ROM*) + **Auto-reload on file change**: reboot
   the current ROM from disk in place — turn on auto-reload and an external SDK
   build (a rewritten `.sfc`) restarts the running game with no reopen.

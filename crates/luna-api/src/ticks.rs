@@ -1179,8 +1179,9 @@ impl Recorder<'_> {
     }
 }
 
-/// A 16-bit stereo PCM WAV at `hz`.
-fn write_wav(path: &Path, samples: &[(i16, i16)], hz: u32) -> std::io::Result<()> {
+/// Write a 16-bit stereo PCM WAV at `hz` (the GUI's "Record input" uses it
+/// for the core's audio stream).
+pub fn write_wav(path: &Path, samples: &[(i16, i16)], hz: u32) -> std::io::Result<()> {
     let data_size = (samples.len() * 4) as u32;
     let mut b = Vec::with_capacity(44 + samples.len() * 4);
     b.extend_from_slice(b"RIFF");

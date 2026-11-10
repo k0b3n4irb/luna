@@ -2422,6 +2422,14 @@ impl LunaApp {
             let entries = em.take_input_capture();
             drop(guard);
             self.recording_input = false;
+            self.emu_shared.audio_tap_on.store(false, Ordering::Release);
+            let audio = self
+                .emu_shared
+                .audio_tap
+                .lock()
+                .ok()
+                .and_then(|mut g| g.take())
+                .unwrap_or_default();
             let script_p1 = luna_api::input_capture_to_script(&entries, 0);
             let script_p2 = luna_api::input_capture_to_script(&entries, 1);
             let base = self.rom_title.as_deref().unwrap_or("luna");
@@ -2463,6 +2471,17 @@ impl LunaApp {
                         path.display(),
                     );
                     let shown = path.file_name().and_then(|n| n.to_str()).unwrap_or("?");
+                    // The core's audio stream beside the script: same stem,
+                    // `.wav`, for `luna audio-check`.
+                    let wav = path.with_extension("wav");
+                    match luna_api::write_wav(&wav, &audio, luna_api::SAMPLE_RATE_HZ) {
+                        Ok(()) => eprintln!(
+                            "luna-gui: audio recording saved ({} samples) → {}",
+                            audio.len(),
+                            wav.display()
+                        ),
+                        Err(e) => eprintln!("luna-gui: audio recording save failed: {e}"),
+                    }
                     self.input_record_status = Some(format!("\u{23FA} saved {shown}"));
                 }
                 Err(e) => {
@@ -2473,6 +2492,10 @@ impl LunaApp {
         } else {
             em.start_input_capture();
             drop(guard);
+            if let Ok(mut g) = self.emu_shared.audio_tap.lock() {
+                *g = Some(Vec::new());
+            }
+            self.emu_shared.audio_tap_on.store(true, Ordering::Release);
             self.recording_input = true;
             self.input_record_status = None;
             eprintln!("luna-gui: input recording started");

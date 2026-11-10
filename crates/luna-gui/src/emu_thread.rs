@@ -110,9 +110,27 @@ pub(crate) struct EmuShared {
     /// PPU frame number of the last published picture: the NTSC video
     /// filter's burst phase follows its parity.
     pub frame: AtomicU64,
+    /// Tap on the core's audio stream (before the cpal ring): `Some` while
+    /// the GUI's "Record input" is on, so the take is the exact stream the
+    /// core produced, whatever the host device or its pacing did.
+    pub audio_tap: Mutex<Option<Vec<(i16, i16)>>>,
+    /// Mirrors `audio_tap.is_some()`, so the hot path takes no lock when off.
+    pub audio_tap_on: AtomicBool,
 }
 
 impl EmuShared {
+    /// Append `samples` to the recording tap, if one is on.
+    pub(crate) fn tap_audio(&self, samples: &[(i16, i16)]) {
+        if samples.is_empty() || !self.audio_tap_on.load(Ordering::Relaxed) {
+            return;
+        }
+        if let Ok(mut g) = self.audio_tap.lock()
+            && let Some(v) = g.as_mut()
+        {
+            v.extend_from_slice(samples);
+        }
+    }
+
     pub(crate) const fn new() -> Self {
         Self {
             shutdown: AtomicBool::new(false),
@@ -130,6 +148,8 @@ impl EmuShared {
             audio_swap_pending: AtomicBool::new(false),
             fps_tenths: AtomicU32::new(0),
             frame: AtomicU64::new(0),
+            audio_tap: Mutex::new(None),
+            audio_tap_on: AtomicBool::new(false),
         }
     }
 
@@ -420,6 +440,7 @@ fn run(
                 let free = producer.vacant_len();
                 let samples = em.drain_audio(free).unwrap_or_default();
                 let pushed = samples.len() as u64;
+                shared.tap_audio(&samples);
                 for s in samples {
                     let _ = producer.try_push(s);
                 }
@@ -433,7 +454,8 @@ fn run(
                 }
                 (pushed, full)
             } else {
-                let _ = em.drain_audio(usize::MAX);
+                let samples = em.drain_audio(usize::MAX).unwrap_or_default();
+                shared.tap_audio(&samples);
                 (0, false)
             };
 
@@ -579,5 +601,24 @@ mod fps_tests {
         assert_eq!(fps_tenths(50, Duration::from_secs(1)), 500);
         assert_eq!(fps_tenths(0, Duration::from_secs(1)), 0);
         assert_eq!(fps_tenths(60, Duration::ZERO), 0);
+    }
+}
+
+#[cfg(test)]
+mod audio_tap_tests {
+    use super::*;
+
+    #[test]
+    fn tap_collects_only_while_on() {
+        let shared = EmuShared::new();
+        shared.tap_audio(&[(1, 2)]);
+        assert!(shared.audio_tap.lock().unwrap().is_none());
+        *shared.audio_tap.lock().unwrap() = Some(Vec::new());
+        shared.audio_tap_on.store(true, Ordering::Release);
+        shared.tap_audio(&[(1, 2), (3, 4)]);
+        shared.audio_tap_on.store(false, Ordering::Release);
+        shared.tap_audio(&[(5, 6)]);
+        let got = shared.audio_tap.lock().unwrap().take().unwrap();
+        assert_eq!(got, vec![(1, 2), (3, 4)]);
     }
 }

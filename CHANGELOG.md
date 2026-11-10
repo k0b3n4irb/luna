@@ -7,6 +7,9 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ## [Unreleased]
 
+- GUI *Emulation ▸ ● Record input* also writes the core's audio stream: stopping the recording
+  saves `<name>.wav` next to the `.input` script (16-bit stereo, 32 040 Hz, the samples the S-DSP
+  produced, before the host device and its pacing). Feed it to `luna audio-check`.
 - `state --dsp-events` (and `take_dsp_notes`) read a note's `srcn`, `pitch` and volumes when the
   voice really starts (the end of the 5-sample KON delay) instead of at the `KON` write: a driver
   that writes `PITCH` a few cycles after `KON` no longer gives the previous note's pitch. New keys

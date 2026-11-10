@@ -111,7 +111,7 @@ pub use power_on::parse_power_on;
 pub use ticks::{
     TICK_RECORD_VERSION, TickInput, TickInputTable, TickOutcome, TickPoint, TickPoke, TickPokeOn,
     TickRecordOptions, TickShots, TickSpec, TickStart, TickZone, check_tick_condition,
-    tick_record_schema,
+    tick_record_schema, write_wav,
 };
 pub use ticks_compare::{
     CompareEnd, CompareOptions, CompareSide, FirstDivergence, TickComparison, UnpairedTick,
