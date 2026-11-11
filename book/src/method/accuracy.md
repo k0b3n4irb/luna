@@ -33,15 +33,17 @@ below what can be observed, **A−** a faithful port with named residuals
 and no known effect on a game, **B+** correct on everything tested with
 corners not yet audited. No subsystem holds an **A** or **A−** while its gap
 document carries an open row: the APU after `STOP`, the SA-1 `$2202`
-placeholder and the open DMA/HDMA audit rows are why those four rows are
-**B+**.
+placeholder and the open DMA/HDMA audit rows are why those rows are
+**B+**. The CPU, SPC700, S-DSP and PPU are also held at **B+** until a
+hardware reference judges them: their reference data are software models or
+emulator captures, not a console.
 
 | Subsystem | Grade | In this guide |
 |---|:---:|---|
 | CPU 65c816 | **B+** | [The CPUs](../internals/cpus.md#65c816--the-main-cpu) |
 | SPC700 | **B+** | [The CPUs](../internals/cpus.md#spc700--the-audio-cpu) |
 | S-DSP (audio) | **B+** | [The APU](../internals/apu.md) |
-| PPU | **A** | [The PPU](../internals/ppu.md) |
+| PPU | **B+** | [The PPU](../internals/ppu.md) |
 | DMA / HDMA | **B+** | [Memory, DMA & the bus](../internals/memory-dma-bus.md#dma--hdma) |
 | SA-1 | **B+** | [SA-1](../internals/coprocessors-sa1.md) |
 | Super FX (GSU) | **A−** | [Super FX](../internals/coprocessors-superfx.md) |

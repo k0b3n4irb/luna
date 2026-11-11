@@ -7,6 +7,7 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ## [Unreleased]
 
+- docs: the PPU grade reads B+ (was A) until a hardware reference judges it; "pixel-exact" now says it agrees with the corpus reference PNGs, which are emulator captures of unverified provenance, and the open findings (`color_hicolor_1792` vs Mesen2 and ares, per-byte CGRAM gate, three unexplained PNG exceptions) are listed in the scorecard row.
 - `luna race-sweep ROM --from SPEC --to SPEC --until-pc SPEC|--until-frame N --compare SPEC[:COUNT]`
   (`--kind nmi|irq|both`, `--hit`, `--warm-until-pc` / `--warm-hit` / `--warm-frames`, `--until-hit`,
   `--max-steps`, `--jobs`, `--json`, `--out`, `--fail-on-race`), MCP `race_sweep`, `luna-api`

@@ -7,8 +7,8 @@ Every rule below describes hardware-accurate behaviour.
 |---|---|
 | **On the console** | two chips (S-PPU1, S-PPU2): four background layers, 128 sprites, two windows, colour math, eight background modes |
 | **In luna** | `crates/luna-ppu/src/` (`ppu.rs` registers and latches, `renderer.rs` the per-line compositor, `tile.rs`, `memory.rs`) |
-| **Proven by** | sixteen corpus ROMs pixel-exact against hardware reference pictures (`crates/luna-core/tests/snes_test_roms.rs`) |
-| **Grade** | **A** (scorecard: *PPU*) |
+| **Proven by** | sixteen corpus ROMs pixel-exact against their reference PNGs (emulator captures of unverified provenance, not a console) (`crates/luna-core/tests/snes_test_roms.rs`) |
+| **Grade** | **B+** (scorecard: *PPU*), held until a hardware reference judges it |
 | **Open gaps** | [`docs/luna_bg_gaps.md`](https://github.com/k0b3n4irb/luna/blob/main/docs/luna_bg_gaps.md) (backgrounds), [`docs/luna_obj_gaps.md`](https://github.com/k0b3n4irb/luna/blob/main/docs/luna_obj_gaps.md) (sprites) |
 | **Reference** | [`docs/ppu_compositor_reference.md`](https://github.com/k0b3n4irb/luna/blob/main/docs/ppu_compositor_reference.md), built from [`docs/ares_ppu_notes.md`](https://github.com/k0b3n4irb/luna/blob/main/docs/ares_ppu_notes.md) and [`docs/mesen2_ppu_notes.md`](https://github.com/k0b3n4irb/luna/blob/main/docs/mesen2_ppu_notes.md) |
 

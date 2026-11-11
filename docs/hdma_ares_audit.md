@@ -99,7 +99,7 @@ Rows #1-#12 and #14 are ✅/🔧. What remains — no known game impact:
 > whole-line granularity. Every June symptom below was the OLD origin's
 > artifact and is now gone — HiColor64, RedSpace9Bit, Mode7HDMA,
 > Perspective, WindowHDMA, Rings and 10 more corpus tests are
-> **pixel-exact vs their hardware reference PNGs** (36/42 improved).
+> **pixel-exact vs their reference PNGs** (emulator captures of unverified provenance, `test_corpora.md` §2; 36/42 improved).
 > A DMA B-bus write that lands mid-line also partial-flushes the
 > in-progress row with the pre-write state (the CPU-path G6 flush,
 > mirrored in `DmaBusView::write_b`). The suspected residual (per-BYTE
