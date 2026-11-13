@@ -569,8 +569,9 @@ fn profile_gives_the_cost_of_each_frame_and_gates_on_it() {
     assert_eq!(rows.len(), 12);
     assert_eq!(rows[0][0], 2);
     for r in &rows {
-        // frame,active,idle,cpu,dma,hdma,refresh,total,nmi,lag
+        // frame,active,idle,cpu,dma,hdma,refresh,total,nmi,lag,refresh_in_wai
         assert_eq!(r[1] + r[2] + r[5] + r[6], r[7], "{r:?}");
+        assert!(r[10] <= r[6], "{r:?}");
         assert_eq!(r[1], r[3] + r[4], "{r:?}");
         assert_eq!(r[8], 1, "{r:?}");
         // A frame whose NMI found the CPU working has no idle time

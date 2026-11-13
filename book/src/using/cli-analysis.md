@@ -336,9 +336,10 @@ luna profile [OPTIONS] <ROM>
 Where the time goes, measured rather than estimated: every step credits
 its master cycles — bus + internal cycles **plus the DMA / HDMA / refresh
 stalls charged during it** — to the instruction's address, and the report
-folds those onto the nearest `.sym` label at or below the PC (FastROM
-mirror aware: a `00:` label catches code running in `$80:`, a `c0:`
-HiROM label matches bank `$C0`). PCs no label covers fold onto their
+folds those onto the nearest `.sym` label at or below the PC (mirror
+aware, by the cartridge's own mapping: a `00:` label catches code running
+in `$80:`, a `c0:` HiROM label matches bank `$02`, and a 4 MB LoROM's `$82`
+never folds onto a `c2:` table, a different ROM bank there). PCs no label covers fold onto their
 256-byte page. Rows come heaviest first; `idle%` is the share spent
 parked in `WAI` / `STP` under that label.
 
@@ -355,8 +356,8 @@ parked in `WAI` / `STP` under that label.
 | `--poke-at <SYMBOL>`, `--poke-hit <N>`, `--poke <NAME=HEX>` | — | Write bytes into memory when execution reaches a routine, at its N-th arrival counted from power-on, before its first instruction: the grammar and the meaning of [`luna state --poke-at`](cli-run-state.md#stopping-on-a-routine-not-on-a-frame), repeatable the same way (see below). An arrival the run never reaches is an error, exit 1. |
 | `--sym <PATH>` | auto `<rom>.sym` | Labels to fold onto. |
 | `--top <N>` | `25` | Rows printed (the JSON has them all). |
-| `--out <PATH>` | — | JSON report (`-` = stdout after the table): `{rom, from_frame, end_frame, total_mclk, instructions, frames, entries: [{symbol, addr, instructions, mclk, idle_mclk, pct, pcs, per_frame: {max, max_frame, mean, frames} \| null}], budgets: [{symbol, limit, max, max_frame, ok}], frame_series: [{frame, active_mclk, idle_mclk, cpu_mclk, dma_mclk, hdma_mclk, refresh_mclk, total_mclk, nmi, lag}], worst_frames: [{…the same fields, entries: [{symbol, addr, mclk}]}], frame_summary: {frames, active_mean, active_max, active_max_frame, total_mean, lag_frames, lag_run, lag_run_frame, lag_runs: [{frame, length}], gates: [{gate, limit, value, frame, ok}]}}`. `per_frame` is the row's master cycles per **completed** PPU frame in the window: `max` (and the frame that paid it), `mean` over every completed frame (a frame the row did not run in counts 0), `frames` it ran in; `null` when no frame completed while it ran. The trailing partial frame is never counted. |
-| `--frames-out <PATH>` | — | The window **frame by frame**, as CSV: `frame,active_mclk,idle_mclk,cpu_mclk,dma_mclk,hdma_mclk,refresh_mclk,total_mclk,nmi,lag`, one row per completed frame. The same rows are `frame_series` in `--out`. See *Frame by frame* below. |
+| `--out <PATH>` | — | JSON report (`-` = stdout after the table): `{rom, from_frame, end_frame, total_mclk, instructions, frames, entries: [{symbol, addr, instructions, mclk, idle_mclk, pct, pcs, per_frame: {max, max_frame, mean, frames} \| null}], budgets: [{symbol, limit, max, max_frame, ok}], frame_series: [{frame, active_mclk, idle_mclk, cpu_mclk, dma_mclk, hdma_mclk, refresh_mclk, refresh_in_wai_mclk, total_mclk, nmi, lag}], worst_frames: [{…the same fields, entries: [{symbol, addr, mclk}]}], frame_summary: {frames, active_mean, active_max, active_max_frame, total_mean, lag_frames, lag_run, lag_run_frame, lag_runs: [{frame, length}], gates: [{gate, limit, value, frame, ok}]}}`. `per_frame` is the row's master cycles per **completed** PPU frame in the window: `max` (and the frame that paid it), `mean` over every completed frame (a frame the row did not run in counts 0), `frames` it ran in; `null` when no frame completed while it ran. The trailing partial frame is never counted. |
+| `--frames-out <PATH>` | — | The window **frame by frame**, as CSV: `frame,active_mclk,idle_mclk,cpu_mclk,dma_mclk,hdma_mclk,refresh_mclk,total_mclk,nmi,lag,refresh_in_wai_mclk`, one row per completed frame. The same rows are `frame_series` in `--out`. See *Frame by frame* below. |
 | `--worst <N>` | `0` | Print the per-symbol table of the `N` heaviest frames (by `active_mclk`); they are `worst_frames` in `--out`. |
 | `--max-frame-mclk <N>` | — | Gate: no completed frame may use more than `N` active master cycles, else **exit 1**. |
 | `--max-lag-frames <N>` | — | Gate: at most `N` lag frames in the window, else **exit 1**. |
@@ -465,7 +466,8 @@ row:
 | `active_mclk` | What the program used: `cpu_mclk` (instructions) + `dma_mclk` (the DMA it started). |
 | `idle_mclk` | CPU parked in `WAI` (or `STP`): the frame's headroom. |
 | `hdma_mclk`, `refresh_mclk` | HDMA stalls, and the DRAM refresh (40 master clocks a line). |
-| `total_mclk` | The four above added up: the frame's length (357 368 on NTSC, give or take the short line). |
+| `refresh_in_wai_mclk` | The part of `refresh_mclk` that fell while the CPU was parked in `WAI` / `STP`: the refresh halts a parked CPU too. `idle_mclk + refresh_in_wai_mclk` is the time the CPU spent parked, the headroom a frame gauge wants (a ROM that waits until line L then parks reads `(262 − 225 + L) / 262` of the frame there); `idle_mclk` alone keeps its meaning. Last column of the CSV. |
+| `total_mclk` | `active`, `idle`, `hdma` and `refresh` added up: the frame's length (357 368 on NTSC, give or take the short line). |
 | `nmi` | The NMI was raised in this frame. |
 | `lag` | A **lag frame**, i.e. a **full frame**: the NMI came while the CPU was executing, not parked in `WAI` — the main loop had not finished its frame. It is a property of one frame, **not the duration of a game tick** (see the trap below). |
 
@@ -682,7 +684,13 @@ FastROM mirrors and all): fold the mirrors yourself if your listing is in
 in its own bank — and, for a PC in ROM, in the banks that mirror it: an
 SDK that assembles under `.BASE $80` labels its code `80:xxxx`, and the
 reset and interrupt vectors run it through bank `$00`, so `$00:8248` folds
-onto `80:8248 NmiEntry`. A RAM label (`$7E`/`$7F`, or below `$8000` in the
+onto `80:8248 NmiEntry`. "Mirror" means the cartridge shows the same ROM
+byte there, read from its mapper: in a HiROM `$02`, `$42`, `$82` and `$C2`
+are one bank, while in a LoROM over 2 MB `$82` (ROM bank 2) and `$C2` (ROM
+bank 66) are not, so a table labelled `c2:a140` never takes a PC of
+`$82:a1f6`. For a mapper whose banking registers move the ROM (SA-1, S-DD1,
+SPC7110), and for a table loaded with no ROM, the rule is the bank-only one:
+`$00`, `$40`, `$80` and `$C0` banks of the same number. A RAM label (`$7E`/`$7F`, or below `$8000` in the
 system banks) never takes a ROM PC; with no ROM label before it, the PC goes
 to the 256-byte page row (`$00:8200 (no symbol)`). The row's `addr` is the
 label's own.

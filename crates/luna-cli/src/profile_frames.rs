@@ -246,12 +246,12 @@ pub(crate) fn print_worst(worst: &[ProfileWorstFrame], top: usize) {
 /// The `--frames-out` CSV: one row per completed frame.
 pub(crate) fn csv(series: &[ProfileFrame]) -> String {
     let mut out = String::from(
-        "frame,active_mclk,idle_mclk,cpu_mclk,dma_mclk,hdma_mclk,refresh_mclk,total_mclk,nmi,lag\n",
+        "frame,active_mclk,idle_mclk,cpu_mclk,dma_mclk,hdma_mclk,refresh_mclk,total_mclk,nmi,lag,refresh_in_wai_mclk\n",
     );
     for f in series {
         let _ = writeln!(
             out,
-            "{},{},{},{},{},{},{},{},{},{}",
+            "{},{},{},{},{},{},{},{},{},{},{}",
             f.frame,
             f.active_mclk,
             f.idle_mclk,
@@ -261,7 +261,8 @@ pub(crate) fn csv(series: &[ProfileFrame]) -> String {
             f.refresh_mclk,
             f.total_mclk,
             u8::from(f.nmi),
-            u8::from(f.lag)
+            u8::from(f.lag),
+            f.refresh_in_wai_mclk
         );
     }
     out
@@ -280,6 +281,7 @@ mod tests {
             dma_mclk: 0,
             hdma_mclk: 0,
             refresh_mclk: 0,
+            refresh_in_wai_mclk: 0,
             total_mclk: 1000,
             nmi: true,
             lag,
@@ -371,8 +373,8 @@ mod tests {
         assert_eq!(
             text.lines().collect::<Vec<_>>(),
             [
-                "frame,active_mclk,idle_mclk,cpu_mclk,dma_mclk,hdma_mclk,refresh_mclk,total_mclk,nmi,lag",
-                "7,250,750,250,0,0,0,1000,1,1"
+                "frame,active_mclk,idle_mclk,cpu_mclk,dma_mclk,hdma_mclk,refresh_mclk,total_mclk,nmi,lag,refresh_in_wai_mclk",
+                "7,250,750,250,0,0,0,1000,1,1,0"
             ]
         );
     }

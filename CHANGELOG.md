@@ -7,6 +7,15 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ## [Unreleased]
 
+- fix(profile): a ROM PC folds onto a label only through banks that show the same ROM byte, read
+  from the cartridge's mapper. A 4 MB LoROM's code in `$82` was credited to a data table labelled
+  in `$C2` (ROM bank 66, not 2), so the same function changed name between two builds depending on
+  where the linker put the tables. HiROM, ExHiROM, Super FX and DSP-1 fold by their mapping; SA-1,
+  S-DD1 and SPC7110 (banking that moves) and a table with no ROM keep the bank-only rule. Touches
+  every symbol fold: `profile`, traces, disassembly, `symbol_for_addr`.
+- `profile` frame series: `refresh_in_wai_mclk` (JSON `frame_series`, MCP `take_profile`, last
+  column of `--frames-out`), the DRAM refresh that fell while the CPU was parked in `WAI` / `STP`.
+  `idle_mclk + refresh_in_wai_mclk` is the time parked; `idle_mclk` keeps its meaning.
 - docs: the PPU grade reads B+ (was A) until a hardware reference judges it; "pixel-exact" now says it agrees with the corpus reference PNGs, which are emulator captures of unverified provenance, and the open findings (`color_hicolor_1792` vs Mesen2 and ares, per-byte CGRAM gate, three unexplained PNG exceptions) are listed in the scorecard row.
 - `luna race-sweep ROM --from SPEC --to SPEC --until-pc SPEC|--until-frame N --compare SPEC[:COUNT]`
   (`--kind nmi|irq|both`, `--hit`, `--warm-until-pc` / `--warm-hit` / `--warm-frames`, `--until-hit`,

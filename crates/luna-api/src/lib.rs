@@ -1232,6 +1232,11 @@ pub struct ProfileFrame {
     pub hdma_mclk: u64,
     /// DRAM refresh halts (40 master clocks a line).
     pub refresh_mclk: u64,
+    /// The part of `refresh_mclk` that fell while the CPU was parked in
+    /// `WAI` / `STP`: the refresh halts a parked CPU too. `idle_mclk +
+    /// refresh_in_wai_mclk` is the time the CPU spent parked, the
+    /// headroom a frame gauge wants; `idle_mclk` alone keeps its meaning.
+    pub refresh_in_wai_mclk: u64,
     /// The whole frame.
     pub total_mclk: u64,
     /// The NMI was raised in this frame.
@@ -1256,6 +1261,7 @@ impl From<&luna_core::ProfileFrameTime> for ProfileFrame {
             dma_mclk: b.dma,
             hdma_mclk: b.hdma,
             refresh_mclk: b.refresh,
+            refresh_in_wai_mclk: t.refresh_parked,
             total_mclk: b.total(),
             nmi: t.nmi,
             lag: t.nmi && t.nmi_busy,
@@ -2129,6 +2135,7 @@ impl Emulator {
                 self.rom_file = None;
                 let logging = self.code_logging;
                 self.enable_code_log(logging);
+                self.sync_symbol_rom_map();
                 Ok(info)
             }
             Ok(Err(unsupported)) => Err(ApiError::UnsupportedMapper(unsupported)),
@@ -4244,6 +4251,32 @@ impl Emulator {
             Some(existing) => existing.replace_space(space, table),
             None => self.symbols = Some(table),
         }
+        self.sync_symbol_rom_map();
+    }
+
+    /// Give the symbol table the loaded cartridge's ROM mirrors, so a PC
+    /// folds onto a label only through banks that show the same ROM byte
+    /// (a 4 MB `LoROM`'s `$82` is not its `$C2`). Mappers whose banking
+    /// registers move the ROM (SA-1, S-DD1, SPC7110, …) keep the bank-only
+    /// rule: a map read now would be wrong later in the run.
+    fn sync_symbol_rom_map(&mut self) {
+        let (Some(table), Some(snes)) = (self.symbols.as_mut(), self.snes.as_ref()) else {
+            return;
+        };
+        let fixed = matches!(
+            snes.mapper.kind(),
+            MapperKind::LoRom
+                | MapperKind::HiRom
+                | MapperKind::ExHiRom
+                | MapperKind::SuperFx
+                | MapperKind::Dsp1
+        );
+        table.set_rom_map(fixed.then(|| {
+            symbols::RomMirrorMap::from_resolver(|a| match snes.mapper.debug_resolve(a) {
+                Some((luna_core::CartMemory::Rom, o)) => Some(o),
+                _ => None,
+            })
+        }));
     }
 
     /// Load a wla-spc700 `.sym` into the ARAM symbol space (issue #179):

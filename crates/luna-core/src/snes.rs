@@ -543,6 +543,11 @@ pub struct ProfileFrameTime {
     pub frame: u64,
     /// Its master cycles, by consumer.
     pub mclk: MclkBuckets,
+    /// The part of `mclk.refresh` that fell while the CPU was parked in
+    /// `WAI` / `STP`: the refresh halts a parked CPU too, so this is idle
+    /// time the `refresh` bucket carries (`cpu_wai + cpu_stp +` this = the
+    /// time the CPU spent parked).
+    pub refresh_parked: u64,
     /// The NMI was raised in this frame (`NMITIMEN` bit 7 set at `VBlank`).
     pub nmi: bool,
     /// …and the CPU was executing when it came, not parked in `WAI`: the
@@ -601,9 +606,14 @@ impl Profile {
         self.times.last_mut().expect("just pushed")
     }
 
-    /// Credit `mclk` to `frame`'s time (issue #270).
-    pub fn credit_time(&mut self, frame: u64, mclk: &MclkBuckets) {
-        self.time_slot(frame).mclk.add(mclk);
+    /// Credit `mclk` to `frame`'s time (issue #270); `parked` = the step
+    /// was a parked `WAI` / `STP` tick, whose refresh halts are idle time.
+    pub fn credit_time(&mut self, frame: u64, mclk: &MclkBuckets, parked: bool) {
+        let slot = self.time_slot(frame);
+        slot.mclk.add(mclk);
+        if parked {
+            slot.refresh_parked = slot.refresh_parked.saturating_add(mclk.refresh);
+        }
     }
 
     /// The NMI was raised in `frame`; `busy` = the CPU was executing.
@@ -1766,27 +1776,28 @@ impl Snes {
             );
             if let Some((cum0, frame0, nmis0)) = prof_before {
                 let now = self.mclk_acc.cumulative;
+                let parked = idle_kind.is_some();
                 if self.frame_count == frame0 {
-                    prof.credit_time(frame0, &now.delta(&cum0));
+                    prof.credit_time(frame0, &now.delta(&cum0), parked);
                 } else {
                     // The step crossed the frame edge: split it there.
                     // `frame_start` is the clock at the latest wrap,
                     // `last_frame` the frame that wrap closed.
                     let start = self.mclk_acc.frame_start;
                     if self.frame_count == frame0 + 1 {
-                        prof.credit_time(frame0, &start.delta(&cum0));
+                        prof.credit_time(frame0, &start.delta(&cum0), parked);
                     } else {
                         // It spanned a whole frame (a 64 KB DMA burst is
                         // 1.5 frames long): the wrap before the latest one
                         // is `last_frame` earlier.
                         let last = self.mclk_acc.last_frame;
-                        prof.credit_time(frame0, &start.delta(&last).delta(&cum0));
+                        prof.credit_time(frame0, &start.delta(&last).delta(&cum0), parked);
                         for f in frame0 + 1..self.frame_count - 1 {
-                            prof.credit_time(f, &MclkBuckets::default());
+                            prof.credit_time(f, &MclkBuckets::default(), parked);
                         }
-                        prof.credit_time(self.frame_count - 1, &last);
+                        prof.credit_time(self.frame_count - 1, &last, parked);
                     }
-                    prof.credit_time(self.frame_count, &now.delta(&start));
+                    prof.credit_time(self.frame_count, &now.delta(&start), parked);
                 }
                 if self.nmis_serviced != nmis0 {
                     prof.note_nmi(

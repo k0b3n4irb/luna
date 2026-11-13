@@ -114,6 +114,50 @@ pub struct SymbolTable {
     cpu_by_addr: Vec<(u32, usize)>,
     /// ARAM-space labels `(addr, entry index)`, sorted by address.
     aram_by_addr: Vec<(u16, usize)>,
+    /// The loaded cartridge's own ROM mirrors, when its mapping is fixed;
+    /// `None` = the bank-only rule of [`Self::rom_mirrors`].
+    rom_map: Option<RomMirrorMap>,
+}
+
+/// Which banks show the same ROM byte, per 32 KB half-bank, read from the
+/// cartridge's mapper: a `LoROM` of 4 MB maps `$82` and `$C2` to two
+/// different ROM banks, a `HiROM` maps them to one. Index = `bank * 2 +
+/// half`; each group lists the bank itself first; empty = not ROM.
+#[derive(Debug, Clone)]
+pub(crate) struct RomMirrorMap {
+    groups: Vec<Vec<u8>>,
+}
+
+impl RomMirrorMap {
+    /// Build the map from `rom_offset(addr)`, the ROM byte the cartridge
+    /// shows at a 24-bit address (`None` off ROM). Two half-banks mirror
+    /// when their first bytes are the same ROM byte.
+    pub(crate) fn from_resolver(rom_offset: impl Fn(u32) -> Option<usize>) -> Self {
+        let starts: Vec<Option<usize>> = (0u32..512)
+            .map(|i| rom_offset(((i >> 1) << 16) | ((i & 1) << 15)))
+            .collect();
+        let groups = (0..512)
+            .map(|i| {
+                let Some(o) = starts[i] else {
+                    return Vec::new();
+                };
+                let mut g = vec![(i >> 1) as u8];
+                g.extend(
+                    (0..512)
+                        .filter(|&j| j != i && j & 1 == i & 1 && starts[j] == Some(o))
+                        .map(|j| (j >> 1) as u8),
+                );
+                g
+            })
+            .collect();
+        Self { groups }
+    }
+
+    /// The banks showing the ROM byte at `bank:off`, the bank itself
+    /// first; empty when the address is not ROM.
+    fn mirrors(&self, bank: u32, off: u32) -> &[u8] {
+        &self.groups[((bank & 0xFF) * 2 + (off >> 15)) as usize]
+    }
 }
 
 impl SymbolTable {
@@ -261,7 +305,14 @@ impl SymbolTable {
             by_name,
             cpu_by_addr,
             aram_by_addr,
+            rom_map: None,
         }
+    }
+
+    /// Fold ROM addresses by the cartridge's own mirrors (`Some`), or by
+    /// the bank-only rule (`None`, a mapper whose banking moves).
+    pub(crate) fn set_rom_map(&mut self, map: Option<RomMirrorMap>) {
+        self.rom_map = map;
     }
 
     /// Load and parse a CPU-space `.sym` file from disk.
@@ -284,7 +335,9 @@ impl SymbolTable {
             .filter(|e| e.space != space)
             .collect();
         entries.extend(other.entries.into_iter().filter(|e| e.space == space));
+        let rom_map = self.rom_map.take();
         *self = Self::build(entries);
+        self.rom_map = rom_map;
     }
 
     /// Number of symbols in the table (labels + constants, both spaces).
@@ -453,7 +506,9 @@ impl SymbolTable {
     /// The banks that show the same ROM byte at `off` as `bank` does (the
     /// `LoROM` / `FastROM` / `HiROM` mirrors; `bank` itself first). An SDK that
     /// assembles under `.BASE $80` labels its code in `$80-$BF` while the
-    /// reset and interrupt vectors enter it through `$00-$3F`.
+    /// reset and interrupt vectors enter it through `$00-$3F`. The rule for
+    /// a table without a cartridge, or one whose banking moves; a fixed
+    /// mapping folds by its [`RomMirrorMap`] instead.
     fn rom_mirrors(bank: u32, off: u32) -> impl Iterator<Item = u32> {
         let low = bank & 0x3F;
         [bank, low | 0x80, low | 0xC0, low | 0x40, low]
@@ -473,11 +528,15 @@ impl SymbolTable {
     fn nearest_entry(&self, addr: u32) -> Option<(u32, usize)> {
         let addr = addr & 0x00FF_FFFF;
         let (bank, off) = (addr >> 16, addr & 0xFFFF);
-        let rom = Self::is_rom_space(bank, off);
-        let banks: Vec<u32> = if rom {
-            Self::rom_mirrors(bank, off).collect()
-        } else {
-            vec![bank]
+        let in_rom = |b: u32, o: u32| match &self.rom_map {
+            Some(m) => !m.mirrors(b, o).is_empty(),
+            None => Self::is_rom_space(b, o),
+        };
+        let rom = in_rom(bank, off);
+        let banks: Vec<u32> = match (&self.rom_map, rom) {
+            (_, false) => vec![bank],
+            (Some(m), true) => m.mirrors(bank, off).iter().map(|&b| u32::from(b)).collect(),
+            (None, true) => Self::rom_mirrors(bank, off).collect(),
         };
         let mut best: Option<(u32, usize)> = None;
         for b in banks {
@@ -488,7 +547,7 @@ impl SymbolTable {
                 continue;
             };
             let label_off = label_addr & 0xFFFF;
-            if label_addr >> 16 != b || (rom && !Self::is_rom_space(b, label_off)) {
+            if label_addr >> 16 != b || (rom && !in_rom(b, label_off)) {
                 continue;
             }
             if best.is_none_or(|(o, _)| label_off > o) {

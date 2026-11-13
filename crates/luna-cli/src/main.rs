@@ -1320,9 +1320,10 @@ enum Command {
         #[arg(long)]
         hit: Option<u64>,
         /// Write the window frame by frame as CSV
-        /// (`frame,active_mclk,idle_mclk,cpu_mclk,dma_mclk,hdma_mclk,refresh_mclk,total_mclk,nmi,lag`):
+        /// (`frame,active_mclk,idle_mclk,cpu_mclk,dma_mclk,hdma_mclk,refresh_mclk,total_mclk,nmi,lag,refresh_in_wai_mclk`):
         /// `active` is what the program used (CPU + the DMA it started),
-        /// `idle` the time parked in `WAI`, `lag` = full frame: the NMI
+        /// `idle` the time parked in `WAI`, `refresh_in_wai` the DRAM
+        /// refresh that fell while parked (idle + it = the time parked), `lag` = full frame: the NMI
         /// found the CPU still executing (it is NOT the duration of a game
         /// tick: a two-frame tick lags every other frame by design; see
         /// `luna ticks --intervals`). The same rows are `frame_series` in

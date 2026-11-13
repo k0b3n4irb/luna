@@ -2051,6 +2051,11 @@ fn the_profile_frame_series_is_the_frame_buckets_and_flags_lag() {
     assert!(!lag.windows(3).any(|w| w == [true, true, true]), "{lag:?}");
     for f in r.frame_series.iter().filter(|f| !f.lag) {
         assert!(f.idle_mclk > 0, "a frame that waited has headroom: {f:?}");
+        // It parked for part of the frame: part of its refresh is idle.
+        assert!(
+            f.refresh_in_wai_mclk > 0 && f.refresh_in_wai_mclk < f.refresh_mclk,
+            "{f:?}"
+        );
     }
     // The two heaviest frames, heaviest first, with what ran in them.
     assert_eq!(r.worst_frames.len(), 2);
@@ -4884,4 +4889,66 @@ fn peek_ppu_register_reads_what_the_game_wrote_and_refuses_the_rest() {
         assert!(err.contains("supported"), "{err}");
     }
     assert!(e.peek_ppu_registers(0x2133, 2).is_err());
+}
+
+/// A PC folds onto a label only through banks that show the same ROM byte
+/// (`OpenSNES`, 4 MB `LoROM` profile): in a 4 MB `LoROM`, `$82` shows ROM
+/// bank 2 and `$C2` bank 66, so code in `$82` is never credited to a table
+/// labelled in `$C2`; in a `HiROM` the two are one bank and still fold. A
+/// 2 MB `LoROM` wraps bank 66 onto bank 2, so it folds there too.
+#[test]
+fn rom_mirrors_follow_the_cartridge_mapping() {
+    let syms = "[labels]\n82:a000 code_fn\nc2:a140 data_table\n";
+    let folded = |kind: luna_core::MapperKind, size: usize, syms_first: bool| {
+        let mut e = Emulator::new();
+        if syms_first {
+            e.load_symbols_str(syms);
+        }
+        e.load_rom_bytes_forced(vec![0; size], kind)
+            .expect("rom loads");
+        if !syms_first {
+            e.load_symbols_str(syms);
+        }
+        e.symbol_for_addr(0x82_A1F6)
+    };
+    for syms_first in [false, true] {
+        let lorom4 = folded(luna_core::MapperKind::LoRom, 4 << 20, syms_first);
+        assert_eq!(lorom4.as_deref(), Some("code_fn+0x1F6"), "4 MB LoROM");
+        let lorom2 = folded(luna_core::MapperKind::LoRom, 2 << 20, syms_first);
+        assert_eq!(lorom2.as_deref(), Some("data_table+0xB6"), "2 MB LoROM");
+        let hirom = folded(luna_core::MapperKind::HiRom, 4 << 20, syms_first);
+        assert_eq!(hirom.as_deref(), Some("data_table+0xB6"), "HiROM");
+    }
+    // Without a cartridge the bank-only rule stays.
+    let mut e = Emulator::new();
+    e.load_symbols_str(syms);
+    assert_eq!(
+        e.symbol_for_addr(0x82_A1F6).as_deref(),
+        Some("data_table+0xB6")
+    );
+}
+
+/// The DRAM refresh halts a CPU parked in `WAI` too (kit, frame gauge):
+/// a ROM that parks for good spends every master clock of a frame either
+/// in `WAI` or in the refresh, and `refresh_in_wai_mclk` carries the whole
+/// refresh, so `idle_mclk + refresh_in_wai_mclk` is the frame.
+#[test]
+fn the_refresh_of_a_parked_cpu_is_counted_apart() {
+    // $8000: SEI ; WAI ; BRA $8001 — no interrupt is ever enabled.
+    let mut e = Emulator::new();
+    e.load_rom_bytes(demo_lorom_with(&[0x78, 0xCB, 0x80, 0xFD], None))
+        .unwrap();
+    e.step_until_frame(1_000_000).unwrap();
+    e.enable_profile_worst(0).unwrap();
+    for _ in 0..3 {
+        e.step_until_frame(1_000_000).unwrap();
+    }
+    let r = e.take_profile().unwrap();
+    assert_eq!(r.frame_series.len(), 3, "{:?}", r.frame_series);
+    for f in &r.frame_series {
+        // 262 lines × 40 master clocks.
+        assert_eq!(f.refresh_mclk, 262 * 40, "{f:?}");
+        assert_eq!(f.refresh_in_wai_mclk, f.refresh_mclk, "{f:?}");
+        assert_eq!(f.idle_mclk + f.refresh_in_wai_mclk, f.total_mclk, "{f:?}");
+    }
 }
