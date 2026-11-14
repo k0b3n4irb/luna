@@ -7,6 +7,11 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ## [Unreleased]
 
+- fix(ppu): the 34-sliver time over drops only the overflowing sprite's rightmost slivers, as on
+  hardware. The fetch runs back to front and each sprite left to right on screen, so the sprite
+  that crosses the limit keeps its leftmost slivers; luna dropped it whole. A sprite at exactly
+  x=256 now charges all its slivers to the budget (ares, Mesen2). Lines with more than 34 slivers
+  can render differently.
 - fix(profile): a ROM PC folds onto a label only through banks that show the same ROM byte, read
   from the cartridge's mapper. A 4 MB LoROM's code in `$82` was credited to a data table labelled
   in `$C2` (ROM bank 66, not 2), so the same function changed name between two builds depending on

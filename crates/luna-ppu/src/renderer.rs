@@ -1746,17 +1746,15 @@ fn sprite_on_line(sp: &SpriteEntry, y: u16, interlace: bool) -> bool {
     usize::from(row) < screen_h as usize
 }
 
-/// Count of the sprite's 8-px tiles that are not in the off-screen dead
-/// zone — the unit charged against the 34-tile/line budget (ares
-/// `object.cpp:133-136`).
-fn sprite_onscreen_tiles(sp: &SpriteEntry) -> usize {
-    let tiles = i32::from(sp.w) / 8;
-    (0..tiles)
-        .filter(|&tx| {
-            let sx9 = (i32::from(sp.x) + tx * 8) & 0x1FF;
-            !(sx9 >= 256 && sx9 + 7 < 512)
-        })
-        .count()
+/// Is the sprite's 8-px sliver `tx` (in on-screen order, left to right)
+/// charged against the 34-sliver/line budget? Slivers wholly in the
+/// off-screen dead zone are skipped — except for a sprite at exactly
+/// x=256, whose slivers are all charged (ares `object.cpp:133-134`
+/// `x != 256`, Mesen2 `SnesPpu.cpp` `X != -256`).
+const fn sprite_sliver_charged(sp: &SpriteEntry, tx: i32) -> bool {
+    let x9 = sprite_x9(sp);
+    let sx9 = (x9 + tx * 8) & 0x1FF;
+    x9 == 256 || !(sx9 >= 256 && sx9 + 7 < 512)
 }
 
 /// Result of per-line sprite evaluation. Shared (pre-computed once per
@@ -1766,6 +1764,10 @@ pub(crate) struct SpriteEval {
     /// Surviving sprite indices in *fetch* order (back-most first), so
     /// the renderer draws them back-to-front and the front sprite wins.
     survivors: [u8; 32],
+    /// Per survivor: how many of its slivers, counted in on-screen order
+    /// from the left, were fetched. The 34-sliver limit stops the fetch
+    /// mid-sprite, so the rest (its rightmost slivers) are not drawn.
+    sliver_limit: [u8; 32],
     survivor_count: usize,
     /// More than 32 sprites on this line ($213E.6).
     pub(crate) range_over: bool,
@@ -1836,30 +1838,43 @@ pub(crate) fn evaluate_sprite_line(ppu: &Ppu, sprites: &[SpriteEntry; 128], y: u
             break;
         }
     }
-    // Time over: total on-screen tiles of the kept sprites > 34.
-    let total_tiles: usize = items[..count]
-        .iter()
-        .map(|&it| sprite_onscreen_tiles(&sprites[it as usize]))
-        .sum();
-    let time_over = total_tiles > 34;
-    // Pass 2: fetch in reverse (back-most first); keep sprites while the
-    // cumulative tile count stays within 34. The front sprites that
-    // overflow the budget are dropped — the SNES "tile over" quirk.
+    // Pass 2: fetch in reverse (back-most first), each sprite's slivers
+    // left to right on screen (even when h-flipped). The 35th charged
+    // sliver stops that sprite's fetch: it keeps its leftmost slivers
+    // and every sprite after it (nearer the front) gets none — ares
+    // `object.cpp:95-137` (`if(t.tileCount++ >= 34) break;`), snesdev
+    // wiki "34 Slivers per Line".
     let mut survivors = [0u8; 32];
+    let mut sliver_limit = [0u8; 32];
     let mut sc = 0usize;
-    let mut budget = 0usize;
+    let mut tile_count = 0usize;
     for idx in (0..count).rev() {
         let it = items[idx];
-        let tiles = sprite_onscreen_tiles(&sprites[it as usize]);
-        if budget + tiles > 34 {
-            break;
+        let sp = &sprites[it as usize];
+        let width = i32::from(sp.w) / 8;
+        let mut limit = width;
+        for tx in 0..width {
+            if !sprite_sliver_charged(sp, tx) {
+                continue;
+            }
+            tile_count += 1;
+            if tile_count > 34 {
+                limit = tx;
+                break;
+            }
         }
-        budget += tiles;
-        survivors[sc] = it;
-        sc += 1;
+        if limit > 0 {
+            survivors[sc] = it;
+            sliver_limit[sc] = limit as u8;
+            sc += 1;
+        }
     }
+    // Time over: a 35th sliver was asked for ($213E.7, ares
+    // `io.timeOver |= t.tileCount > 34`).
+    let time_over = tile_count > 34;
     SpriteEval {
         survivors,
+        sliver_limit,
         survivor_count: sc,
         range_over,
         time_over,
@@ -1926,7 +1941,9 @@ fn render_sprites_scanline_indexed_from(
     for s in 0..eval.survivor_count {
         let sp = &sprites[eval.survivors[s] as usize];
         let row_in_sprite = y.wrapping_sub(sp.y as u16) & 0xFF;
-        for col in 0..sp.w {
+        // Only the slivers the fetch reached (on-screen, from the left).
+        let drawn_w = (u16::from(eval.sliver_limit[s]) * 8).min(sp.w);
+        for col in 0..drawn_w {
             let screen_x = sp.x + col as i16;
             if !(0..256).contains(&screen_x) {
                 continue;
@@ -2929,35 +2946,100 @@ mod tests {
         assert_eq!(scan[100], None, "33rd sprite dropped by the range limit");
     }
 
-    #[test]
-    fn sprite_time_over_drops_front_sprite() {
-        // 5 × 64-wide sprites at x=0 → 40 tiles > 34. Fetch is back-to-
-        // front, so the front sprite (#0) overflows the budget and is
-        // dropped — sprite 1 becomes the front survivor. Time-over sets.
+    /// Five 64-wide sprites on line 0, all at x=0 except as overridden,
+    /// palette = index; tile 0 pixel (0,0) and tile 7 pixel (0,0) both
+    /// opaque so every 8-px tile of a sprite paints its first column.
+    fn five_large_sprites(xs: [u16; 5], hflip0: bool) -> Ppu {
         let mut p = Ppu::new();
         p.write(register::INIDISP, 0x0F);
         p.write(register::OBSEL, 0x40); // baseSize 2 → large = 64×64
         for i in 0..128u16 {
             p.oam.poke(i * 4 + 1, 200);
         }
+        let mut high = [0u8; 2];
         for i in 0..5u16 {
-            p.oam.poke(i * 4, 0);
+            let x = xs[i as usize];
+            p.oam.poke(i * 4, (x & 0xFF) as u8);
             p.oam.poke(i * 4 + 1, 0);
             p.oam.poke(i * 4 + 2, 0);
-            p.oam.poke(i * 4 + 3, (i as u8) << 1); // palette = i
+            let flip = if i == 0 && hflip0 { 0x40 } else { 0 };
+            p.oam.poke(i * 4 + 3, ((i as u8) << 1) | flip); // palette = i
+            let bits = 0x02 | u8::from(x & 0x100 != 0); // large + x bit 8
+            high[(i / 4) as usize] |= bits << ((i % 4) * 2);
         }
-        p.oam.poke(0x200, 0xAA); // size bits for sprites 0-3
-        p.oam.poke(0x201, 0x02); // size bit for sprite 4
-        p.vram.poke(0x00, 0x80);
+        p.oam.poke(0x200, high[0]);
+        p.oam.poke(0x201, high[1]);
+        for t in 0..8u16 {
+            p.vram.poke(t * 32, 0x80); // tiles 0-7, row 0, plane 0, pixel 0 → idx 1
+        }
+        p
+    }
+
+    #[test]
+    fn sprite_time_over_drops_only_the_front_sprites_right_slivers() {
+        // 5 × 64-wide sprites at x=0 → 40 slivers > 34. Fetch is back-to-
+        // front and each sprite's slivers left to right, so sprites 4..1
+        // take 32 slivers and the front sprite (#0) keeps its two leftmost
+        // (x 0-15) — the rest are lost (ares object.cpp:133-137, snesdev
+        // wiki "34 Slivers per Line"). Time-over sets.
+        let p = five_large_sprites([0; 5], false);
         let (range, time) = sprite_line_overflow(&p, 0);
         assert!(!range, "5 sprites ≤ 32");
-        assert!(time, "40 tiles > 34 → time over");
+        assert!(time, "40 slivers > 34 → time over");
         let scan = render_sprites_scanline_indexed_with(&p, 0, RenderOptions::default());
+        assert_eq!(scan[0], Some((129, 0)), "front sprite's sliver 0 kept");
+        assert_eq!(scan[8], Some((129, 0)), "front sprite's sliver 1 kept");
+        assert_eq!(scan[16], Some((145, 0)), "sliver 2 dropped, sprite 1 shows");
+        assert_eq!(scan[56], Some((145, 0)), "sliver 7 dropped, sprite 1 shows");
+    }
+
+    #[test]
+    fn sprite_time_over_keeps_the_leftmost_slivers_even_when_flipped() {
+        // Same line with the front sprite h-flipped: slivers are taken in
+        // on-screen order, so x 0-15 survive again (ares fetches `tx` in
+        // screen order and only flips the character column `mx`).
+        let p = five_large_sprites([0; 5], true);
+        let scan = render_sprites_scanline_indexed_with(&p, 0, RenderOptions::default());
+        // h-flipped: screen column 7 of each sliver is the opaque pixel.
         assert_eq!(
-            scan[0],
-            Some((145, 0)),
-            "front sprite dropped, sprite 1 wins"
+            scan[7],
+            Some((129, 0)),
+            "flipped front sprite's sliver 0 kept"
         );
+        assert_eq!(
+            scan[15],
+            Some((129, 0)),
+            "flipped front sprite's sliver 1 kept"
+        );
+        assert_eq!(
+            scan[23], None,
+            "sliver 2 dropped; sprite 1 is clear at x=23"
+        );
+        assert_eq!(
+            scan[16],
+            Some((145, 0)),
+            "sprite 1 shows where sliver 2 was"
+        );
+    }
+
+    #[test]
+    fn a_sprite_at_x_256_charges_all_its_slivers() {
+        // A sprite at exactly x=256 is on the line and, unlike any other
+        // x in the dead zone, all its slivers are charged (ares
+        // object.cpp:134 `x != 256`, Mesen2 `X != -256`). Sprite 4 at
+        // x=256 + sprites 3..1 = 32 slivers, so sprite 0 keeps two.
+        let p = five_large_sprites([0, 0, 0, 0, 256], false);
+        let (_, time) = sprite_line_overflow(&p, 0);
+        assert!(time, "40 slivers charged → time over");
+        let scan = render_sprites_scanline_indexed_with(&p, 0, RenderOptions::default());
+        assert_eq!(scan[8], Some((129, 0)), "front sprite's sliver 1 kept");
+        assert_eq!(scan[16], Some((145, 0)), "front sprite's sliver 2 dropped");
+        // At x=257 the slivers are in the dead zone and cost nothing.
+        let p = five_large_sprites([0, 0, 0, 0, 257], false);
+        let (_, time) = sprite_line_overflow(&p, 0);
+        assert!(!time, "32 slivers charged → no time over");
+        let scan = render_sprites_scanline_indexed_with(&p, 0, RenderOptions::default());
+        assert_eq!(scan[56], Some((129, 0)), "front sprite whole");
     }
 
     #[test]

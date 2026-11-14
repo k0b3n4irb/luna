@@ -84,17 +84,22 @@ flicker) and the overflow sets `$213E` bit 6 (range over) / bit 7
 
 - Pass 1 keeps the first 32 on-line sprites from `firstSprite`
   (priority order) → range over.
-- Pass 2 fetches **back-to-front** and keeps sprites while the
-  cumulative on-screen tile count stays within 34 — so the *front*
-  sprites overflow the budget and drop (the SNES tile-over quirk). Tile
-  total > 34 → time over.
+- Pass 2 fetches **back-to-front**, each sprite's 8-px slivers left
+  to right on screen (even when h-flipped); the 35th charged sliver
+  stops that sprite mid-way, so the *front* sprite that overflows keeps
+  its leftmost slivers and loses its rightmost ones, and the sprites in
+  front of it get none (ares `object.cpp:133-137`, snesdev wiki
+  "34 Slivers per Line"). A sprite at exactly x=256 has every sliver
+  charged (ares `x != 256`, Mesen2 `X != -256`). More than 34 slivers
+  asked for → time over.
 - `$213E` bits 6/7 now reflect the flags (accumulated per frame, reset
-  at line 0). The renderer draws only the survivors.
+  at line 0). The renderer draws only the fetched slivers.
 
-Tests `sprite_range_over_drops_33rd_sprite`, `sprite_time_over_drops_
-front_sprite`. (Drop is at sprite granularity, not ares' per-tile — a
-boundary sprite drops whole rather than partial; negligible and only
-in already-overflowing scenes.)
+Tests `sprite_range_over_drops_33rd_sprite`,
+`sprite_time_over_drops_only_the_front_sprites_right_slivers`,
+`sprite_time_over_keeps_the_leftmost_slivers_even_when_flipped`,
+`a_sprite_at_x_256_charges_all_its_slivers`. (Until 2026-11-14 the drop
+was at sprite granularity: the boundary sprite vanished whole.)
 
 ## ✅ 4. OAM priority rotation (`$2103` bit 7) — DONE
 
