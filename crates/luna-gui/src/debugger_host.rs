@@ -938,7 +938,7 @@ mod tests {
         let _ = host.stopped(&mut em, None);
         let view = host.view(&em, true);
         let mut harness = egui_kittest::Harness::builder()
-            .with_size(egui::vec2(980.0, 640.0))
+            .with_size(egui::vec2(1180.0, 760.0))
             .wgpu()
             .build_ui(move |ui| {
                 crate::ui::install_dark_theme(ui.ctx());
