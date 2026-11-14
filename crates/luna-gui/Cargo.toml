@@ -37,5 +37,10 @@ serde      = { workspace = true }
 serde_json = { workspace = true }
 image      = { workspace = true }
 
+[dev-dependencies]
+# Renders the debugger window headless (a software Vulkan adapter is enough) for
+# `capture_debugger`; tests only, nothing reaches the shipped binary.
+egui_kittest = { version = "0.34", default-features = false, features = ["wgpu"] }
+
 [lints]
 workspace = true

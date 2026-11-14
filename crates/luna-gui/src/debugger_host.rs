@@ -916,6 +916,38 @@ mod tests {
         (em, host)
     }
 
+    /// Renders the debugger window headless to the PNG named by `LUNA_GUI_CAPTURE`
+    /// (skipped when unset): the same view before and after a look change.
+    #[test]
+    fn capture_debugger() {
+        let Ok(out) = std::env::var("LUNA_GUI_CAPTURE") else {
+            return;
+        };
+        let (mut em, mut host) = match std::env::var("LUNA_GUI_CAPTURE_ROM") {
+            Ok(rom) => {
+                let mut em = Emulator::new();
+                em.load_rom_bytes(std::fs::read(rom).unwrap()).unwrap();
+                let mut host = DebuggerHost::default();
+                host.opened(&mut em);
+                host.apply(&mut em, DebuggerAction::VisibleRows(28));
+                em.step(60).unwrap();
+                (em, host)
+            }
+            Err(_) => loaded(),
+        };
+        let _ = host.stopped(&mut em, None);
+        let view = host.view(&em, true);
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(980.0, 640.0))
+            .wgpu()
+            .build_ui(move |ui| {
+                crate::ui::install_dark_theme(ui.ctx());
+                let _ = crate::ui::debugger_body(ui, &view);
+            });
+        harness.run();
+        harness.render().unwrap().save(out).unwrap();
+    }
+
     #[test]
     fn the_view_centres_on_the_pc_and_marks_it() {
         let (mut em, mut host) = loaded();
