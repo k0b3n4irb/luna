@@ -21,10 +21,12 @@ mod config;
 mod cpu_state;
 mod debugger;
 mod disasm;
+mod icons;
 mod memory;
 mod memory_search;
 mod memory_tools;
 mod menu;
+mod theme;
 mod widgets;
 
 pub(crate) use breakpoints::breakpoints_body;
@@ -522,47 +524,11 @@ fn draw_fps_counter(painter: &egui::Painter, game: egui::Rect, text: &str) {
     painter.galley(plate.min + PAD, galley, egui::Color32::WHITE);
 }
 
+/// Gives an egui context luna's look: fonts, colours, radii, spacing. Each
+/// window owns a context, so each calls this once.
 pub(crate) fn install_dark_theme(ctx: &egui::Context) {
-    use egui::{Color32, Stroke, Visuals, epaint::Shadow};
-    let mut visuals = Visuals::dark();
-    // Luna palette — quiet purple-blue accent on near-black surfaces.
-    let accent = Color32::from_rgb(140, 110, 255);
-    let surface = Color32::from_rgb(18, 18, 24);
-    let surface_alt = Color32::from_rgb(26, 26, 36);
-    let text = Color32::from_rgb(222, 222, 232);
-    let border = Color32::from_rgb(48, 48, 60);
-
-    visuals.window_fill = surface;
-    visuals.panel_fill = surface;
-    visuals.faint_bg_color = surface_alt;
-    visuals.extreme_bg_color = Color32::from_rgb(10, 10, 16);
-    visuals.override_text_color = Some(text);
-    visuals.hyperlink_color = accent;
-    visuals.selection.bg_fill = accent.linear_multiply(0.35);
-    visuals.selection.stroke = Stroke::new(1.0, accent);
-    visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, border);
-    visuals.widgets.inactive.bg_fill = Color32::from_rgb(36, 36, 48);
-    visuals.widgets.inactive.weak_bg_fill = Color32::from_rgb(28, 28, 38);
-    visuals.widgets.hovered.bg_fill = Color32::from_rgb(50, 50, 68);
-    visuals.widgets.hovered.weak_bg_fill = Color32::from_rgb(40, 40, 56);
-    visuals.widgets.active.bg_fill = accent;
-    visuals.widgets.active.weak_bg_fill = accent.linear_multiply(0.6);
-    visuals.window_shadow = Shadow {
-        offset: [0, 6],
-        blur: 18,
-        spread: 0,
-        color: Color32::from_black_alpha(160),
-    };
-    visuals.popup_shadow = visuals.window_shadow;
-    visuals.window_corner_radius = egui::CornerRadius::same(8);
-    visuals.menu_corner_radius = egui::CornerRadius::same(6);
-    ctx.set_visuals(visuals);
-
-    let mut style = (*ctx.global_style()).clone();
-    style.spacing.item_spacing = egui::vec2(10.0, 6.0);
-    style.spacing.button_padding = egui::vec2(10.0, 4.0);
-    style.spacing.menu_margin = egui::Margin::same(6);
-    ctx.set_global_style(style);
+    theme::install_fonts(ctx);
+    theme::apply(ctx, &theme::Tokens::luna());
 }
 
 #[cfg(test)]

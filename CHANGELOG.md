@@ -7,6 +7,7 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ## [Unreleased]
 
+- GUI: a new look for the debugger windows and menus. Colours, radii, spacing and type sizes come from one set of tokens (`ui/theme.rs`); Inter (text) and JetBrains Mono (addresses, registers) are embedded (SIL OFL 1.1); the toolbar and status bar use Lucide icons (ISC). The release binary grows by about 2.2 MB. Licences in `NOTICE`.
 ## [1.44.0] — 2026-11-14
 
 Second-opinion pass: the 26 OpenSNES example ROMs, luna `a029ef7` against Mesen2, one screen per

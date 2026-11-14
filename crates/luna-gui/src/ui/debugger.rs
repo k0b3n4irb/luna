@@ -14,6 +14,7 @@
 // `mul_add` would gain nothing a pixel can show.
 #![allow(clippy::suboptimal_flops)]
 
+use super::icons::{self, Icon};
 use luna_api::{
     BlockView, BreakpointInfo, CallStackRow, DebuggerStatus, FindResult, FunctionRow, GotoResult,
     Label, LabelRow, ListingOptions, ListingPos, ListingRow, MemoryKind, RowCode, RowKind,
@@ -789,65 +790,109 @@ fn toolbar(
 ) {
     ui.horizontal(|ui| {
         let p = view.paused;
-        let mut b =
-            |ui: &mut egui::Ui, enabled: bool, text: &str, tip: &str, act: DebuggerAction| {
-                if ui
-                    .add_enabled(enabled, egui::Button::new(text))
-                    .on_hover_text(tip)
-                    .clicked()
-                {
-                    out.push(act);
-                }
+        // A button with its icon and, for the steps, its word.
+        let mut ib = |ui: &mut egui::Ui,
+                      enabled: bool,
+                      icon: Option<Icon>,
+                      text: &str,
+                      tip: &str,
+                      act: DebuggerAction| {
+            let tint = if enabled {
+                ui.visuals().widgets.inactive.fg_stroke.color
+            } else {
+                ui.visuals().widgets.noninteractive.fg_stroke.color
             };
-        b(ui, p, "\u{25B6}", "Continue (F5)", DebuggerAction::Continue);
-        b(
+            let button = match icon {
+                Some(icon) => {
+                    let img = icons::image(ui.ctx(), icon, 14.0, tint);
+                    if text.is_empty() {
+                        egui::Button::image(img)
+                    } else {
+                        egui::Button::image_and_text(img, text)
+                    }
+                }
+                None => egui::Button::new(text),
+            };
+            if ui.add_enabled(enabled, button).on_hover_text(tip).clicked() {
+                out.push(act);
+            }
+        };
+        ib(
+            ui,
+            p,
+            Some(Icon::Play),
+            "",
+            "Continue (F5)",
+            DebuggerAction::Continue,
+        );
+        ib(
             ui,
             !p,
-            "\u{23F8}",
+            Some(Icon::Pause),
+            "",
             "Break (Shift+F5)",
             DebuggerAction::Break,
         );
         ui.separator();
-        b(
+        ib(
             ui,
             true,
+            Some(Icon::StepInto),
             "Into",
             "Step into (F11)",
             DebuggerAction::Step(StepKind::Into),
         );
-        b(
+        ib(
             ui,
             true,
+            Some(Icon::StepOver),
             "Over",
             "Step over (F10)",
             DebuggerAction::Step(StepKind::Over),
         );
-        b(
+        ib(
             ui,
             true,
+            Some(Icon::StepOut),
             "Out",
             "Step out (Shift+F11)",
             DebuggerAction::Step(StepKind::Out),
         );
         ui.separator();
-        b(
+        ib(
             ui,
             true,
+            None,
             "Line",
             "Run one scanline (F7)",
             DebuggerAction::Step(StepKind::Scanline),
         );
-        b(
+        ib(
             ui,
             true,
+            None,
             "Frame",
             "Run one frame (F8)",
             DebuggerAction::Step(StepKind::Frame),
         );
         ui.separator();
         if view.cpu == luna_api::ListingCpu::Snes {
-            b(ui, true, "NMI", "Run to NMI", DebuggerAction::RunToNmi);
-            b(ui, true, "IRQ", "Run to IRQ", DebuggerAction::RunToIrq);
+            ib(
+                ui,
+                true,
+                None,
+                "NMI",
+                "Run to NMI",
+                DebuggerAction::RunToNmi,
+            );
+            ib(
+                ui,
+                true,
+                None,
+                "IRQ",
+                "Run to IRQ",
+                DebuggerAction::RunToIrq,
+            );
         }
         if ui
             .button("Line#")
@@ -866,8 +911,14 @@ fn toolbar(
         }
         ui.menu_button("Go to…", |ui| goto_items(ui, view, st, out));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let gear = icons::image(
+                ui.ctx(),
+                Icon::Settings,
+                14.0,
+                ui.visuals().widgets.inactive.fg_stroke.color,
+            );
             if ui
-                .button("\u{2699}")
+                .add(egui::Button::image(gear))
                 .on_hover_text("Toggle settings panel (Ctrl+Q)")
                 .clicked()
             {
@@ -879,10 +930,20 @@ fn toolbar(
     });
 }
 
+/// A status-bar entry: a small icon, then its text.
+fn status_item(ui: &mut egui::Ui, icon: Icon, text: &str) -> egui::Response {
+    ui.horizontal(|ui| {
+        let tint = ui.visuals().widgets.noninteractive.fg_stroke.color;
+        ui.add(icons::image(ui.ctx(), icon, 12.0, tint));
+        ui.label(text);
+    })
+    .response
+}
+
 fn status_bar(ui: &mut egui::Ui, view: &DebuggerView) {
     ui.columns(3, |c| {
         if let Some(r) = &view.break_reason {
-            c[0].label(format!("\u{25CF} {r}"));
+            status_item(&mut c[0], Icon::Dot, r);
         }
         if let Some(n) = view.elapsed.filter(|&n| n > 0) {
             let text = if n <= 999_999 {
@@ -896,8 +957,12 @@ fn status_bar(ui: &mut egui::Ui, view: &DebuggerView) {
                     .unwrap_or((1.0, ""));
                 format!("{:.2} {u}", n as f64 / d)
             };
-            c[2].label(format!("\u{23F1} {text} master clocks elapsed"))
-                .on_hover_text(format!("{n} master clocks since the CPU last stopped"));
+            status_item(
+                &mut c[2],
+                Icon::Timer,
+                &format!("{text} master clocks elapsed"),
+            )
+            .on_hover_text(format!("{n} master clocks since the CPU last stopped"));
         }
     });
 }

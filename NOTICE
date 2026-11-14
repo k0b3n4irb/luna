@@ -116,3 +116,19 @@ crates/luna-api/src/event_viewer.rs and the GUI Event Viewer panel, which
 said they were ported verbatim from Mesen2, have been removed from the tip of
 the repository (they remain in the git history, which has not been rewritten)
 until they are rewritten clean-room.
+
+
+4. Embedded fonts and icons (luna-gui)
+--------------------------------------
+
+crates/luna-gui/assets/fonts/   Inter Regular, Medium and SemiBold (Copyright
+                                (c) 2016 The Inter Project Authors) and
+                                JetBrains Mono Regular (Copyright 2020 The
+                                JetBrains Mono Project Authors), both under the
+                                SIL Open Font License 1.1; the licence texts are
+                                OFL-Inter.txt and OFL-JetBrainsMono.txt there.
+crates/luna-gui/assets/icons/   A few icons from Lucide (Copyright (c) 2026
+                                Lucide Icons and Contributors, ISC licence; the
+                                ones derived from Feather, Copyright (c) 2013-
+                                present Cole Bemis, MIT licence); the full text
+                                is LICENSE-lucide.txt there.
