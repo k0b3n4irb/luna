@@ -43,6 +43,8 @@ pub(crate) struct Tokens {
     pub text_faint: Color32,
     /// The accent: selection, focus, the primary action.
     pub accent: Color32,
+    /// The accent at low strength: the active tab, a selected row.
+    pub accent_soft: Color32,
     /// An error or a stop.
     pub danger: Color32,
     /// A caution.
@@ -70,6 +72,7 @@ impl Tokens {
             text_dim: Color32::from_rgb(164, 164, 182),
             text_faint: Color32::from_rgb(104, 104, 122),
             accent: Color32::from_rgb(140, 110, 255),
+            accent_soft: Color32::from_rgba_premultiplied(31, 24, 56, 56),
             danger: Color32::from_rgb(240, 98, 110),
             warning: Color32::from_rgb(236, 180, 76),
             radius_sm: 4,
@@ -127,6 +130,17 @@ pub(crate) fn install_fonts(ctx: &Context) {
 /// A semi-bold Inter at `size`, for headings.
 pub(crate) fn semibold(size: f32) -> FontId {
     FontId::new(size, FontFamily::Name(SEMIBOLD.into()))
+}
+
+/// `semibold`, or the plain face for the frame before the fonts are bound
+/// (a family is bound at the pass after `set_fonts`).
+fn semibold_now(ctx: &Context, size: f32) -> FontId {
+    let family = FontFamily::Name(SEMIBOLD.into());
+    if ctx.fonts(|f| f.families().contains(&family)) {
+        FontId::new(size, family)
+    } else {
+        FontId::proportional(size)
+    }
 }
 
 /// Sets egui's visuals and style from `t`.
@@ -201,11 +215,93 @@ pub(crate) fn apply(ctx: &Context, t: &Tokens) {
             (TextStyle::Monospace, FontId::monospace(12.0)),
         ]
         .into();
-        s.spacing.item_spacing = egui::vec2(8.0, 5.0);
+        s.spacing.item_spacing = egui::vec2(8.0, 4.0);
         s.spacing.button_padding = egui::vec2(9.0, 3.0);
         s.spacing.menu_margin = egui::Margin::same(6);
-        s.spacing.interact_size = egui::vec2(24.0, 20.0);
+        s.spacing.interact_size = egui::vec2(24.0, 18.0);
     });
+}
+
+/// The frame of a panel that holds cards: the window colour with room around.
+pub(crate) fn panel_frame() -> egui::Frame {
+    egui::Frame::NONE
+        .fill(Tokens::luna().chrome)
+        .inner_margin(egui::Margin::same(5))
+}
+
+/// A card: a raised, rounded surface with its own margin, for one group of
+/// controls. Fills the width it is given.
+pub(crate) fn card<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let t = Tokens::luna();
+    let width = ui.available_width();
+    egui::Frame::NONE
+        .fill(t.card)
+        .stroke(Stroke::new(1.0_f32, t.border))
+        .corner_radius(CornerRadius::same(t.radius))
+        .inner_margin(egui::Margin::symmetric(9, 5))
+        .show(ui, |ui| {
+            ui.set_min_width(width - 20.0);
+            add(ui)
+        })
+        .inner
+}
+
+/// A section title: semi-bold, in the accent family so the eye finds it.
+pub(crate) fn section_label(ui: &mut egui::Ui, text: &str) {
+    let t = Tokens::luna();
+    ui.label(
+        egui::RichText::new(text)
+            .font(semibold_now(ui.ctx(), 12.5))
+            .color(t.text_dim),
+    );
+}
+
+/// A table column heading: small, dimmed.
+pub(crate) fn column_head(ui: &mut egui::Ui, text: &str) {
+    ui.label(
+        egui::RichText::new(text)
+            .size(11.5)
+            .color(Tokens::luna().text_faint),
+    );
+}
+
+/// A pill-shaped tab: filled with the soft accent when selected.
+pub(crate) fn pill_tab(ui: &mut egui::Ui, selected: bool, text: &str) -> egui::Response {
+    let t = Tokens::luna();
+    let font = if selected {
+        semibold_now(ui.ctx(), 12.5)
+    } else {
+        FontId::proportional(12.5)
+    };
+    let color = if selected { t.accent } else { t.text_dim };
+    let galley = ui.painter().layout_no_wrap(text.to_owned(), font, color);
+    let size = galley.size() + egui::vec2(20.0, 8.0);
+    let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
+    if ui.is_rect_visible(rect) {
+        let fill = if selected {
+            t.accent_soft
+        } else if resp.hovered() {
+            t.hover
+        } else {
+            Color32::TRANSPARENT
+        };
+        ui.painter()
+            .rect_filled(rect, CornerRadius::same(t.radius_lg), fill);
+        if selected {
+            ui.painter().rect_stroke(
+                rect,
+                CornerRadius::same(t.radius_lg),
+                Stroke::new(1.0_f32, t.accent.linear_multiply(0.6)),
+                egui::StrokeKind::Inside,
+            );
+        }
+        ui.painter().galley(
+            egui::pos2(rect.min.x + 10.0, rect.center().y - galley.size().y / 2.0),
+            galley,
+            color,
+        );
+    }
+    resp
 }
 
 #[cfg(test)]

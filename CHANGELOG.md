@@ -7,6 +7,7 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ## [Unreleased]
 
+- GUI: second pass on the look. The debugger windows lay their panels out as cards on the window colour, with the accent on the active tab and on hover; section titles are semi-bold, table headings small and dim; the toolbar, status bar, main-window menus (Open ROM, Reload, Quit, Pause, Fullscreen, Step frame, Reset, screenshot) and the debugger's workspace menu carry Lucide icons, and the debugger window's title bar uses them. Register fields size to the font. Same line counts as before.
 - GUI: a new look for the debugger windows and menus. Colours, radii, spacing and type sizes come from one set of tokens (`ui/theme.rs`); Inter (text) and JetBrains Mono (addresses, registers) are embedded (SIL OFL 1.1); the toolbar and status bar use Lucide icons (ISC). The release binary grows by about 2.2 MB. Licences in `NOTICE`.
 ## [1.44.0] — 2026-11-14
 

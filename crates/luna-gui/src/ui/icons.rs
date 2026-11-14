@@ -25,12 +25,36 @@ pub(crate) enum Icon {
     Dot,
     /// A stopwatch.
     Timer,
+    /// Folder.
+    Folder,
+    /// Refresh.
+    Refresh,
+    /// Power.
+    Power,
+    /// Fullscreen.
+    Fullscreen,
+    /// Step one frame.
+    StepFrame,
+    /// Reset.
+    Reset,
+    /// Camera.
+    Camera,
+    /// Close.
+    Close,
+    /// A right chevron: collapsed.
+    ChevronRight,
+    /// A down chevron: expanded.
+    ChevronDown,
+    /// Import a file.
+    FileDown,
+    /// Export a file.
+    FileUp,
 }
 
 impl Icon {
     /// Every icon, for the tests.
     #[cfg(test)]
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 20] = [
         Self::Play,
         Self::Pause,
         Self::StepInto,
@@ -39,6 +63,18 @@ impl Icon {
         Self::Settings,
         Self::Dot,
         Self::Timer,
+        Self::Folder,
+        Self::Refresh,
+        Self::Power,
+        Self::Fullscreen,
+        Self::StepFrame,
+        Self::Reset,
+        Self::Camera,
+        Self::Close,
+        Self::ChevronRight,
+        Self::ChevronDown,
+        Self::FileDown,
+        Self::FileUp,
     ];
 
     const fn svg(self) -> &'static str {
@@ -51,6 +87,18 @@ impl Icon {
             Self::Settings => include_str!("../../assets/icons/settings.svg"),
             Self::Dot => include_str!("../../assets/icons/circle.svg"),
             Self::Timer => include_str!("../../assets/icons/timer.svg"),
+            Self::Folder => include_str!("../../assets/icons/folder-open.svg"),
+            Self::Refresh => include_str!("../../assets/icons/refresh-cw.svg"),
+            Self::Power => include_str!("../../assets/icons/power.svg"),
+            Self::Fullscreen => include_str!("../../assets/icons/maximize.svg"),
+            Self::StepFrame => include_str!("../../assets/icons/skip-forward.svg"),
+            Self::Reset => include_str!("../../assets/icons/rotate-ccw.svg"),
+            Self::Camera => include_str!("../../assets/icons/camera.svg"),
+            Self::Close => include_str!("../../assets/icons/x.svg"),
+            Self::ChevronRight => include_str!("../../assets/icons/chevron-right.svg"),
+            Self::ChevronDown => include_str!("../../assets/icons/chevron-down.svg"),
+            Self::FileDown => include_str!("../../assets/icons/file-down.svg"),
+            Self::FileUp => include_str!("../../assets/icons/file-up.svg"),
         }
     }
 
@@ -70,6 +118,17 @@ impl Icon {
             &Default::default(),
         )
     }
+}
+
+/// A menu or list entry with its icon.
+pub(crate) fn item(
+    ui: &mut egui::Ui,
+    icon: Icon,
+    text: impl Into<egui::WidgetText>,
+) -> egui::Response {
+    let tint = ui.visuals().widgets.inactive.fg_stroke.color;
+    let img = image(ui.ctx(), icon, 14.0, tint);
+    ui.add(egui::Button::image_and_text(img, text))
 }
 
 type Cache = HashMap<(Icon, u32), TextureHandle>;

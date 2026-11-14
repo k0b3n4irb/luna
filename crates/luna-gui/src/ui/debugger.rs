@@ -15,6 +15,7 @@
 #![allow(clippy::suboptimal_flops)]
 
 use super::icons::{self, Icon};
+use super::theme;
 use luna_api::{
     BlockView, BreakpointInfo, CallStackRow, DebuggerStatus, FindResult, FunctionRow, GotoResult,
     Label, LabelRow, ListingOptions, ListingPos, ListingRow, MemoryKind, RowCode, RowKind,
@@ -378,48 +379,73 @@ pub(crate) fn debugger_body(ui: &mut egui::Ui, view: &DebuggerView) -> Vec<Debug
         .data_mut(|d| d.get_temp(state_id()).unwrap_or_default());
     shortcuts(ui, view, &mut st, &mut out);
 
-    egui::Panel::top("dbg_menu").show_inside(ui, |ui| {
-        menu_bar(ui, view, &mut st, &mut out);
-        toolbar(ui, view, &mut st, &mut out);
-    });
-    egui::Panel::bottom("dbg_status_bar").show_inside(ui, |ui| status_bar(ui, view));
+    egui::Panel::top("dbg_menu")
+        .frame(theme::panel_frame())
+        .show_separator_line(false)
+        .show_inside(ui, |ui| {
+            menu_bar(ui, view, &mut st, &mut out);
+            toolbar(ui, view, &mut st, &mut out);
+        });
+    egui::Panel::bottom("dbg_status_bar")
+        .frame(theme::panel_frame())
+        .show_separator_line(false)
+        .show_inside(ui, |ui| status_bar(ui, view));
     if view.settings.show_settings {
         egui::Panel::right("dbg_settings")
+            .frame(theme::panel_frame())
+            .show_separator_line(false)
             .resizable(true)
             .default_size(190.0)
             .show_inside(ui, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| settings_panel(ui, view, &mut out));
+                theme::card(ui, |ui| {
+                    egui::ScrollArea::vertical().show(ui, |ui| settings_panel(ui, view, &mut out));
+                });
             });
     }
     egui::Panel::bottom("dbg_bottom")
+        .frame(theme::panel_frame())
+        .show_separator_line(false)
         .resizable(true)
-        .default_size(170.0)
+        .default_size(142.0)
         .show_inside(ui, |ui| {
             ui.columns(3, |cols| {
-                watch_pane(&mut cols[0], view, &mut st, &mut out);
-                breakpoints_pane(&mut cols[1], view, &mut st, &mut out);
-                call_stack_pane(&mut cols[2], view, &mut out);
+                theme::card(&mut cols[0], |ui| watch_pane(ui, view, &mut st, &mut out));
+                theme::card(&mut cols[1], |ui| {
+                    breakpoints_pane(ui, view, &mut st, &mut out);
+                });
+                theme::card(&mut cols[2], |ui| call_stack_pane(ui, view, &mut out));
             });
         });
     egui::Panel::right("dbg_right")
+        .frame(theme::panel_frame())
+        .show_separator_line(false)
         .resizable(true)
-        .default_size(330.0)
+        .default_size(352.0)
         .show_inside(ui, |ui| {
             egui::Panel::top("dbg_status")
+                .frame(egui::Frame::NONE)
+                .show_separator_line(false)
                 .resizable(true)
-                .default_size(250.0)
+                .default_size(244.0)
                 .show_inside(ui, |ui| {
-                    egui::ScrollArea::vertical()
-                        .id_salt("dbg_status_scroll")
-                        .show(ui, |ui| status_pane(ui, view, &mut st, &mut out));
+                    theme::card(ui, |ui| {
+                        egui::ScrollArea::vertical()
+                            .id_salt("dbg_status_scroll")
+                            .show(ui, |ui| status_pane(ui, view, &mut st, &mut out));
+                    });
                 });
-            egui::CentralPanel::default().show_inside(ui, |ui| {
-                tabs(ui, view, &mut st, &mut out);
-            });
+            egui::CentralPanel::default()
+                .frame(egui::Frame::NONE)
+                .show_inside(ui, |ui| {
+                    ui.add_space(4.0);
+                    theme::card(ui, |ui| tabs(ui, view, &mut st, &mut out));
+                });
         });
-    egui::CentralPanel::default().show_inside(ui, |ui| {
-        code_view(ui, view, &mut st, &mut out);
-    });
+    egui::CentralPanel::default()
+        .frame(theme::panel_frame())
+        .show_inside(ui, |ui| {
+            theme::card(ui, |ui| code_view(ui, view, &mut st, &mut out));
+        });
     dialogs(ui, view, &mut st, &mut out);
     ui.ctx().data_mut(|d| d.insert_temp(state_id(), st));
     out
@@ -590,7 +616,12 @@ fn menu_bar(
                     ("Import labels…", DebuggerAction::ImportLabels),
                     ("Export labels…", DebuggerAction::ExportLabels),
                 ] {
-                    if ui.button(label).clicked() {
+                    let icon = if label.starts_with("Import") {
+                        Icon::FileDown
+                    } else {
+                        Icon::FileUp
+                    };
+                    if icons::item(ui, icon, label).clicked() {
                         out.push(act);
                         ui.close();
                     }
@@ -600,14 +631,18 @@ fn menu_bar(
                     ("Import watch entries…", DebuggerAction::ImportWatches),
                     ("Export watch entries…", DebuggerAction::ExportWatches),
                 ] {
-                    if ui.button(label).clicked() {
+                    let icon = if label.starts_with("Import") {
+                        Icon::FileDown
+                    } else {
+                        Icon::FileUp
+                    };
+                    if icons::item(ui, icon, label).clicked() {
                         out.push(act);
                         ui.close();
                     }
                 }
                 ui.separator();
-                if ui
-                    .button("Reset workspace")
+                if icons::item(ui, Icon::Reset, "Reset workspace")
                     .on_hover_text("Empty the watch list, remove every breakpoint and reset the labels to their defaults.")
                     .clicked()
                 {
@@ -969,7 +1004,7 @@ fn status_bar(ui: &mut egui::Ui, view: &DebuggerView) {
 
 fn settings_panel(ui: &mut egui::Ui, view: &DebuggerView, out: &mut Vec<DebuggerAction>) {
     let mut s = view.settings;
-    ui.strong("Disassembly settings");
+    theme::section_label(ui, "Disassembly settings");
     let block = |ui: &mut egui::Ui, label: &str, v: &mut BlockView| {
         ui.horizontal(|ui| {
             ui.label(label);
@@ -1008,7 +1043,7 @@ fn settings_panel(ui: &mut egui::Ui, view: &DebuggerView, out: &mut Vec<Debugger
     ui.checkbox(&mut s.listing.jump_labels, "Show jump/sub labels");
     ui.checkbox(&mut s.listing.lower_case, "Use lower case");
     ui.separator();
-    ui.strong("Break on…");
+    theme::section_label(ui, "Break on…");
     if view.cpu == luna_api::ListingCpu::Snes {
         let mut on = view.break_on;
         for (i, name) in ["BRK", "COP", "WDM", "STP"].iter().enumerate() {
@@ -1020,7 +1055,7 @@ fn settings_panel(ui: &mut egui::Ui, view: &DebuggerView, out: &mut Vec<Debugger
     }
     ui.checkbox(&mut s.break_on_open, "Debugger opened");
     ui.separator();
-    ui.strong("Misc. settings");
+    theme::section_label(ui, "Misc. settings");
     ui.checkbox(&mut s.bring_to_front, "Bring to front on break");
     ui.checkbox(&mut s.keep_centered, "Keep active statement in the center");
     ui.checkbox(&mut s.refresh_running, "Refresh while running");
@@ -1639,6 +1674,14 @@ fn code_menu(
 // The Status pane
 // ---------------------------------------------------------------------------
 
+/// The width of a register field of `digits` hex digits in the monospace font,
+/// with the text edit's margins.
+fn reg_width(ui: &egui::Ui, digits: usize) -> f32 {
+    let font = egui::TextStyle::Monospace.resolve(ui.style());
+    let digit = ui.fonts_mut(|f| f.glyph_width(&font, '0'));
+    digit * digits as f32 + 14.0
+}
+
 fn status_pane(
     ui: &mut egui::Ui,
     view: &DebuggerView,
@@ -1681,7 +1724,7 @@ fn status_pane(
                 let r = ui.add_enabled(
                     editable,
                     egui::TextEdit::singleline(buf)
-                        .desired_width(8.0 * width as f32 + 6.0)
+                        .desired_width(reg_width(ui, width))
                         .font(egui::TextStyle::Monospace),
                 );
                 if r.lost_focus()
@@ -1820,7 +1863,7 @@ fn spc_status_pane(
                 let r = ui.add_enabled(
                     editable,
                     egui::TextEdit::singleline(buf)
-                        .desired_width(8.0 * width as f32 + 6.0)
+                        .desired_width(reg_width(ui, width))
                         .font(egui::TextStyle::Monospace),
                 );
                 if r.lost_focus()
@@ -1922,8 +1965,10 @@ fn tabs(ui: &mut egui::Ui, view: &DebuggerView, st: &mut UiState, out: &mut Vec<
             (Tab::Controllers, "Controllers"),
         ] {
             // The SPC700 has no function list nor controllers (Mesen2's).
-            if main || matches!(t, Tab::Labels | Tab::FindResults) {
-                ui.selectable_value(&mut st.tab, t, name);
+            if (main || matches!(t, Tab::Labels | Tab::FindResults))
+                && theme::pill_tab(ui, st.tab == t, name).clicked()
+            {
+                st.tab = t;
             }
         }
     });
@@ -1938,9 +1983,9 @@ fn tabs(ui: &mut egui::Ui, view: &DebuggerView, st: &mut UiState, out: &mut Vec<
                         .striped(true)
                         .num_columns(3)
                         .show(ui, |ui| {
-                            ui.strong("Function");
-                            ui.strong("CPU Addr");
-                            ui.strong("ROM Addr");
+                            theme::column_head(ui, "Function");
+                            theme::column_head(ui, "CPU Addr");
+                            theme::column_head(ui, "ROM Addr");
                             ui.end_row();
                             for f in &view.functions {
                                 let name = f.name.clone().unwrap_or_else(|| "<no label>".into());
@@ -1967,8 +2012,8 @@ fn tabs(ui: &mut egui::Ui, view: &DebuggerView, st: &mut UiState, out: &mut Vec<
                         .striped(true)
                         .num_columns(2)
                         .show(ui, |ui| {
-                            ui.strong("Address");
-                            ui.strong("Result");
+                            theme::column_head(ui, "Address");
+                            theme::column_head(ui, "Result");
                             ui.end_row();
                             for r in &view.find_results {
                                 if ui
@@ -2029,10 +2074,10 @@ fn labels_tab(
                 .striped(true)
                 .num_columns(4)
                 .show(ui, |ui| {
-                    ui.strong("Label");
-                    ui.strong("CPU Addr");
-                    ui.strong("ROM Addr");
-                    ui.strong("Comment");
+                    theme::column_head(ui, "Label");
+                    theme::column_head(ui, "CPU Addr");
+                    theme::column_head(ui, "ROM Addr");
+                    theme::column_head(ui, "Comment");
                     ui.end_row();
                     for l in &view.labels {
                         let resp = ui.selectable_label(
@@ -2114,7 +2159,7 @@ fn watch_pane(
     out: &mut Vec<DebuggerAction>,
 ) {
     ui.horizontal(|ui| {
-        ui.strong("Watch");
+        theme::section_label(ui, "Watch");
         ui.label("?").on_hover_text(
             "Expressions in Mesen2's language: [addr] a byte, {addr} a word, #addr a long, \
              :addr the offset behind addr, labels, registers (a x y ps sp pc db d), \
@@ -2129,8 +2174,8 @@ fn watch_pane(
                 .striped(true)
                 .num_columns(2)
                 .show(ui, |ui| {
-                    ui.strong("Name");
-                    ui.strong("Value");
+                    theme::column_head(ui, "Name");
+                    theme::column_head(ui, "Value");
                     ui.end_row();
                     for (i, w) in view.watches.iter().enumerate() {
                         let editing = st.watch_edit.as_ref().is_some_and(|(j, _)| *j == i);
@@ -2319,7 +2364,7 @@ fn breakpoints_pane(
     st: &mut UiState,
     out: &mut Vec<DebuggerAction>,
 ) {
-    ui.strong("Breakpoints");
+    theme::section_label(ui, "Breakpoints");
     egui::ScrollArea::vertical()
         .id_salt("dbg_bps")
         .show(ui, |ui| {
@@ -2327,11 +2372,11 @@ fn breakpoints_pane(
                 .striped(true)
                 .num_columns(5)
                 .show(ui, |ui| {
-                    ui.strong("E");
-                    ui.strong("M");
-                    ui.strong("Type");
-                    ui.strong("Address");
-                    ui.strong("Condition");
+                    theme::column_head(ui, "E");
+                    theme::column_head(ui, "M");
+                    theme::column_head(ui, "Type");
+                    theme::column_head(ui, "Address");
+                    theme::column_head(ui, "Condition");
                     ui.end_row();
                     for (b, label) in &view.breakpoints {
                         let mut e = b.enabled;
@@ -2411,7 +2456,7 @@ fn breakpoints_pane(
 }
 
 fn call_stack_pane(ui: &mut egui::Ui, view: &DebuggerView, out: &mut Vec<DebuggerAction>) {
-    ui.strong("Call Stack");
+    theme::section_label(ui, "Call Stack");
     egui::ScrollArea::vertical()
         .id_salt("dbg_stack")
         .show(ui, |ui| {
@@ -2419,9 +2464,9 @@ fn call_stack_pane(ui: &mut egui::Ui, view: &DebuggerView, out: &mut Vec<Debugge
                 .striped(true)
                 .num_columns(3)
                 .show(ui, |ui| {
-                    ui.strong("Function");
-                    ui.strong("PC Address");
-                    ui.strong("ROM Address");
+                    theme::column_head(ui, "Function");
+                    theme::column_head(ui, "PC Address");
+                    theme::column_head(ui, "ROM Address");
                     ui.end_row();
                     for r in &view.call_stack {
                         let mapped = r.absolute.is_some();

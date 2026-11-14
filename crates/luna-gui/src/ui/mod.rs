@@ -21,12 +21,12 @@ mod config;
 mod cpu_state;
 mod debugger;
 mod disasm;
-mod icons;
+pub(crate) mod icons;
 mod memory;
 mod memory_search;
 mod memory_tools;
 mod menu;
-mod theme;
+pub(crate) mod theme;
 mod widgets;
 
 pub(crate) use breakpoints::breakpoints_body;

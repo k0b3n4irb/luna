@@ -1,5 +1,7 @@
 //! Menu bar, its video menus, and the force-mapper prompt.
 
+use super::icons::{self, Icon};
+use super::theme;
 use super::{MenuAction, UiState};
 
 /// Inline "couldn't detect the mapper — load as…?" prompt (issue #88), shown
@@ -62,7 +64,7 @@ fn draw_video_menus<F: FnMut(MenuAction)>(ui: &mut egui::Ui, state: &UiState<'_>
         let fs_key = state
             .key_bindings
             .get_hotkey(crate::input::Hotkey::Fullscreen);
-        if ui.button(format!("Fullscreen ({fs_key:?})")).clicked() {
+        if icons::item(ui, Icon::Fullscreen, format!("Fullscreen ({fs_key:?})")).clicked() {
             emit(MenuAction::ToggleFullscreen);
             ui.close();
         }
@@ -144,7 +146,7 @@ pub(super) fn draw_menu_bar<F: FnMut(MenuAction)>(
         .show(ctx, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("File", |ui| {
-                    if ui.button("Open ROM…").clicked() {
+                    if icons::item(ui, Icon::Folder, "Open ROM…").clicked() {
                         emit(MenuAction::OpenRom);
                         ui.close();
                     }
@@ -170,7 +172,7 @@ pub(super) fn draw_menu_bar<F: FnMut(MenuAction)>(
                     });
                     ui.separator();
                     // Reload the ROM in place + watch-mode auto-reload (issue #93).
-                    if ui.button("Reload ROM").clicked() {
+                    if icons::item(ui, Icon::Refresh, "Reload ROM").clicked() {
                         emit(MenuAction::ReloadRom);
                         ui.close();
                     }
@@ -183,7 +185,7 @@ pub(super) fn draw_menu_bar<F: FnMut(MenuAction)>(
                         ui.close();
                     }
                     ui.separator();
-                    if ui.button("Quit").clicked() {
+                    if icons::item(ui, Icon::Power, "Quit").clicked() {
                         emit(MenuAction::Quit);
                         ui.close();
                     }
@@ -192,14 +194,26 @@ pub(super) fn draw_menu_bar<F: FnMut(MenuAction)>(
                     let pause_key = state.key_bindings.get_hotkey(crate::input::Hotkey::Pause);
                     let reset_key = state.key_bindings.get_hotkey(crate::input::Hotkey::Reset);
                     let verb = if state.paused { "Resume" } else { "Pause" };
-                    if ui.button(format!("{verb} ({pause_key:?})")).clicked() {
+                    if icons::item(
+                        ui,
+                        if state.paused {
+                            Icon::Play
+                        } else {
+                            Icon::Pause
+                        },
+                        format!("{verb} ({pause_key:?})"),
+                    )
+                    .clicked()
+                    {
                         emit(MenuAction::PauseToggle);
                         ui.close();
                     }
                     let fs_key = state
                         .key_bindings
                         .get_hotkey(crate::input::Hotkey::Fullscreen);
-                    if ui.button(format!("Fullscreen ({fs_key:?})")).clicked() {
+                    if icons::item(ui, Icon::Fullscreen, format!("Fullscreen ({fs_key:?})"))
+                        .clicked()
+                    {
                         emit(MenuAction::ToggleFullscreen);
                         ui.close();
                     }
@@ -216,11 +230,13 @@ pub(super) fn draw_menu_bar<F: FnMut(MenuAction)>(
                     let stepf_key = state
                         .key_bindings
                         .get_hotkey(crate::input::Hotkey::StepFrame);
-                    if ui.button(format!("Step frame ({stepf_key:?})")).clicked() {
+                    if icons::item(ui, Icon::StepFrame, format!("Step frame ({stepf_key:?})"))
+                        .clicked()
+                    {
                         emit(MenuAction::StepFrame);
                         ui.close();
                     }
-                    if ui.button(format!("Reset ({reset_key:?})")).clicked() {
+                    if icons::item(ui, Icon::Reset, format!("Reset ({reset_key:?})")).clicked() {
                         emit(MenuAction::Reset);
                         ui.close();
                     }
@@ -232,7 +248,7 @@ pub(super) fn draw_menu_bar<F: FnMut(MenuAction)>(
                     } else {
                         "\u{23FA} Record input"
                     };
-                    if ui.button(rec_label).clicked() {
+                    if icons::item(ui, Icon::Dot, rec_label).clicked() {
                         emit(MenuAction::ToggleInputRecording);
                         ui.close();
                     }
@@ -282,7 +298,7 @@ pub(super) fn draw_menu_bar<F: FnMut(MenuAction)>(
                 });
                 ui.menu_button("Settings", |ui| {
                     // Grouped by area (Mesen2-style).
-                    ui.label(egui::RichText::new("Audio").weak().small());
+                    theme::section_label(ui, "Audio");
                     let mut vol = i32::from(state.volume_percent);
                     if ui
                         .add(egui::Slider::new(&mut vol, 0..=100).text("Volume"))
@@ -294,7 +310,7 @@ pub(super) fn draw_menu_bar<F: FnMut(MenuAction)>(
                         emit(MenuAction::ToggleMute);
                     }
                     ui.separator();
-                    ui.label(egui::RichText::new("Video").weak().small());
+                    theme::section_label(ui, "Video");
                     draw_video_menus(ui, state, emit);
                     if ui
                         .selectable_label(state.video.show_fps, "Show FPS")
@@ -303,7 +319,7 @@ pub(super) fn draw_menu_bar<F: FnMut(MenuAction)>(
                         emit(MenuAction::ToggleShowFps);
                     }
                     ui.separator();
-                    ui.label(egui::RichText::new("Input").weak().small());
+                    theme::section_label(ui, "Input");
                     if ui
                         .selectable_label(state.show_input_config, "Controller…")
                         .clicked()
@@ -312,7 +328,7 @@ pub(super) fn draw_menu_bar<F: FnMut(MenuAction)>(
                         ui.close();
                     }
                     ui.separator();
-                    ui.label(egui::RichText::new("Hotkeys").weak().small());
+                    theme::section_label(ui, "Hotkeys");
                     if ui
                         .selectable_label(state.show_hotkey_config, "Hotkeys…")
                         .clicked()
@@ -321,7 +337,7 @@ pub(super) fn draw_menu_bar<F: FnMut(MenuAction)>(
                         ui.close();
                     }
                     ui.separator();
-                    ui.label(egui::RichText::new("Devices").weak().small());
+                    theme::section_label(ui, "Devices");
                     for port in 0u8..2 {
                         let cur = match state.port_device[port as usize] {
                             luna_api::PortDevice::Pad => "Gamepad",
@@ -353,7 +369,8 @@ pub(super) fn draw_menu_bar<F: FnMut(MenuAction)>(
                     let key = state
                         .key_bindings
                         .get_hotkey(crate::input::Hotkey::Screenshot);
-                    if ui.button(format!("Take screenshot ({key:?})")).clicked() {
+                    if icons::item(ui, Icon::Camera, format!("Take screenshot ({key:?})")).clicked()
+                    {
                         emit(MenuAction::TakeScreenshot);
                         ui.close();
                     }

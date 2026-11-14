@@ -941,10 +941,19 @@ mod tests {
             .with_size(egui::vec2(1180.0, 760.0))
             .wgpu()
             .build_ui(move |ui| {
-                crate::ui::install_dark_theme(ui.ctx());
+                // The app installs the theme once, before its first frame.
+                if !ui
+                    .ctx()
+                    .data(|d| d.get_temp::<bool>(egui::Id::new("themed")).is_some())
+                {
+                    crate::ui::install_dark_theme(ui.ctx());
+                    ui.ctx()
+                        .data_mut(|d| d.insert_temp(egui::Id::new("themed"), true));
+                }
                 let _ = crate::ui::debugger_body(ui, &view);
             });
         harness.run();
+        harness.run_steps(3);
         harness.render().unwrap().save(out).unwrap();
     }
 

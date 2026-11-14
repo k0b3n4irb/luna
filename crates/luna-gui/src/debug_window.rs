@@ -348,7 +348,7 @@ impl DebugWindows {
             // One custom frame filling the borderless window (egui's
             // `custom_window_frame` example pattern).
             egui::Frame::new()
-                .fill(egui::Color32::from_rgb(20, 20, 28))
+                .fill(ui::theme::Tokens::luna().chrome)
                 .show(ui, |ui| {
                     let app = ui.max_rect();
                     ui.expand_to_include_rect(app);
@@ -361,7 +361,7 @@ impl DebugWindows {
                     ui.painter().rect_filled(
                         egui::Rect::from_min_size(app.min, egui::vec2(app.width(), bar_fill_h)),
                         0.0,
-                        egui::Color32::from_rgb(30, 30, 42),
+                        ui::theme::Tokens::luna().card,
                     );
                     let bar =
                         egui::Rect::from_min_size(app.min, egui::vec2(app.width(), TITLE_BAR_H));
@@ -371,29 +371,19 @@ impl DebugWindows {
                         egui::Rect::from_min_size(bar.min, egui::vec2(TITLE_BAR_H, TITLE_BAR_H));
                     let tri_resp = ui.interact(tri, ui.id().with("collapse"), egui::Sense::click());
                     let tri_col = if tri_resp.hovered() {
-                        egui::Color32::from_rgb(150, 120, 255)
+                        ui::theme::Tokens::luna().accent
                     } else {
-                        egui::Color32::from_rgb(205, 205, 220)
+                        ui::theme::Tokens::luna().text_dim
                     };
-                    let c = tri.center();
-                    let pts = if collapsed {
-                        vec![
-                            c + egui::vec2(-3.0, -5.0),
-                            c + egui::vec2(4.0, 0.0),
-                            c + egui::vec2(-3.0, 5.0),
-                        ]
+                    let chevron = if collapsed {
+                        ui::icons::Icon::ChevronRight
                     } else {
-                        vec![
-                            c + egui::vec2(-5.0, -3.0),
-                            c + egui::vec2(5.0, -3.0),
-                            c + egui::vec2(0.0, 4.0),
-                        ]
+                        ui::icons::Icon::ChevronDown
                     };
-                    ui.painter().add(egui::Shape::convex_polygon(
-                        pts,
-                        tri_col,
-                        egui::Stroke::NONE,
-                    ));
+                    ui::icons::image(ui.ctx(), chevron, 14.0, tri_col).paint_at(
+                        ui,
+                        egui::Rect::from_center_size(tri.center(), egui::vec2(14.0, 14.0)),
+                    );
                     if tri_resp.clicked() {
                         want_toggle = true;
                     }
@@ -406,17 +396,14 @@ impl DebugWindows {
                     let close_resp =
                         ui.interact(close, ui.id().with("close"), egui::Sense::click());
                     let close_col = if close_resp.hovered() {
-                        egui::Color32::from_rgb(240, 120, 120)
+                        ui::theme::Tokens::luna().danger
                     } else {
-                        egui::Color32::from_rgb(205, 205, 220)
+                        ui::theme::Tokens::luna().text_dim
                     };
-                    let cc = close.center();
-                    let r = 4.0;
-                    let s = egui::Stroke::new(1.6, close_col);
-                    ui.painter()
-                        .line_segment([cc + egui::vec2(-r, -r), cc + egui::vec2(r, r)], s);
-                    ui.painter()
-                        .line_segment([cc + egui::vec2(r, -r), cc + egui::vec2(-r, r)], s);
+                    ui::icons::image(ui.ctx(), ui::icons::Icon::Close, 14.0, close_col).paint_at(
+                        ui,
+                        egui::Rect::from_center_size(close.center(), egui::vec2(14.0, 14.0)),
+                    );
                     if close_resp.clicked() {
                         want_close = true;
                     }
@@ -426,8 +413,8 @@ impl DebugWindows {
                         egui::pos2(tri.max.x + 2.0, bar.center().y),
                         egui::Align2::LEFT_CENTER,
                         panel.title(),
-                        egui::FontId::proportional(14.0),
-                        egui::Color32::from_rgb(228, 228, 238),
+                        ui::theme::semibold(13.5),
+                        ui::theme::Tokens::luna().text,
                     );
 
                     // Drag the OS window via the bar (between the buttons).
