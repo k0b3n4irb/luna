@@ -7,6 +7,13 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ## [Unreleased]
 
+## [1.44.0] — 2026-11-14
+
+Second-opinion pass: the 26 OpenSNES example ROMs, luna `a029ef7` against Mesen2, one screen per
+ROM, compared at native resolution. 25 are identical to the pixel. `color_hicolor_1792` differs
+by 3 438 pixels (rows 20-211): the known, still open finding listed in the PPU scorecard row.
+Not compared against ares in this release (no ares binary was available).
+
 - fix(ppu): the 34-sliver time over drops only the overflowing sprite's rightmost slivers, as on
   hardware. The fetch runs back to front and each sprite left to right on screen, so the sprite
   that crosses the limit keeps its leftmost slivers; luna dropped it whole. A sprite at exactly
