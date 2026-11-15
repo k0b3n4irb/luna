@@ -356,7 +356,7 @@ parked in `WAI` / `STP` under that label.
 | `--poke-at <SYMBOL>`, `--poke-hit <N>`, `--poke <NAME=HEX>` | — | Write bytes into memory when execution reaches a routine, at its N-th arrival counted from power-on, before its first instruction: the grammar and the meaning of [`luna state --poke-at`](cli-run-state.md#stopping-on-a-routine-not-on-a-frame), repeatable the same way (see below). An arrival the run never reaches is an error, exit 1. |
 | `--sym <PATH>` | auto `<rom>.sym` | Labels to fold onto. |
 | `--top <N>` | `25` | Rows printed (the JSON has them all). |
-| `--out <PATH>` | — | JSON report (`-` = stdout after the table): `{rom, from_frame, end_frame, total_mclk, instructions, frames, entries: [{symbol, addr, instructions, mclk, idle_mclk, pct, pcs, per_frame: {max, max_frame, mean, frames} \| null}], budgets: [{symbol, limit, max, max_frame, ok}], frame_series: [{frame, active_mclk, idle_mclk, cpu_mclk, dma_mclk, hdma_mclk, refresh_mclk, refresh_in_wai_mclk, total_mclk, nmi, lag}], worst_frames: [{…the same fields, entries: [{symbol, addr, mclk}]}], frame_summary: {frames, active_mean, active_max, active_max_frame, total_mean, lag_frames, lag_run, lag_run_frame, lag_runs: [{frame, length}], gates: [{gate, limit, value, frame, ok}]}}`. `per_frame` is the row's master cycles per **completed** PPU frame in the window: `max` (and the frame that paid it), `mean` over every completed frame (a frame the row did not run in counts 0), `frames` it ran in; `null` when no frame completed while it ran. The trailing partial frame is never counted. |
+| `--out <PATH>` | — | JSON report (`-` = stdout after the table): `{rom, from_frame, end_frame, total_mclk, instructions, frames, entries: [{symbol, addr, instructions, mclk, idle_mclk, pct, wram, pcs, per_frame: {max, max_frame, mean, frames} \| null}], budgets: [{symbol, limit, max, max_frame, ok}], frame_series: [{frame, active_mclk, idle_mclk, cpu_mclk, dma_mclk, hdma_mclk, refresh_mclk, refresh_in_wai_mclk, total_mclk, nmi, lag}], worst_frames: [{…the same fields, entries: [{symbol, addr, mclk}]}], frame_summary: {frames, active_mean, active_max, active_max_frame, total_mean, lag_frames, lag_run, lag_run_frame, lag_runs: [{frame, length}], gates: [{gate, limit, value, frame, ok}]}}`. `per_frame` is the row's master cycles per **completed** PPU frame in the window: `max` (and the frame that paid it), `mean` over every completed frame (a frame the row did not run in counts 0), `frames` it ran in; `null` when no frame completed while it ran. The trailing partial frame is never counted. |
 | `--frames-out <PATH>` | — | The window **frame by frame**, as CSV: `frame,active_mclk,idle_mclk,cpu_mclk,dma_mclk,hdma_mclk,refresh_mclk,total_mclk,nmi,lag,refresh_in_wai_mclk`, one row per completed frame. The same rows are `frame_series` in `--out`. See *Frame by frame* below. |
 | `--worst <N>` | `0` | Print the per-symbol table of the `N` heaviest frames (by `active_mclk`); they are `worst_frames` in `--out`. |
 | `--max-frame-mclk <N>` | — | Gate: no completed frame may use more than `N` active master cycles, else **exit 1**. |
@@ -694,6 +694,14 @@ SPC7110), and for a table loaded with no ROM, the rule is the bank-only one:
 system banks) never takes a ROM PC; with no ROM label before it, the PC goes
 to the 256-byte page row (`$00:8200 (no symbol)`). The row's `addr` is the
 label's own.
+
+**Code that runs from RAM.** A PC in WRAM (`$7E`/`$7F`, or the low 8 KB mirror in the system banks) is code
+copied there, such as the `MVN` block move a `memcpy` writes on the stack. It never folds onto a label:
+a data label near the address says nothing about code, and it used to take the cost (a `memcpy` of 37 000
+master clocks a frame showed under a variable, and moved from one variable to the next when RAM grew). Each
+256-byte page of such code gets its own row, `[code in RAM] $7E:0E00`, with `"wram": true` in the JSON
+(`addr` is the page, the low-RAM mirror counted as bank `$7E`). To know which routine ran there, read the
+caller's row, or `--call-stack` on a `state` run.
 
 > **Local labels split a routine's row.** An assembler that emits its
 > internal labels (WLA-DX writes `NmiHandler@oam_done`, `@mp5_done`, …)

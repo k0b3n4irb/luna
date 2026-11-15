@@ -1153,7 +1153,7 @@ pub struct ProfileResult {
     /// denominator).
     pub frames: u64,
     /// Rows, heaviest `mclk` first: `{symbol, addr, instructions, mclk,
-    /// idle_mclk, pct, pcs, per_frame: {max, max_frame, mean, frames} | null}`
+    /// idle_mclk, pct, wram, pcs, per_frame: {max, max_frame, mean, frames} | null}`
     /// — `per_frame` is the row's master cycles per completed PPU frame,
     /// the number a VBlank-budget gate compares against.
     pub entries: Vec<luna_api::ProfileEntry>,

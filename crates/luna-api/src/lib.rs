@@ -1138,6 +1138,19 @@ pub struct MclkBuckets {
     pub total: u64,
 }
 
+/// The 256-byte page of WRAM (as bank `$7E`/`$7F`) a PC executes from, or
+/// `None` for a PC outside RAM. The 8 KB low-RAM mirror in banks
+/// `$00-$3F` / `$80-$BF` is the same memory as `$7E:0000-1FFF`.
+const fn ram_page(pc: u32) -> Option<u32> {
+    let bank = pc >> 16;
+    let off = pc & 0xFFFF;
+    match bank {
+        0x7E | 0x7F => Some(pc & 0xFF_FF00),
+        0x00..=0x3F | 0x80..=0xBF if off < 0x2000 => Some(0x7E_0000 | (off & 0xFF00)),
+        _ => None,
+    }
+}
+
 impl From<&luna_core::MclkBuckets> for MclkBuckets {
     fn from(b: &luna_core::MclkBuckets) -> Self {
         Self {
@@ -1170,6 +1183,10 @@ pub struct ProfileEntry {
     pub idle_mclk: u64,
     /// `mclk` as a percentage of the profile's total.
     pub pct: f64,
+    /// The row is code executing from RAM (a routine copied there, such as
+    /// a `MVN` block move): its `symbol` is `[code in RAM] $7E:PP00`, never
+    /// a data label.
+    pub wram: bool,
     /// Distinct instruction addresses folded into this row.
     pub pcs: u32,
     /// The row's cost per PPU frame over the completed frames of the
@@ -5864,10 +5881,18 @@ impl Emulator {
         Ok(())
     }
 
-    /// The row a profiled PC folds onto: the nearest loaded `.sym` label
-    /// at or below it in the same bank — and, for a PC in ROM, in the banks
-    /// that mirror it, never a RAM label — else its 256-byte page.
+    /// The row a profiled PC folds onto: a PC executing from RAM goes to its
+    /// own `[code in RAM]` page row (a data label near it says nothing about
+    /// code); any other PC goes to the nearest loaded `.sym` label at or
+    /// below it in the same bank — and, for a PC in ROM, in the banks that
+    /// mirror it, never a RAM label — else its 256-byte page.
     fn profile_key(syms: Option<&SymbolTable>, pc: u32) -> (String, u32) {
+        if let Some(page) = ram_page(pc) {
+            return (
+                format!("[code in RAM] ${:02X}:{:04X}", page >> 16, page & 0xFFFF),
+                page,
+            );
+        }
         syms.and_then(|t| {
             t.nearest_label(pc)
                 .map(|(name, addr)| (name.to_string(), addr))
@@ -6025,6 +6050,7 @@ impl Emulator {
                     } else {
                         s.mclk as f64 * 100.0 / total_mclk as f64
                     },
+                    wram: ram_page(addr).is_some(),
                     pcs,
                     per_frame,
                 }
