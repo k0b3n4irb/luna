@@ -642,7 +642,7 @@ fn profile_names_code_running_in_ram_apart_from_the_data_label_beside_it() {
     code.extend([0x5C, 0x00, 0x0E, 0x7E]); // jml $7E:0E00: NOP ; NOP ; JMP $0E00
     let mut e = Emulator::new();
     e.load_rom_bytes(demo_lorom_with(&code, None)).unwrap();
-    e.load_symbols_str("[labels]\n00:8000 main\n7E:0E00 text_cursor_y\n");
+    e.load_symbols_str("[labels]\n00:8000 main\n7E:0E00 data_var\n");
     e.enable_profile().unwrap();
     e.step(300).unwrap();
     let r = e.take_profile().unwrap();
@@ -653,7 +653,7 @@ fn profile_names_code_running_in_ram_apart_from_the_data_label_beside_it() {
         .unwrap_or_else(|| panic!("no RAM row: {r:?}"));
     assert!(ram.wram && ram.mclk > 0 && ram.addr == 0x7E_0E00, "{ram:?}");
     assert!(
-        r.entries.iter().all(|x| x.symbol != "text_cursor_y"),
+        r.entries.iter().all(|x| x.symbol != "data_var"),
         "the data label took code: {r:?}"
     );
     let main = r.entries.iter().find(|x| x.symbol == "main").unwrap();
