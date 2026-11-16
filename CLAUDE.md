@@ -7,36 +7,12 @@ belongs in `docs/`.
 
 ## What luna is
 
-A cycle-accurate-ish SNES emulator written in Rust. 12-crate workspace:
-
-- `crates/luna-bus/` — foundation: `Bus` trait, `Addr24`, `MapperKind`
-  enum, the per-mapper shims (LoROM / HiROM / ExHiROM / SA-1 /
-  Super FX / S-DD1; the DSP-1 mapper lives in `luna-core`). Used by
-  every CPU and the system glue.
-- `crates/luna-cartridge/` — ROM header parser, mapper detection.
-- `crates/luna-cpu-65c816/`, `crates/luna-cpu-spc700/` — CPU cores.
-  Standalone, no SNES-specific glue — usable from any consumer.
-- `crates/luna-cpu-upd96050/` — NEC uPD7725 / uPD96050 DSP core (drives
-  DSP-1, etc.); standalone like the other CPU cores.
-- `crates/luna-apu/` — SPC700 bridge + S-DSP (cycle-accurate ares port
-  in `src/dsp.rs`, see commit `7a5c599`).
-- `crates/luna-ppu/` — PPU + renderer + compositor.
-- `crates/luna-core/` — system glue. Owns the top-level `Snes` struct,
-  the CPU-driven master-clock scheduler, and the **DMA + coprocessor**
-  (SA-1 chip side, DSP-1) subsystems as `crate::dma` and `crate::coproc` modules
-  (merged from the former `luna-dma` / `luna-coproc` crates in
-  commit `1398a2c`).
-- `crates/luna-api/` — introspection surface; produces serialisable
-  `EmulatorState` snapshots for the CLI, GUI, and MCP server.
-- `crates/luna-mcp-server/` — MCP transport (the GUI does not use it;
-  invoked from `luna mcp` in the CLI binary).
-- `crates/luna-cli/` — the `luna` binary (`luna run` / `luna state` /
-  `luna test` / `luna mcp` and more; `luna --help` lists the subcommands).
-- `crates/luna-gui/` — hand-rolled debugger UI (winit + pixels +
-  egui-wgpu; eframe was removed 2026-05-28). Owns the dedicated emu
-  thread (`src/emu_thread.rs`, video-as-clock frame limiter) and the
-  cpal output stream (`src/audio.rs`, with 6-point cubic Hermite
-  resampler, dynamic rate control + 5 Hz DC blocker).
+A cycle-accurate-ish SNES emulator in Rust, a 12-crate workspace (`crates/`,
+see `Cargo.toml`): `luna-bus`, `luna-cartridge`, the CPU cores (`luna-cpu-65c816`,
+`-spc700`, `-upd96050`), `luna-apu`, `luna-ppu`, `luna-core` (system glue, scheduler,
+DMA + coprocessors), `luna-api` (introspection surface, the only thing front-ends
+drive), `luna-mcp-server`, `luna-cli` (the `luna` binary, `luna --help`) and
+`luna-gui` (winit + pixels + egui-wgpu; emu thread, cpal audio).
 
 ## Rules (`.claude/rules/`)
 
